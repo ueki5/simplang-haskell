@@ -32,10 +32,10 @@ main = do
             <> header "hs006 - x86-64 native code generator"
         )
   source <- readFile (sourceFile opts)
-  case tokenize source >>= parse of
+  case tokenize source >>= parse >>= compile of
     Left err -> putStrLn ("Error: " ++ err) >> exitFailure
-    Right ast -> do
-      let asm = codegen (compile ast)
+    Right instrs -> do
+      let asm = codegen instrs
       tmpDir <- getTemporaryDirectory
       (tmpPath, tmpHandle) <- openTempFile tmpDir "hs006.s"
       hPutStr tmpHandle asm

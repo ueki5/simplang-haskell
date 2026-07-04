@@ -1,9 +1,17 @@
-module Compiler (Token (..), Expr (..), Instr (..), tokenize, parse, compile, run) where
+module Compiler (Token (..), Expr (..), Stmt (..), Instr (..), Program, tokenize, parse, compile, run) where
 
-import Data.Char (isDigit, isSpace)
+import Control.Monad (foldM, when)
+import Data.Char (isAlpha, isAlphaNum, isDigit, isSpace)
+import Data.Map (Map)
+import qualified Data.Map as Map
 
 data Token
   = TInt Int
+  | TIdent String
+  | TLet
+  | TColon
+  | TAssign
+  | TSemicolon
   | TPlus
   | TMinus
   | TStar
@@ -14,12 +22,21 @@ data Token
 
 data Expr
   = Lit Int
+  | Var String
   | Add Expr Expr
   | Sub Expr Expr
   | Mul Expr Expr
   | Div Expr Expr
   | Neg Expr
   deriving (Show, Eq)
+
+data Stmt
+  = SLet String Expr
+  | SAssign String Expr
+  deriving (Show, Eq)
+
+-- 文の列 + 必須の末尾式
+type Program = ([Stmt], Expr)
 
 data Instr
   = Push Int
@@ -28,6 +45,8 @@ data Instr
   | IMul
   | IDiv
   | INeg
+  | Load Int
+  | Store Int
   deriving (Show, Eq)
 
 -- Lexer
@@ -39,28 +58,82 @@ tokenize (c : cs)
   | isDigit c =
       let (digits, rest) = span isDigit (c : cs)
        in (TInt (read digits) :) <$> tokenize rest
+  | isAlpha c =
+      let (ident, rest) = span (\ch -> isAlphaNum ch || ch == '_') (c : cs)
+       in if ident == "let"
+            then (TLet :) <$> tokenize rest
+            else (TIdent ident :) <$> tokenize rest
   | c == '+' = (TPlus :) <$> tokenize cs
   | c == '-' = (TMinus :) <$> tokenize cs
   | c == '*' = (TStar :) <$> tokenize cs
   | c == '/' = (TSlash :) <$> tokenize cs
   | c == '(' = (TLParen :) <$> tokenize cs
   | c == ')' = (TRParen :) <$> tokenize cs
+  | c == ':' = (TColon :) <$> tokenize cs
+  | c == '=' = (TAssign :) <$> tokenize cs
+  | c == ';' = (TSemicolon :) <$> tokenize cs
   | otherwise = Left ("unexpected character: " ++ [c])
 
 -- Parser
 --
+-- program ::= stmt* expr
+-- stmt    ::= let-stmt | assign-stmt
+-- let-stmt    ::= 'let' IDENT ':' 'i64' '=' expr ';'
+-- assign-stmt ::= IDENT '=' expr ';'
 -- expr   ::= term   (('+' | '-') term)*
 -- term   ::= factor (('*' | '/') factor)*
--- factor ::= INT | '(' expr ')' | '-' factor
+-- factor ::= INT | IDENT | '(' expr ')' | '-' factor
 
 type ParseResult a = Either String (a, [Token])
 
-parse :: [Token] -> Either String Expr
+parse :: [Token] -> Either String Program
 parse tokens = do
-  (expr, rest) <- parseExpr tokens
-  case rest of
-    [] -> Right expr
+  (stmts, rest) <- parseStmts tokens
+  (expr, rest') <- parseExpr rest
+  case rest' of
+    [] -> Right (stmts, expr)
     (t : _) -> Left ("unexpected token: " ++ show t)
+
+parseStmts :: [Token] -> ParseResult [Stmt]
+parseStmts (TLet : rest) = do
+  (stmt, rest') <- parseLetStmt rest
+  (stmts, rest'') <- parseStmts rest'
+  Right (stmt : stmts, rest'')
+parseStmts (TIdent name : TAssign : rest) = do
+  (stmt, rest') <- parseAssignStmt name rest
+  (stmts, rest'') <- parseStmts rest'
+  Right (stmt : stmts, rest'')
+parseStmts tokens = Right ([], tokens)
+
+parseLetStmt :: [Token] -> ParseResult Stmt
+parseLetStmt tokens = do
+  (name, rest) <- expectIdent tokens
+  rest' <- expectToken TColon rest
+  (ty, rest'') <- expectIdent rest'
+  if ty /= "i64"
+    then Left ("unsupported type: " ++ ty)
+    else do
+      rest3 <- expectToken TAssign rest''
+      (expr, rest4) <- parseExpr rest3
+      rest5 <- expectToken TSemicolon rest4
+      Right (SLet name expr, rest5)
+
+parseAssignStmt :: String -> [Token] -> ParseResult Stmt
+parseAssignStmt name tokens = do
+  (expr, rest) <- parseExpr tokens
+  rest' <- expectToken TSemicolon rest
+  Right (SAssign name expr, rest')
+
+expectIdent :: [Token] -> ParseResult String
+expectIdent (TIdent name : rest) = Right (name, rest)
+expectIdent (t : _) = Left ("expected identifier, got: " ++ show t)
+expectIdent [] = Left "expected identifier, got end of input"
+
+expectToken :: Token -> [Token] -> Either String [Token]
+expectToken tok (t : rest)
+  | t == tok = Right rest
+  | otherwise = Left ("expected " ++ show tok ++ ", got: " ++ show t)
+expectToken tok [] = Left ("expected " ++ show tok ++ ", got end of input")
 
 parseExpr :: [Token] -> ParseResult Expr
 parseExpr tokens = do
@@ -92,6 +165,7 @@ parseTermRest left rest = Right (left, rest)
 
 parseFactor :: [Token] -> ParseResult Expr
 parseFactor (TInt n : rest) = Right (Lit n, rest)
+parseFactor (TIdent name : rest) = Right (Var name, rest)
 parseFactor (TLParen : rest) = do
   (expr, rest') <- parseExpr rest
   case rest' of
@@ -105,27 +179,67 @@ parseFactor (t : _) = Left ("unexpected token: " ++ show t)
 
 -- Code generator
 
-compile :: Expr -> [Instr]
-compile (Lit n) = [Push n]
-compile (Add l r) = compile l ++ compile r ++ [IAdd]
-compile (Sub l r) = compile l ++ compile r ++ [ISub]
-compile (Mul l r) = compile l ++ compile r ++ [IMul]
-compile (Div l r) = compile l ++ compile r ++ [IDiv]
-compile (Neg e) = compile e ++ [INeg]
+compile :: Program -> Either String [Instr]
+compile (stmts, expr) = do
+  (env, stmtInstrs) <- compileStmts Map.empty stmts
+  exprInstrs <- compileExpr env expr
+  Right (stmtInstrs ++ exprInstrs)
+
+compileStmts :: Map String Int -> [Stmt] -> Either String (Map String Int, [Instr])
+compileStmts env0 = foldM step (env0, [])
+  where
+    step (env, acc) (SLet name expr) = do
+      when (Map.member name env) $ Left ("variable already declared: " ++ name)
+      instrs <- compileExpr env expr
+      let off = -8 * (Map.size env + 1)
+      Right (Map.insert name off env, acc ++ instrs ++ [Store off])
+    step (env, acc) (SAssign name expr) = do
+      off <- maybe (Left ("undeclared variable: " ++ name)) Right (Map.lookup name env)
+      instrs <- compileExpr env expr
+      Right (env, acc ++ instrs ++ [Store off])
+
+compileExpr :: Map String Int -> Expr -> Either String [Instr]
+compileExpr _ (Lit n) = Right [Push n]
+compileExpr env (Var name) =
+  maybe (Left ("undeclared variable: " ++ name)) (\off -> Right [Load off]) (Map.lookup name env)
+compileExpr env (Add l r) = do
+  li <- compileExpr env l
+  ri <- compileExpr env r
+  Right (li ++ ri ++ [IAdd])
+compileExpr env (Sub l r) = do
+  li <- compileExpr env l
+  ri <- compileExpr env r
+  Right (li ++ ri ++ [ISub])
+compileExpr env (Mul l r) = do
+  li <- compileExpr env l
+  ri <- compileExpr env r
+  Right (li ++ ri ++ [IMul])
+compileExpr env (Div l r) = do
+  li <- compileExpr env l
+  ri <- compileExpr env r
+  Right (li ++ ri ++ [IDiv])
+compileExpr env (Neg e) = do
+  ei <- compileExpr env e
+  Right (ei ++ [INeg])
 
 -- Virtual machine
 
 run :: [Instr] -> Either String Int
-run instrs = go instrs []
+run instrs = go instrs [] Map.empty
   where
-    go [] [v] = Right v
-    go [] _ = Left "invalid stack state after execution"
-    go (Push n : rest) stack = go rest (n : stack)
-    go (IAdd : rest) (b : a : stack) = go rest ((a + b) : stack)
-    go (ISub : rest) (b : a : stack) = go rest ((a - b) : stack)
-    go (IMul : rest) (b : a : stack) = go rest ((a * b) : stack)
-    go (IDiv : rest) (b : a : stack)
+    go [] [v] _ = Right v
+    go [] _ _ = Left "invalid stack state after execution"
+    go (Push n : rest) stack vars = go rest (n : stack) vars
+    go (IAdd : rest) (b : a : stack) vars = go rest ((a + b) : stack) vars
+    go (ISub : rest) (b : a : stack) vars = go rest ((a - b) : stack) vars
+    go (IMul : rest) (b : a : stack) vars = go rest ((a * b) : stack) vars
+    go (IDiv : rest) (b : a : stack) vars
       | b == 0 = Left "division by zero"
-      | otherwise = go rest ((a `div` b) : stack)
-    go (INeg : rest) (a : stack) = go rest (negate a : stack)
-    go _ _ = Left "stack underflow"
+      | otherwise = go rest ((a `div` b) : stack) vars
+    go (INeg : rest) (a : stack) vars = go rest (negate a : stack) vars
+    go (Load off : rest) stack vars =
+      case Map.lookup off vars of
+        Just v -> go rest (v : stack) vars
+        Nothing -> Left "uninitialized variable"
+    go (Store off : rest) (v : stack) vars = go rest stack (Map.insert off v vars)
+    go _ _ _ = Left "stack underflow"
