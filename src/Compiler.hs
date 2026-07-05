@@ -94,6 +94,7 @@ parse tokens = do
     [] -> Right (stmts, expr)
     (t : _) -> Left ("unexpected token: " ++ show t)
 
+-- ステートメントに分解
 parseStmts :: [Token] -> ParseResult [Stmt]
 parseStmts (TLet : rest) = do
   (stmt, rest') <- parseLetStmt rest
@@ -105,6 +106,7 @@ parseStmts (TIdent name : TAssign : rest) = do
   Right (stmt : stmts, rest'')
 parseStmts tokens = Right ([], tokens)
 
+-- let xxx: i64 = 1234;
 parseLetStmt :: [Token] -> ParseResult Stmt
 parseLetStmt tokens = do
   (name, rest) <- expectIdent tokens
@@ -118,28 +120,33 @@ parseLetStmt tokens = do
       rest5 <- expectToken TSemicolon rest4
       Right (SLet name expr, rest5)
 
+-- xxx = 1234;
 parseAssignStmt :: String -> [Token] -> ParseResult Stmt
 parseAssignStmt name tokens = do
   (expr, rest) <- parseExpr tokens
   rest' <- expectToken TSemicolon rest
   Right (SAssign name expr, rest')
 
+-- 識別子（変数、型名など）
 expectIdent :: [Token] -> ParseResult String
 expectIdent (TIdent name : rest) = Right (name, rest)
 expectIdent (t : _) = Left ("expected identifier, got: " ++ show t)
-expectIdent [] = Left "expected identifier, got end of input"
+expectIdent [] = Left "expected identifier,  got end of input"
 
+-- 指定トークン（:, ;など）
 expectToken :: Token -> [Token] -> Either String [Token]
 expectToken tok (t : rest)
   | t == tok = Right rest
   | otherwise = Left ("expected " ++ show tok ++ ", got: " ++ show t)
 expectToken tok [] = Left ("expected " ++ show tok ++ ", got end of input")
 
+-- 式
 parseExpr :: [Token] -> ParseResult Expr
 parseExpr tokens = do
   (left, rest) <- parseTerm tokens
   parseExprRest left rest
 
+-- 加算、減算
 parseExprRest :: Expr -> [Token] -> ParseResult Expr
 parseExprRest left (TPlus : rest) = do
   (right, rest') <- parseTerm rest
@@ -187,16 +194,16 @@ compile (stmts, expr) = do
 
 compileStmts :: Map String Int -> [Stmt] -> Either String (Map String Int, [Instr])
 compileStmts env0 = foldM step (env0, [])
-  where
-    step (env, acc) (SLet name expr) = do
-      when (Map.member name env) $ Left ("variable already declared: " ++ name)
-      instrs <- compileExpr env expr
-      let off = -8 * (Map.size env + 1)
-      Right (Map.insert name off env, acc ++ instrs ++ [Store off])
-    step (env, acc) (SAssign name expr) = do
-      off <- maybe (Left ("undeclared variable: " ++ name)) Right (Map.lookup name env)
-      instrs <- compileExpr env expr
-      Right (env, acc ++ instrs ++ [Store off])
+ where
+  step (env, acc) (SLet name expr) = do
+    when (Map.member name env) $ Left ("variable already declared: " ++ name)
+    instrs <- compileExpr env expr
+    let off = -8 * (Map.size env + 1)
+    Right (Map.insert name off env, acc ++ instrs ++ [Store off])
+  step (env, acc) (SAssign name expr) = do
+    off <- maybe (Left ("undeclared variable: " ++ name)) Right (Map.lookup name env)
+    instrs <- compileExpr env expr
+    Right (env, acc ++ instrs ++ [Store off])
 
 compileExpr :: Map String Int -> Expr -> Either String [Instr]
 compileExpr _ (Lit n) = Right [Push n]
@@ -226,20 +233,20 @@ compileExpr env (Neg e) = do
 
 run :: [Instr] -> Either String Int
 run instrs = go instrs [] Map.empty
-  where
-    go [] [v] _ = Right v
-    go [] _ _ = Left "invalid stack state after execution"
-    go (Push n : rest) stack vars = go rest (n : stack) vars
-    go (IAdd : rest) (b : a : stack) vars = go rest ((a + b) : stack) vars
-    go (ISub : rest) (b : a : stack) vars = go rest ((a - b) : stack) vars
-    go (IMul : rest) (b : a : stack) vars = go rest ((a * b) : stack) vars
-    go (IDiv : rest) (b : a : stack) vars
-      | b == 0 = Left "division by zero"
-      | otherwise = go rest ((a `div` b) : stack) vars
-    go (INeg : rest) (a : stack) vars = go rest (negate a : stack) vars
-    go (Load off : rest) stack vars =
-      case Map.lookup off vars of
-        Just v -> go rest (v : stack) vars
-        Nothing -> Left "uninitialized variable"
-    go (Store off : rest) (v : stack) vars = go rest stack (Map.insert off v vars)
-    go _ _ _ = Left "stack underflow"
+ where
+  go [] [v] _ = Right v
+  go [] _ _ = Left "invalid stack state after execution"
+  go (Push n : rest) stack vars = go rest (n : stack) vars
+  go (IAdd : rest) (b : a : stack) vars = go rest ((a + b) : stack) vars
+  go (ISub : rest) (b : a : stack) vars = go rest ((a - b) : stack) vars
+  go (IMul : rest) (b : a : stack) vars = go rest ((a * b) : stack) vars
+  go (IDiv : rest) (b : a : stack) vars
+    | b == 0 = Left "division by zero"
+    | otherwise = go rest ((a `div` b) : stack) vars
+  go (INeg : rest) (a : stack) vars = go rest (negate a : stack) vars
+  go (Load off : rest) stack vars =
+    case Map.lookup off vars of
+      Just v -> go rest (v : stack) vars
+      Nothing -> Left "uninitialized variable"
+  go (Store off : rest) (v : stack) vars = go rest stack (Map.insert off v vars)
+  go _ _ _ = Left "stack underflow"
