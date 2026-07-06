@@ -161,6 +161,7 @@ parseTerm tokens = do
   (left, rest) <- parseFactor tokens
   parseTermRest left rest
 
+-- term   ::= factor (('*' | '/') factor)*
 parseTermRest :: Expr -> [Token] -> ParseResult Expr
 parseTermRest left (TStar : rest) = do
   (right, rest') <- parseFactor rest
@@ -170,6 +171,7 @@ parseTermRest left (TSlash : rest) = do
   parseTermRest (Div left right) rest'
 parseTermRest left rest = Right (left, rest)
 
+-- factor ::= INT | IDENT | '(' expr ')' | '-' factor
 parseFactor :: [Token] -> ParseResult Expr
 parseFactor (TInt n : rest) = Right (Lit n, rest)
 parseFactor (TIdent name : rest) = Right (Var name, rest)
