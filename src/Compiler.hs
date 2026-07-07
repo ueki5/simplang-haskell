@@ -86,6 +86,7 @@ tokenize (c : cs)
 
 type ParseResult a = Either String (a, [Token])
 
+-- program ::= stmt* expr
 parse :: [Token] -> Either String Program
 parse tokens = do
   (stmts, rest) <- parseStmts tokens
@@ -94,7 +95,7 @@ parse tokens = do
     [] -> Right (stmts, expr)
     (t : _) -> Left ("unexpected token: " ++ show t)
 
--- ステートメントに分解
+-- 文の抽出
 parseStmts :: [Token] -> ParseResult [Stmt]
 parseStmts (TLet : rest) = do
   (stmt, rest') <- parseLetStmt rest
@@ -106,7 +107,7 @@ parseStmts (TIdent name : TAssign : rest) = do
   Right (stmt : stmts, rest'')
 parseStmts tokens = Right ([], tokens)
 
--- let xxx: i64 = 1234;
+-- let-stmt    ::= 'let' IDENT ':' 'i64' '=' expr ';'
 parseLetStmt :: [Token] -> ParseResult Stmt
 parseLetStmt tokens = do
   (name, rest) <- expectIdent tokens
@@ -120,33 +121,33 @@ parseLetStmt tokens = do
       rest5 <- expectToken TSemicolon rest4
       Right (SLet name expr, rest5)
 
--- xxx = 1234;
+-- assign-stmt ::= IDENT '=' expr ';'
 parseAssignStmt :: String -> [Token] -> ParseResult Stmt
 parseAssignStmt name tokens = do
   (expr, rest) <- parseExpr tokens
   rest' <- expectToken TSemicolon rest
   Right (SAssign name expr, rest')
 
--- 識別子（変数、型名など）
+-- 識別子の抽出（変数、型名など）
 expectIdent :: [Token] -> ParseResult String
 expectIdent (TIdent name : rest) = Right (name, rest)
 expectIdent (t : _) = Left ("expected identifier, got: " ++ show t)
 expectIdent [] = Left "expected identifier,  got end of input"
 
--- 指定トークン（:, ;など）
+-- 指定トークンの抽出（:, ;など）
 expectToken :: Token -> [Token] -> Either String [Token]
 expectToken tok (t : rest)
   | t == tok = Right rest
   | otherwise = Left ("expected " ++ show tok ++ ", got: " ++ show t)
 expectToken tok [] = Left ("expected " ++ show tok ++ ", got end of input")
 
--- 式
+-- 加算・減算の抽出
 parseExpr :: [Token] -> ParseResult Expr
 parseExpr tokens = do
   (left, rest) <- parseTerm tokens
   parseExprRest left rest
 
--- 加算、減算
+-- expr   ::= term   (('+' | '-') term)*
 parseExprRest :: Expr -> [Token] -> ParseResult Expr
 parseExprRest left (TPlus : rest) = do
   (right, rest') <- parseTerm rest
@@ -156,6 +157,7 @@ parseExprRest left (TMinus : rest) = do
   parseExprRest (Sub left right) rest'
 parseExprRest left rest = Right (left, rest)
 
+-- 乗算・除算の抽出
 parseTerm :: [Token] -> ParseResult Expr
 parseTerm tokens = do
   (left, rest) <- parseFactor tokens
@@ -188,51 +190,71 @@ parseFactor (t : _) = Left ("unexpected token: " ++ show t)
 
 -- Code generator
 
+-- [文]＋式から命令を抽出
 compile :: Program -> Either String [Instr]
 compile (stmts, expr) = do
   (env, stmtInstrs) <- compileStmts Map.empty stmts
   exprInstrs <- compileExpr env expr
   Right (stmtInstrs ++ exprInstrs)
 
+-- [文]から命令を抽出
 compileStmts :: Map String Int -> [Stmt] -> Either String (Map String Int, [Instr])
 compileStmts env0 = foldM step (env0, [])
  where
+  -- let xxx = ...
   step (env, acc) (SLet name expr) = do
+    -- 変数の二重定義をチェック
     when (Map.member name env) $ Left ("variable already declared: " ++ name)
+    -- 式の表現から命令を抽出
     instrs <- compileExpr env expr
+    -- 新しく登録する変数のスタック上のアドレスを計算
     let off = -8 * (Map.size env + 1)
+    -- 変数とアドレスのマップ, 命令＋追加命令＋変数のストア
     Right (Map.insert name off env, acc ++ instrs ++ [Store off])
+  -- xxx = ...
   step (env, acc) (SAssign name expr) = do
+    -- 変数の定義をチェック
     off <- maybe (Left ("undeclared variable: " ++ name)) Right (Map.lookup name env)
+    -- 式の表現から命令を抽出
     instrs <- compileExpr env expr
+    -- 変数とアドレスのマップ, 命令＋追加命令＋変数のストア
     Right (env, acc ++ instrs ++ [Store off])
 
+-- 式から命令を抽出
 compileExpr :: Map String Int -> Expr -> Either String [Instr]
+-- [let ]xxx = 1234;
 compileExpr _ (Lit n) = Right [Push n]
+-- [let ]xxx = yyy;
 compileExpr env (Var name) =
   maybe (Left ("undeclared variable: " ++ name)) (\off -> Right [Load off]) (Map.lookup name env)
+-- [let ]xxx = expr + expr;
 compileExpr env (Add l r) = do
   li <- compileExpr env l
   ri <- compileExpr env r
   Right (li ++ ri ++ [IAdd])
+-- [let ]xxx = expr - expr;
 compileExpr env (Sub l r) = do
   li <- compileExpr env l
   ri <- compileExpr env r
   Right (li ++ ri ++ [ISub])
+-- [let ]xxx = expr * expr;
 compileExpr env (Mul l r) = do
   li <- compileExpr env l
   ri <- compileExpr env r
   Right (li ++ ri ++ [IMul])
+-- [let ]xxx = expr / expr;
 compileExpr env (Div l r) = do
   li <- compileExpr env l
   ri <- compileExpr env r
   Right (li ++ ri ++ [IDiv])
+-- [let ]xxx = -expr;
 compileExpr env (Neg e) = do
   ei <- compileExpr env e
   Right (ei ++ [INeg])
 
 -- Virtual machine
 
+-- テストでのみ使用
 run :: [Instr] -> Either String Int
 run instrs = go instrs [] Map.empty
  where
