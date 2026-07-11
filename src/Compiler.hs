@@ -217,7 +217,7 @@ compileStmts env0 = foldM step (env0, [])
     off <- maybe (Left ("undeclared variable: " ++ name)) Right (Map.lookup name env)
     -- 式の表現から命令を抽出
     instrs <- compileExpr env expr
-    -- 変数とアドレスのマップ, 命令＋追加命令＋変数のストア
+    -- マップはそのまま, 命令＋追加命令＋変数のストア
     Right (env, acc ++ instrs ++ [Store off])
 
 -- 式から命令を抽出
