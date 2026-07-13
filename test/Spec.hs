@@ -1,6 +1,6 @@
 module Main where
 
-import Compiler (Expr (..), Instr (..), Stmt (..), Token (..), compile, parse, run, tokenize)
+import Compiler (Expr (..), Instr (..), Stmt (..), Token (..), Width (..), compile, parse, run, tokenize)
 import Data.Either (isLeft)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
@@ -51,21 +51,24 @@ main = hspec $ do
       parse [] `shouldBe` Left "unexpected end of input"
     it "変数参照" $
       parse [TIdent "x"] `shouldBe` Right ([], Var "x")
-    it "let宣言" $
+    it "let宣言（i64）" $
       parse [TLet, TIdent "x", TColon, TIdent "i64", TAssign, TInt 1, TSemicolon, TIdent "x"]
-        `shouldBe` Right ([SLet "x" (Lit 1)], Var "x")
+        `shouldBe` Right ([SLet "x" W64 (Lit 1)], Var "x")
+    it "let宣言（i32）" $
+      parse [TLet, TIdent "x", TColon, TIdent "i32", TAssign, TInt 1, TSemicolon, TIdent "x"]
+        `shouldBe` Right ([SLet "x" W32 (Lit 1)], Var "x")
     it "代入文" $
       parse
         [ TLet, TIdent "x", TColon, TIdent "i64", TAssign, TInt 1, TSemicolon
         , TIdent "x", TAssign, TInt 2, TSemicolon
         , TIdent "x"
         ]
-        `shouldBe` Right ([SLet "x" (Lit 1), SAssign "x" (Lit 2)], Var "x")
+        `shouldBe` Right ([SLet "x" W64 (Lit 1), SAssign "x" (Lit 2)], Var "x")
     it "let宣言でコロンが無ければエラー" $
       parse [TLet, TIdent "x", TAssign, TInt 1, TSemicolon, TIdent "x"] `shouldSatisfy` isLeft
-    it "let宣言で型がi64以外ならエラー" $
-      parse [TLet, TIdent "x", TColon, TIdent "i32", TAssign, TInt 1, TSemicolon, TIdent "x"]
-        `shouldBe` Left "unsupported type: i32"
+    it "let宣言で型がi32/i64以外ならエラー" $
+      parse [TLet, TIdent "x", TColon, TIdent "i16", TAssign, TInt 1, TSemicolon, TIdent "x"]
+        `shouldBe` Left "unsupported type: i16"
     it "let宣言で=が無ければエラー" $
       parse [TLet, TIdent "x", TColon, TIdent "i64", TInt 1, TSemicolon, TIdent "x"]
         `shouldSatisfy` isLeft
@@ -80,35 +83,53 @@ main = hspec $ do
 
   describe "codegen" $ do
     it "プロローグにmainラベルを含む" $
-      codegen [] `shouldContain` "main:"
-    it "Push nをpushq命令に変換する" $
-      codegen [Push 42] `shouldContain` "pushq $42"
-    it "IAddをaddq命令に変換する" $
-      codegen [IAdd] `shouldContain` "addq"
-    it "ISubをsubq命令に変換する" $
-      codegen [ISub] `shouldContain` "subq"
-    it "IMulをimulq命令に変換する" $
-      codegen [IMul] `shouldContain` "imulq"
-    it "IDivをidivq命令に変換する" $
-      codegen [IDiv] `shouldContain` "idivq"
-    it "INegをnegq命令に変換する" $
-      codegen [INeg] `shouldContain` "negq"
+      codegen W64 [] `shouldContain` "main:"
+    it "Push nをmovabsq+pushq命令に変換する" $
+      codegen W64 [Push 42] `shouldContain` "movabsq $42, %rax"
+    it "IAdd W64をaddq命令に変換する" $
+      codegen W64 [IAdd W64] `shouldContain` "addq"
+    it "ISub W64をsubq命令に変換する" $
+      codegen W64 [ISub W64] `shouldContain` "subq"
+    it "IMul W64をimulq命令に変換する" $
+      codegen W64 [IMul W64] `shouldContain` "imulq"
+    it "IDiv W64をidivq命令に変換する" $
+      codegen W64 [IDiv W64] `shouldContain` "idivq"
+    it "INeg W64をnegq命令に変換する" $
+      codegen W64 [INeg W64] `shouldContain` "negq"
+    it "IAdd W32をaddl命令に変換する" $
+      codegen W32 [IAdd W32] `shouldContain` "addl"
+    it "ISub W32をsubl命令に変換する" $
+      codegen W32 [ISub W32] `shouldContain` "subl"
+    it "IMul W32をimull命令に変換する" $
+      codegen W32 [IMul W32] `shouldContain` "imull"
+    it "IDiv W32をidivl命令に変換する" $
+      codegen W32 [IDiv W32] `shouldContain` "idivl"
+    it "INeg W32をnegl命令に変換する" $
+      codegen W32 [INeg W32] `shouldContain` "negl"
     it "IDivにゼロ除算チェックを含む" $
-      codegen [IDiv] `shouldContain` ".Ldiv_zero_error"
+      codegen W64 [IDiv W64] `shouldContain` ".Ldiv_zero_error"
     it "エピローグにprintf呼び出しを含む" $
-      codegen [] `shouldContain` "call  printf"
-    it "Loadをmovq+pushqに変換する" $
-      codegen [Load (-8)] `shouldContain` "movq  -8(%rbp), %rax"
-    it "Storeをpopq+movqに変換する" $
-      codegen [Store (-8)] `shouldContain` "movq  %rax, -8(%rbp)"
+      codegen W64 [] `shouldContain` "call  printf"
+    it "最終値がi64なら%ldフォーマットを使う" $
+      codegen W64 [] `shouldContain` "\"%ld\\n\""
+    it "最終値がi32なら%dフォーマットを使う" $
+      codegen W32 [] `shouldContain` "\"%d\\n\""
+    it "Load W64をmovq+pushqに変換する" $
+      codegen W64 [Load W64 (-8)] `shouldContain` "movq  -8(%rbp), %rax"
+    it "Store W64をpopq+movqに変換する" $
+      codegen W64 [Store W64 (-8)] `shouldContain` "movq  %rax, -8(%rbp)"
+    it "Load W32をmovslq+pushqに変換する（符号拡張ロード）" $
+      codegen W32 [Load W32 (-4)] `shouldContain` "movslq -4(%rbp), %rax"
+    it "Store W32をpopq+movlに変換する（切り詰めストア）" $
+      codegen W32 [Store W32 (-4)] `shouldContain` "movl  %eax, -4(%rbp)"
     it "変数がある場合はsubqでスタックフレームを確保する" $
-      codegen [Store (-8)] `shouldContain` "subq  $8, %rsp"
+      codegen W64 [Store W64 (-8)] `shouldContain` "subq  $8, %rsp"
     it "変数が無ければsubqを出さない" $
-      codegen [] `shouldNotContain` "subq"
+      codegen W64 [] `shouldNotContain` "subq"
     it "printf呼び出し前にスタックアライメントを揃える" $
-      codegen [] `shouldContain` "andq  $-16, %rsp"
+      codegen W64 [] `shouldContain` "andq  $-16, %rsp"
     it "エピローグはleave命令を使う" $
-      codegen [] `shouldContain` "leave"
+      codegen W64 [] `shouldContain` "leave"
 
   describe "意味論エラー（compile）" $ do
     let compileSource src = tokenize src >>= parse >>= compile
@@ -123,12 +144,28 @@ main = hspec $ do
     it "再宣言はエラー" $
       compileSource "let x: i64 = 1;\nlet x: i64 = 2;\nx"
         `shouldBe` Left "variable already declared: x"
-    it "型注釈がi64以外はエラー" $
-      compileSource "let x: i32 = 1;\nx" `shouldBe` Left "unsupported type: i32"
+    it "型注釈がi32/i64以外はエラー" $
+      compileSource "let x: i16 = 1;\nx" `shouldBe` Left "unsupported type: i16"
+    it "let初期化式でi32変数とi64変数を混在させるとエラー" $
+      compileSource "let x: i32 = 1;\nlet y: i64 = 2;\nlet z: i64 = x + y;\nz"
+        `shouldBe` Left "type mismatch: expected i64, found i32"
+    it "代入文右辺でi32変数とi64変数を混在させるとエラー" $
+      compileSource "let x: i32 = 1;\nlet y: i64 = 2;\ny = x + 1;\ny"
+        `shouldBe` Left "type mismatch: expected i64, found i32"
+    it "末尾式でi32変数とi64変数を混在させるとエラー" $
+      compileSource "let x: i32 = 1;\nlet y: i64 = 2;\nx + y"
+        `shouldBe` Left "type mismatch: i32 and i64"
+    it "宣言した型と異なる型の変数を代入するとエラー" $
+      compileSource "let x: i32 = 1;\nlet y: i64 = 2;\nlet z: i32 = y;\nz"
+        `shouldBe` Left "type mismatch: expected i32, found i64"
 
   describe "run（VM）" $ do
     it "Load/Storeで変数の値を保持する" $
-      run [Push 1, Store (-8), Load (-8), Push 2, IAdd] `shouldBe` Right 3
+      run [Push 1, Store W64 (-8), Load W64 (-8), Push 2, IAdd W64] `shouldBe` Right 3
+    it "IAdd W32はi32範囲でラップアラウンドする" $
+      run [Push 2147483647, Push 1, IAdd W32] `shouldBe` Right (-2147483648)
+    it "Store W32はi32範囲に切り詰める" $
+      run [Push 4294967296, Store W32 (-4), Load W32 (-4)] `shouldBe` Right 0
 
   describe "compile + codegen + gcc（結合テスト）" $ do
     it "リテラルを評価する" $ do
@@ -160,6 +197,21 @@ main = hspec $ do
     it "変数1個（奇数オフセット）でもアライメントが崩れない" $ do
       result <- compileSourceAndRun "let x: i64 = 5;\nx + 1"
       result `shouldBe` "6"
+    it "i32変数の宣言・演算・出力を評価する" $ do
+      result <- compileSourceAndRun "let x: i32 = 1;\nlet y: i32 = 2;\nx = x + y;\nx"
+      result `shouldBe` "3"
+    it "i32のオーバーフローは32bit範囲でラップアラウンドする" $ do
+      result <- compileSourceAndRun "let x: i32 = 2147483647;\nx + 1"
+      result `shouldBe` "-2147483648"
+    it "i32の境界値（INT32_MIN）を正しく扱う（movabsq修正の確認）" $ do
+      result <- compileSourceAndRun "let x: i32 = -2147483648;\nx"
+      result `shouldBe` "-2147483648"
+    it "i32とi64が交互に宣言されてもタイトパッキングで正しく動作する（式自体は単一型を維持）" $ do
+      result <- compileSourceAndRun "let a: i32 = 1;\nlet b: i64 = 2;\nlet c: i32 = 3;\na + c"
+      result `shouldBe` "4"
+    it "i64の末尾式は%ldで正しく出力される（64bit値の潜在バグ修正の確認）" $ do
+      result <- compileSourceAndRun "let x: i64 = 1;\nlet y: i64 = 2;\ny"
+      result `shouldBe` "2"
 
   describe "ゼロ除算の実行時エラー" $ do
     it "変数なしのゼロ除算はエラーメッセージを出力して非ゼロ終了する" $ do
@@ -170,6 +222,10 @@ main = hspec $ do
       (code, out) <- compileSourceAndRunExit "let x: i64 = 5;\nx / 0"
       out `shouldBe` "division by zero"
       code `shouldNotBe` ExitSuccess
+    it "i32変数のゼロ除算もエラーメッセージを出力して非ゼロ終了する" $ do
+      (code, out) <- compileSourceAndRunExit "let x: i32 = 5;\nx / 0"
+      out `shouldBe` "division by zero"
+      code `shouldNotBe` ExitSuccess
 
 compileAndRun :: Expr -> IO String
 compileAndRun expr =
@@ -178,8 +234,8 @@ compileAndRun expr =
         binPath = tmpDir </> "out"
     case compile ([], expr) of
       Left err -> error ("compile failed: " ++ err)
-      Right instrs -> do
-        writeFile asmPath (codegen instrs)
+      Right (width, instrs) -> do
+        writeFile asmPath (codegen width instrs)
         _ <- readProcess "gcc" [asmPath, "-o", binPath] ""
         output <- readProcess binPath [] ""
         return (takeWhile (/= '\n') output)
@@ -192,8 +248,8 @@ buildAndRun runBinary src =
         binPath = tmpDir </> "out"
     case tokenize src >>= parse >>= compile of
       Left err -> error ("compile failed: " ++ err)
-      Right instrs -> do
-        writeFile asmPath (codegen instrs)
+      Right (width, instrs) -> do
+        writeFile asmPath (codegen width instrs)
         _ <- readProcess "gcc" [asmPath, "-o", binPath] ""
         runBinary binPath
 
