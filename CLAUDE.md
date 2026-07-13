@@ -1,7 +1,36 @@
 # simplang-haskell
 
 Haskell で実装されており、GCC をリンカとして利用する。
-アプリケーション仕様（Build & Run、Architecture、Testing）は `docs/step000.md`、変数・代入機能の設計は `docs/step001.md` を参照。
+アプリケーション仕様（Architecture）は `docs/step000.md`、変数・代入機能の設計は `docs/step001.md` を参照。
+
+## Build & Run
+
+```bash
+cabal build                                          # ビルド
+cabal test                                           # テスト (Hspec)
+cabal run simplang-haskell -- FILE [-o OUTPUT] [-S ASM_FILE]
+```
+
+- `FILE`: 算術式を含むソースファイル（必須）
+- `-o OUTPUT`: 出力バイナリ名（デフォルト: `out`）
+- `-S ASM_FILE`: アセンブリファイルの保存先（省略可）
+
+## Testing
+
+```bash
+cabal test
+```
+
+フレームワーク: **Hspec** (`test/Spec.hs`)
+
+| テストカテゴリ | 内容 |
+|---|---|
+| Tokenizer | 空白処理、複数桁の整数、エラーケース |
+| Parser | リテラル、二項演算子、演算子優先順位、括弧、単項マイナス |
+| CodeGen | プロローグ/エピローグ構造、各命令の x86-64 変換 |
+| Integration | GCC でコンパイルして実際に実行し結果を検証 |
+
+Integration テストは `withSystemTempDirectory` で一時ディレクトリを管理する。
 
 ## Key Design Notes
 
