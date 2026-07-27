@@ -1,13 +1,13 @@
 module CodeGen (codegen) where
 
-import Compiler (Instr (..), Width (..))
+import Compiler (Instr (..), Type (..), Width (..))
 
-codegen :: Width -> [Instr] -> String
-codegen finalWidth instrs =
+codegen :: Type -> [Instr] -> String
+codegen finalType instrs =
   unlines $
     prologue (frameSize instrs)
       ++ concatMap genInstr instrs
-      ++ epilogue finalWidth
+      ++ epilogue finalType
 
 -- ローカル変数用に確保するスタックフレームのサイズ（バイト）。
 -- Load/Store が保持する %rbp 相対オフセットの絶対値の最大が必要な確保量になる。
@@ -28,17 +28,42 @@ prologue size =
   ]
     ++ ["    subq  $" ++ show size ++ ", %rsp" | size > 0]
 
-epilogue :: Width -> [String]
-epilogue finalWidth =
+-- 末尾式の型ごとに printf への引数の渡し方を切り替える。
+-- 整数型はそのまま値を %rsi に渡すが、bool は 0/1 を "true"/"false" 文字列へ分岐させる。
+epilogue :: Type -> [String]
+epilogue (TyInt w) =
   [ "    popq  %rsi"
   , "    andq  $-16, %rsp"
-  , "    leaq  " ++ fmtLabel finalWidth ++ "(%rip), %rdi"
+  , "    leaq  " ++ fmtLabel w ++ "(%rip), %rdi"
   , "    xorl  %eax, %eax"
   , "    call  printf"
   , "    xorl  %eax, %eax"
   , "    leave"
   , "    ret"
-  , ".Ldiv_zero_error:"
+  ]
+    ++ commonTail
+epilogue TBool =
+  [ "    popq  %rax"
+  , "    andq  $-16, %rsp"
+  , "    testq %rax, %rax"
+  , "    jne   .Lbool_true"
+  , "    leaq  strFalse(%rip), %rdi"
+  , "    jmp   .Lbool_print"
+  , ".Lbool_true:"
+  , "    leaq  strTrue(%rip), %rdi"
+  , ".Lbool_print:"
+  , "    xorl  %eax, %eax"
+  , "    call  printf"
+  , "    xorl  %eax, %eax"
+  , "    leave"
+  , "    ret"
+  ]
+    ++ commonTail
+
+-- ゼロ除算時のエラー処理とrodataセクションは末尾式の型によらず共通
+commonTail :: [String]
+commonTail =
+  [ ".Ldiv_zero_error:"
   , "    andq  $-16, %rsp"
   , "    leaq  errmsg(%rip), %rdi"
   , "    call  puts"
@@ -49,6 +74,10 @@ epilogue finalWidth =
   , "    .string \"%d\\n\""
   , "fmt64:"
   , "    .string \"%ld\\n\""
+  , "strTrue:"
+  , "    .string \"true\\n\""
+  , "strFalse:"
+  , "    .string \"false\\n\""
   , "errmsg:"
   , "    .string \"division by zero\""
   , "    .section .note.GNU-stack,\"\",@progbits"
@@ -147,4 +176,25 @@ genInstr (Store W64 off) =
 genInstr (Store W32 off) =
   [ "    popq  %rax"
   , "    movl  %eax, " ++ show off ++ "(%rbp)"
+  ]
+genInstr ICmpEq =
+  [ "    popq  %rbx"
+  , "    popq  %rax"
+  , "    cmpq  %rbx, %rax"
+  , "    sete  %al"
+  , "    movzbq %al, %rax"
+  , "    pushq %rax"
+  ]
+genInstr ICmpNe =
+  [ "    popq  %rbx"
+  , "    popq  %rax"
+  , "    cmpq  %rbx, %rax"
+  , "    setne %al"
+  , "    movzbq %al, %rax"
+  , "    pushq %rax"
+  ]
+genInstr INot =
+  [ "    popq  %rax"
+  , "    xorq  $1, %rax"
+  , "    pushq %rax"
   ]
