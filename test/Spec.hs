@@ -43,6 +43,10 @@ main = hspec $ do
       tokenize "true false" `shouldBe` Right [TTrue, TFalse]
     it "true/falseで始まる識別子はTIdentのまま" $
       tokenize "truest falsely" `shouldBe` Right [TIdent "truest", TIdent "falsely"]
+    it "to_i64/to_i32予約語を変換する" $
+      tokenize "to_i64 to_i32" `shouldBe` Right [TToI64, TToI32]
+    it "to_i64/to_i32で始まる識別子はTIdentのまま" $
+      tokenize "to_i64x to_i32_foo" `shouldBe` Right [TIdent "to_i64x", TIdent "to_i32_foo"]
 
   describe "parse" $ do
     it "整数リテラル" $
@@ -114,6 +118,19 @@ main = hspec $ do
     it "括弧内の等価演算子をパースできる" $
       parse [TLParen, TInt 1, TEq, TInt 1, TRParen]
         `shouldBe` Right ([], Eq (Lit 1) (Lit 1))
+    it "to_i64演算子（括弧なし）" $
+      parse [TToI64, TInt 64] `shouldBe` Right ([], ToI64 (Lit 64))
+    it "to_i32演算子（括弧なし）" $
+      parse [TToI32, TInt 64] `shouldBe` Right ([], ToI32 (Lit 64))
+    it "to_i64演算子（括弧あり）は括弧なしと同じASTになる" $
+      parse [TToI64, TLParen, TIdent "x", TRParen]
+        `shouldBe` Right ([], ToI64 (Var "x"))
+    it "to_i32とto_i64は入れ子にできる" $
+      parse [TToI32, TToI64, TIdent "x"]
+        `shouldBe` Right ([], ToI32 (ToI64 (Var "x")))
+    it "単項マイナスはto_i32より強く結合する" $
+      parse [TToI32, TMinus, TInt 5]
+        `shouldBe` Right ([], ToI32 (Neg (Lit 5)))
 
   describe "codegen" $ do
     it "プロローグにmainラベルを含む" $
@@ -170,6 +187,8 @@ main = hspec $ do
       codegen (TyInt W64) [ICmpNe] `shouldContain` "setne"
     it "INotをxorq命令に変換する" $
       codegen (TyInt W64) [INot] `shouldContain` "xorq"
+    it "ISext32をcltq命令に変換する（to_i64/to_i32共通の符号拡張正規化）" $
+      codegen (TyInt W64) [ISext32] `shouldContain` "cltq"
     it "最終値がboolなら分岐でtrue/false文字列を出力する" $ do
       let asm = codegen TBool []
       asm `shouldContain` "testq %rax, %rax"
@@ -227,6 +246,27 @@ main = hspec $ do
     it "let宣言の右辺での比較でi32とi64を混在させるとエラー" $
       compileSource "let x: i32 = 1;\nlet y: i64 = 2;\nlet z: bool = x == y;\nz"
         `shouldBe` Left "type mismatch: i32 and i64"
+    it "to_i64にi64値を渡すとエラー（拡大変換の対象はi32のみ）" $
+      compileSource "let x: i64 = 1;\nto_i64(x)"
+        `shouldBe` Left "type mismatch: expected i32, found i64"
+    it "to_i32にi32値を渡すとエラー（縮小変換の対象はi64のみ）" $
+      compileSource "let x: i32 = 1;\nto_i32(x)"
+        `shouldBe` Left "type mismatch: expected i64, found i32"
+    it "to_i64にbool値を渡すとエラー" $
+      compileSource "let x: bool = true;\nto_i64(x)"
+        `shouldBe` Left "type mismatch: expected i32, found bool"
+    it "to_i32にbool値を渡すとエラー" $
+      compileSource "let x: bool = true;\nto_i32(x)"
+        `shouldBe` Left "type mismatch: expected i64, found bool"
+    it "to_i64の結果をi32コンテキストで使うとエラー" $
+      compileSource "let x: i32 = 1;\nlet y: i32 = to_i64(x);\ny"
+        `shouldBe` Left "type mismatch: expected i32, found i64"
+    it "to_i32の結果をi64コンテキストで使うとエラー" $
+      compileSource "let x: i64 = 1;\nlet y: i64 = to_i32(x);\ny"
+        `shouldBe` Left "type mismatch: expected i64, found i32"
+    it "to_i64の結果をboolコンテキストで使うとエラー" $
+      compileSource "let x: i32 = 1;\nto_i64(x) == true"
+        `shouldSatisfy` isLeft
 
   describe "run（VM）" $ do
     it "Load/Storeで変数の値を保持する" $
@@ -245,6 +285,12 @@ main = hspec $ do
       run [Push 0, INot] `shouldBe` Right 1
     it "INotは1を0に反転する" $
       run [Push 1, INot] `shouldBe` Right 0
+    it "ISext32はi32範囲内の値をそのまま保持する（to_i64での値保存の確認）" $
+      run [Push 42, ISext32] `shouldBe` Right 42
+    it "ISext32はi32範囲外の値をラップアラウンドさせる（to_i32での縮小変換の確認）" $
+      run [Push 4294967296, ISext32] `shouldBe` Right 0
+    it "ISext32はi32範囲外の値を符号拡張してラップアラウンドさせる" $
+      run [Push 2147483648, ISext32] `shouldBe` Right (-2147483648)
 
   describe "compile + codegen + gcc（結合テスト）" $ do
     it "リテラルを評価する" $ do
@@ -286,6 +332,9 @@ main = hspec $ do
     it "否定演算子を評価する" $ do
       result <- compileAndRun (Not (BoolLit False))
       result `shouldBe` "true"
+    it "to_i32(リテラル)を評価する" $ do
+      result <- compileAndRun (ToI32 (Lit 64))
+      result `shouldBe` "64"
 
   describe "compile + codegen + gcc（変数を含むソースの結合テスト）" $ do
     it "複数の宣言・代入・末尾式を評価する" $ do
@@ -333,6 +382,18 @@ main = hspec $ do
     it "算術式の結果同士の比較を評価する" $ do
       result <- compileSourceAndRun "let x: i32 = 1;\nlet y: i32 = 2;\n(x + 1) == y"
       result `shouldBe` "true"
+    it "to_i64はi32の値をそのままi64として保持する（拡大変換は値を保存する）" $ do
+      result <- compileSourceAndRun "let x: i32 = 2147483647;\nlet y: i64 = to_i64(x);\ny"
+      result `shouldBe` "2147483647"
+    it "to_i32はi32範囲外のi64値をラップアラウンドさせる（縮小変換）" $ do
+      result <- compileSourceAndRun "let x: i64 = 4294967296;\nlet y: i32 = to_i32(x) + 5;\ny"
+      result `shouldBe` "5"
+    it "to_i64/to_i32は括弧なしの単項演算子構文でも評価できる" $ do
+      result <- compileSourceAndRun "let x: i64 = 4294967296;\nlet y: i32 = to_i32 x + 5;\ny"
+      result `shouldBe` "5"
+    it "to_i32とto_i64のラウンドトリップ（i32->i64->i32）は値を保存する" $ do
+      result <- compileSourceAndRun "let x: i32 = 42;\nto_i32(to_i64(x))"
+      result `shouldBe` "42"
 
   describe "ゼロ除算の実行時エラー" $ do
     it "変数なしのゼロ除算はエラーメッセージを出力して非ゼロ終了する" $ do

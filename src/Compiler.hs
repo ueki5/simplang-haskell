@@ -17,6 +17,8 @@ data Token
   | TEq
   | TNeq
   | TBang
+  | TToI64
+  | TToI32
   | TSemicolon
   | TPlus
   | TMinus
@@ -38,6 +40,8 @@ data Expr
   | Eq Expr Expr
   | Neq Expr Expr
   | Not Expr
+  | ToI64 Expr
+  | ToI32 Expr
   deriving (Show, Eq)
 
 data Stmt
@@ -67,6 +71,10 @@ data Instr
   | ICmpEq
   | ICmpNe
   | INot
+  -- 下位32bitを符号拡張して64bitへ戻す（to_i64/to_i32 で共通の命令。
+  -- to_i64 側は被演算子が既に正規化済みi32であることが前提だが、
+  -- リテラル直渡し等で正規化されていない値が漏れないよう、両方向とも同じ命令で強制的に正規化する）
+  | ISext32
   deriving (Show, Eq)
 
 -- Lexer
@@ -86,6 +94,8 @@ tokenize (c : cs)
             "let" -> (TLet :) <$> tokenize rest
             "true" -> (TTrue :) <$> tokenize rest
             "false" -> (TFalse :) <$> tokenize rest
+            "to_i64" -> (TToI64 :) <$> tokenize rest
+            "to_i32" -> (TToI32 :) <$> tokenize rest
             _ -> (TIdent ident :) <$> tokenize rest
   | c == '+' = (TPlus :) <$> tokenize cs
   | c == '-' = (TMinus :) <$> tokenize cs
@@ -110,6 +120,7 @@ tokenize (c : cs)
 -- additive ::= term (('+' | '-') term)*
 -- term     ::= factor (('*' | '/') factor)*
 -- factor   ::= INT | 'true' | 'false' | IDENT | '(' expr ')' | '-' factor | '!' factor
+--            | 'to_i64' factor | 'to_i32' factor
 
 type ParseResult a = Either String (a, [Token])
 
@@ -222,6 +233,7 @@ parseTermRest left (TSlash : rest) = do
 parseTermRest left rest = Right (left, rest)
 
 -- factor ::= INT | 'true' | 'false' | IDENT | '(' expr ')' | '-' factor | '!' factor
+--          | 'to_i64' factor | 'to_i32' factor
 parseFactor :: [Token] -> ParseResult Expr
 parseFactor (TInt n : rest) = Right (Lit n, rest)
 parseFactor (TTrue : rest) = Right (BoolLit True, rest)
@@ -238,6 +250,12 @@ parseFactor (TMinus : rest) = do
 parseFactor (TBang : rest) = do
   (expr, rest') <- parseFactor rest
   Right (Not expr, rest')
+parseFactor (TToI64 : rest) = do
+  (expr, rest') <- parseFactor rest
+  Right (ToI64 expr, rest')
+parseFactor (TToI32 : rest) = do
+  (expr, rest') <- parseFactor rest
+  Right (ToI32 expr, rest')
 parseFactor [] = Left "unexpected end of input"
 parseFactor (t : _) = Left ("unexpected token: " ++ show t)
 
@@ -330,6 +348,9 @@ inferMaybeType env = go
   -- （算術演算と異なり、被演算子の型と結果の型が一致しない）
   go (Eq a b) = combine a b >> Right (Just TBool)
   go (Neq a b) = combine a b >> Right (Just TBool)
+  -- to_i64/to_i32 の結果型は被演算子によらず常に確定する（BoolLit と同様、部分木を辿る必要はない）
+  go (ToI64 _) = Right (Just (TyInt W64))
+  go (ToI32 _) = Right (Just (TyInt W32))
   combine a b = do
     ta <- go a
     tb <- go b
@@ -417,6 +438,20 @@ compileExprTyped env TBool (Neq l r) = do
   li <- compileExprTyped env opTy l
   ri <- compileExprTyped env opTy r
   Right (li ++ ri ++ [ICmpNe])
+-- [let ]xxx = to_i64(expr);（結果は常にi64。被演算子はexpectedとは独立に常にi32を要求する）
+compileExprTyped _ TBool (ToI64 _) = Left "type mismatch: expected bool, found i64"
+compileExprTyped _ expected@(TyInt W32) (ToI64 _) =
+  Left ("type mismatch: expected " ++ typeName expected ++ ", found i64")
+compileExprTyped env (TyInt W64) (ToI64 e) = do
+  ei <- compileExprTyped env (TyInt W32) e
+  Right (ei ++ [ISext32])
+-- [let ]xxx = to_i32(expr);（結果は常にi32。被演算子はexpectedとは独立に常にi64を要求する）
+compileExprTyped _ TBool (ToI32 _) = Left "type mismatch: expected bool, found i32"
+compileExprTyped _ expected@(TyInt W64) (ToI32 _) =
+  Left ("type mismatch: expected " ++ typeName expected ++ ", found i32")
+compileExprTyped env (TyInt W32) (ToI32 e) = do
+  ei <- compileExprTyped env (TyInt W64) e
+  Right (ei ++ [ISext32])
 
 -- Virtual machine
 
@@ -442,6 +477,7 @@ run instrs = go instrs [] Map.empty
   go (ICmpEq : rest) (b : a : stack) vars = go rest ((if a == b then 1 else 0) : stack) vars
   go (ICmpNe : rest) (b : a : stack) vars = go rest ((if a /= b then 1 else 0) : stack) vars
   go (INot : rest) (a : stack) vars = go rest ((if a == 0 then 1 else 0) : stack) vars
+  go (ISext32 : rest) (a : stack) vars = go rest (trunc W32 a : stack) vars
   go _ _ _ = Left "stack underflow"
 
 -- 実アセンブリの movl/movslq 等が行う切り詰め・符号拡張を再現する
