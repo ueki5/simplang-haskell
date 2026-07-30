@@ -198,3 +198,8 @@ genInstr INot =
   , "    xorq  $1, %rax"
   , "    pushq %rax"
   ]
+genInstr ISext32 =
+  [ "    popq  %rax"
+  , "    cltq"
+  , "    pushq %rax"
+  ]
