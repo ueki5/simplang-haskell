@@ -322,10 +322,8 @@ typeName TBool = "bool"
 compile :: Program -> Either String (Type, [Instr])
 compile (stmts, expr) = do
   (env, stmtInstrs) <- compileStmts stmts
-  -- pTraceShowM ("No1" :: String, env)
   finalType <- inferType env expr
   exprInstrs <- compileExprTyped env finalType expr
-  -- pTraceShowM ("No2" :: String, env)
   Right (finalType, stmtInstrs ++ exprInstrs)
 
 -- 任意のEnv/cursorを起点に[文]から命令を抽出する（ブロックの再帰コンパイルに使う）
@@ -334,6 +332,7 @@ compileStmtsFrom initEnv initCursor stmts = foldM step (initEnv, initCursor, [])
  where
   -- let xxx: 型 = ...
   step (env, cursor, acc) (SLet name ty expr) = do
+    -- pTraceShowM ("compileStmtsFrom(Slet)" :: String, env)
     -- 変数の二重定義をチェック（同一ブロック内の再宣言のみ対象。外側との同名はシャドーイングとして許可）
     when (declaredLocally name env) $ Left ("variable already declared: " ++ name)
     -- 式の表現から命令を抽出（宣言された型を期待型として渡す）
@@ -344,6 +343,7 @@ compileStmtsFrom initEnv initCursor stmts = foldM step (initEnv, initCursor, [])
     Right (insertVar name (off, ty) env, off, acc ++ instrs ++ [Store (storageWidth ty) off])
   -- xxx = ...
   step (env, cursor, acc) (SAssign name expr) = do
+    -- pTraceShowM ("compileStmtsFrom(SAssign)" :: String, env)
     -- 変数の定義をチェック（外側スコープの変数への書き込みも許可）
     (off, ty) <- maybe (Left ("undeclared variable: " ++ name)) Right (lookupVar name env)
     -- 式の表現から命令を抽出（既存の変数の型を期待型として渡す）
@@ -352,6 +352,7 @@ compileStmtsFrom initEnv initCursor stmts = foldM step (initEnv, initCursor, [])
     Right (env, cursor, acc ++ instrs ++ [Store (storageWidth ty) off])
   -- { ... }
   step (env, cursor, acc) (SBlock innerStmts) = do
+    -- pTraceShowM ("compileStmtsFrom(SBlock)" :: String, env)
     -- 先頭に空スコープをpushして再帰コンパイルし、返り値のEnv/cursorは破棄して呼び出し前の値をそのまま継続に使う
     -- （＝スコープアウトとスタックオフセットの巻き戻しを同時に実現する）
     (_, _, instrs) <- compileStmtsFrom (Map.empty : env) cursor innerStmts
@@ -361,6 +362,7 @@ compileStmtsFrom initEnv initCursor stmts = foldM step (initEnv, initCursor, [])
 compileStmts :: [Stmt] -> Either String (Env, [Instr])
 compileStmts stmts = do
   (env, _cursor, instrs) <- compileStmtsFrom [Map.empty] 0 stmts
+  -- pTraceShowM ("compileStmts" :: String, env)
   Right (env, instrs)
 
 -- Maybe Type の単一化（Nothing = 整数リテラルなど未確定な部分木）
