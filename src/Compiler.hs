@@ -6,6 +6,8 @@ import Data.Int (Int32)
 import Data.Map (Map)
 import qualified Data.Map as Map
 
+-- import Debug.Pretty.Simple (pTraceShowM)
+
 data Token
   = TInt Int
   | TIdent String
@@ -26,6 +28,8 @@ data Token
   | TSlash
   | TLParen
   | TRParen
+  | TLBrace
+  | TRBrace
   deriving (Show, Eq)
 
 data Expr
@@ -47,6 +51,7 @@ data Expr
 data Stmt
   = SLet String Type Expr
   | SAssign String Expr
+  | SBlock [Stmt]
   deriving (Show, Eq)
 
 -- 文の列 + 必須の末尾式
@@ -71,10 +76,10 @@ data Instr
   | ICmpEq
   | ICmpNe
   | INot
-  -- 下位32bitを符号拡張して64bitへ戻す（to_i64/to_i32 で共通の命令。
-  -- to_i64 側は被演算子が既に正規化済みi32であることが前提だが、
-  -- リテラル直渡し等で正規化されていない値が漏れないよう、両方向とも同じ命令で強制的に正規化する）
-  | ISext32
+  | -- 下位32bitを符号拡張して64bitへ戻す（to_i64/to_i32 で共通の命令。
+    -- to_i64 側は被演算子が既に正規化済みi32であることが前提だが、
+    -- リテラル直渡し等で正規化されていない値が漏れないよう、両方向とも同じ命令で強制的に正規化する）
+    ISext32
   deriving (Show, Eq)
 
 -- Lexer
@@ -103,6 +108,8 @@ tokenize (c : cs)
   | c == '/' = (TSlash :) <$> tokenize cs
   | c == '(' = (TLParen :) <$> tokenize cs
   | c == ')' = (TRParen :) <$> tokenize cs
+  | c == '{' = (TLBrace :) <$> tokenize cs
+  | c == '}' = (TRBrace :) <$> tokenize cs
   | c == ':' = (TColon :) <$> tokenize cs
   | c == '=' = (TAssign :) <$> tokenize cs
   | c == '!' = (TBang :) <$> tokenize cs
@@ -111,10 +118,11 @@ tokenize (c : cs)
 
 -- Parser
 --
--- program ::= stmt* expr
--- stmt    ::= let-stmt | assign-stmt
+-- program    ::= stmt* expr
+-- stmt       ::= let-stmt | assign-stmt | block-stmt
 -- let-stmt    ::= 'let' IDENT ':' ('i32' | 'i64' | 'bool') '=' expr ';'
 -- assign-stmt ::= IDENT '=' expr ';'
+-- block-stmt ::= '{' stmt* '}'
 -- expr     ::= equality
 -- equality ::= additive (('==' | '!=') additive)*
 -- additive ::= term (('+' | '-') term)*
@@ -141,6 +149,10 @@ parseStmts (TLet : rest) = do
   Right (stmt : stmts, rest'')
 parseStmts (TIdent name : TAssign : rest) = do
   (stmt, rest') <- parseAssignStmt name rest
+  (stmts, rest'') <- parseStmts rest'
+  Right (stmt : stmts, rest'')
+parseStmts (TLBrace : rest) = do
+  (stmt, rest') <- parseBlockStmt rest
   (stmts, rest'') <- parseStmts rest'
   Right (stmt : stmts, rest'')
 parseStmts tokens = Right ([], tokens)
@@ -170,6 +182,14 @@ parseAssignStmt name tokens = do
   (expr, rest) <- parseEquality tokens
   rest' <- expectToken TSemicolon rest
   Right (SAssign name expr, rest')
+
+-- block-stmt ::= '{' stmt* '}'（'{' は呼び出し側で消費済み）
+parseBlockStmt :: [Token] -> ParseResult Stmt
+parseBlockStmt tokens = do
+  (stmts, rest) <- parseStmts tokens
+  case rest of
+    (TRBrace : rest') -> Right (SBlock stmts, rest')
+    _ -> Left "expected closing brace"
 
 -- 識別子の抽出（変数、型名など）
 expectIdent :: [Token] -> ParseResult String
@@ -261,8 +281,26 @@ parseFactor (t : _) = Left ("unexpected token: " ++ show t)
 
 -- Code generator
 
--- 変数名 -> (%rbp相対オフセット, 型)
-type Env = Map String (Int, Type)
+-- 変数名 -> (%rbp相対オフセット, 型)。スコープのスタック（先頭が最内側）
+type Env = [Map String (Int, Type)]
+
+-- 先頭スコープから順に変数を探す（外側のスコープも参照できる）
+lookupVar :: String -> Env -> Maybe (Int, Type)
+lookupVar _ [] = Nothing
+lookupVar name (scope : rest) =
+  case Map.lookup name scope of
+    Just v -> Just v
+    Nothing -> lookupVar name rest
+
+-- 先頭スコープ（現在のブロック）にのみ宣言されているかを判定する（シャドーイング判定用）
+declaredLocally :: String -> Env -> Bool
+declaredLocally name (scope : _) = Map.member name scope
+declaredLocally _ [] = False
+
+-- 先頭スコープにのみ変数を追加する
+insertVar :: String -> (Int, Type) -> Env -> Env
+insertVar name v (scope : rest) = Map.insert name v scope : rest
+insertVar _ _ [] = []
 
 -- 型ごとのスタック占有バイト数（物理格納幅）
 widthBytes :: Width -> Int
@@ -288,30 +326,44 @@ compile (stmts, expr) = do
   exprInstrs <- compileExprTyped env finalType expr
   Right (finalType, stmtInstrs ++ exprInstrs)
 
--- [文]から命令を抽出
-compileStmts :: [Stmt] -> Either String (Env, [Instr])
-compileStmts stmts = do
-  (env, _cursor, instrs) <- foldM step (Map.empty, 0, []) stmts
-  Right (env, instrs)
+-- 任意のEnv/cursorを起点に[文]から命令を抽出する（ブロックの再帰コンパイルに使う）
+compileStmtsFrom :: Env -> Int -> [Stmt] -> Either String (Env, Int, [Instr])
+compileStmtsFrom initEnv initCursor stmts = foldM step (initEnv, initCursor, []) stmts
  where
   -- let xxx: 型 = ...
   step (env, cursor, acc) (SLet name ty expr) = do
-    -- 変数の二重定義をチェック
-    when (Map.member name env) $ Left ("variable already declared: " ++ name)
+    -- pTraceShowM ("compileStmtsFrom(Slet)" :: String, env)
+    -- 変数の二重定義をチェック（同一ブロック内の再宣言のみ対象。外側との同名はシャドーイングとして許可）
+    when (declaredLocally name env) $ Left ("variable already declared: " ++ name)
     -- 式の表現から命令を抽出（宣言された型を期待型として渡す）
     instrs <- compileExprTyped env ty expr
     -- 新しく登録する変数のスタック上のアドレスを、型の物理格納幅分だけ詰めて計算
     let off = cursor - widthBytes (storageWidth ty)
     -- 変数とアドレスのマップ, 命令＋追加命令＋変数のストア
-    Right (Map.insert name (off, ty) env, off, acc ++ instrs ++ [Store (storageWidth ty) off])
+    Right (insertVar name (off, ty) env, off, acc ++ instrs ++ [Store (storageWidth ty) off])
   -- xxx = ...
   step (env, cursor, acc) (SAssign name expr) = do
-    -- 変数の定義をチェック
-    (off, ty) <- maybe (Left ("undeclared variable: " ++ name)) Right (Map.lookup name env)
+    -- pTraceShowM ("compileStmtsFrom(SAssign)" :: String, env)
+    -- 変数の定義をチェック（外側スコープの変数への書き込みも許可）
+    (off, ty) <- maybe (Left ("undeclared variable: " ++ name)) Right (lookupVar name env)
     -- 式の表現から命令を抽出（既存の変数の型を期待型として渡す）
     instrs <- compileExprTyped env ty expr
     -- 変数とアドレスのマップはそのまま, 命令＋追加命令＋変数のストア
     Right (env, cursor, acc ++ instrs ++ [Store (storageWidth ty) off])
+  -- { ... }
+  step (env, cursor, acc) (SBlock innerStmts) = do
+    -- pTraceShowM ("compileStmtsFrom(SBlock)" :: String, env)
+    -- 先頭に空スコープをpushして再帰コンパイルし、返り値のEnv/cursorは破棄して呼び出し前の値をそのまま継続に使う
+    -- （＝スコープアウトとスタックオフセットの巻き戻しを同時に実現する）
+    (_, _, instrs) <- compileStmtsFrom (Map.empty : env) cursor innerStmts
+    Right (env, cursor, acc ++ instrs)
+
+-- [文]から命令を抽出
+compileStmts :: [Stmt] -> Either String (Env, [Instr])
+compileStmts stmts = do
+  (env, _cursor, instrs) <- compileStmtsFrom [Map.empty] 0 stmts
+  -- pTraceShowM ("compileStmts" :: String, env)
+  Right (env, instrs)
 
 -- Maybe Type の単一化（Nothing = 整数リテラルなど未確定な部分木）
 unifyType :: Type -> Type -> Either String Type
@@ -333,7 +385,7 @@ inferMaybeType env = go
   go (Lit _) = Right Nothing
   go (BoolLit _) = Right (Just TBool)
   go (Var name) =
-    maybe (Left ("undeclared variable: " ++ name)) (Right . Just . snd) (Map.lookup name env)
+    maybe (Left ("undeclared variable: " ++ name)) (Right . Just . snd) (lookupVar name env)
   go (Neg e) = go e
   go (Not e) = do
     t <- go e
@@ -381,7 +433,7 @@ compileExprTyped _ expected@(TyInt _) (BoolLit _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
 -- [let ]xxx = yyy;
 compileExprTyped env expected (Var name) =
-  case Map.lookup name env of
+  case lookupVar name env of
     Nothing -> Left ("undeclared variable: " ++ name)
     Just (off, ty)
       | ty /= expected ->
