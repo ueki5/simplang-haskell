@@ -6,6 +6,8 @@ import Data.Int (Int32)
 import Data.Map (Map)
 import qualified Data.Map as Map
 
+-- import Debug.Pretty.Simple (pTraceShowM)
+
 data Token
   = TInt Int
   | TIdent String
@@ -74,10 +76,10 @@ data Instr
   | ICmpEq
   | ICmpNe
   | INot
-  -- 下位32bitを符号拡張して64bitへ戻す（to_i64/to_i32 で共通の命令。
-  -- to_i64 側は被演算子が既に正規化済みi32であることが前提だが、
-  -- リテラル直渡し等で正規化されていない値が漏れないよう、両方向とも同じ命令で強制的に正規化する）
-  | ISext32
+  | -- 下位32bitを符号拡張して64bitへ戻す（to_i64/to_i32 で共通の命令。
+    -- to_i64 側は被演算子が既に正規化済みi32であることが前提だが、
+    -- リテラル直渡し等で正規化されていない値が漏れないよう、両方向とも同じ命令で強制的に正規化する）
+    ISext32
   deriving (Show, Eq)
 
 -- Lexer
@@ -320,8 +322,10 @@ typeName TBool = "bool"
 compile :: Program -> Either String (Type, [Instr])
 compile (stmts, expr) = do
   (env, stmtInstrs) <- compileStmts stmts
+  -- pTraceShowM ("No1" :: String, env)
   finalType <- inferType env expr
   exprInstrs <- compileExprTyped env finalType expr
+  -- pTraceShowM ("No2" :: String, env)
   Right (finalType, stmtInstrs ++ exprInstrs)
 
 -- 任意のEnv/cursorを起点に[文]から命令を抽出する（ブロックの再帰コンパイルに使う）
