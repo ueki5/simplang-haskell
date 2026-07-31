@@ -1,7 +1,7 @@
 module Main where
 
 import Compiler (Expr (..), Instr (..), Stmt (..), Token (..), Type (..), Width (..), compile, parse, run, tokenize)
-import Data.Either (isLeft)
+import Data.Either (isLeft, isRight)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
@@ -20,6 +20,8 @@ main = hspec $ do
       tokenize "+-*/" `shouldBe` Right [TPlus, TMinus, TStar, TSlash]
     it "括弧を変換する" $
       tokenize "(1)" `shouldBe` Right [TLParen, TInt 1, TRParen]
+    it "波括弧を変換する" $
+      tokenize "{ 1 }" `shouldBe` Right [TLBrace, TInt 1, TRBrace]
     it "未知の文字はエラー" $
       tokenize "1 + @" `shouldBe` Left "unexpected character: @"
     it "識別子を変換する" $
@@ -131,6 +133,22 @@ main = hspec $ do
     it "単項マイナスはto_i32より強く結合する" $
       parse [TToI32, TMinus, TInt 5]
         `shouldBe` Right ([], ToI32 (Neg (Lit 5)))
+    it "空ブロック" $
+      parse [TLBrace, TRBrace, TInt 5]
+        `shouldBe` Right ([SBlock []], Lit 5)
+    it "ブロック内にlet文を含む" $
+      parse
+        [ TLBrace
+        , TLet, TIdent "x", TColon, TIdent "i64", TAssign, TInt 1, TSemicolon
+        , TRBrace
+        , TInt 2
+        ]
+        `shouldBe` Right ([SBlock [SLet "x" (TyInt W64) (Lit 1)]], Lit 2)
+    it "ネストしたブロック" $
+      parse [TLBrace, TLBrace, TRBrace, TRBrace, TInt 1]
+        `shouldBe` Right ([SBlock [SBlock []]], Lit 1)
+    it "閉じ括弧がないブロックはエラー" $
+      parse [TLBrace] `shouldBe` Left "expected closing brace"
 
   describe "codegen" $ do
     it "プロローグにmainラベルを含む" $
@@ -267,6 +285,13 @@ main = hspec $ do
     it "to_i64の結果をboolコンテキストで使うとエラー" $
       compileSource "let x: i32 = 1;\nto_i64(x) == true"
         `shouldSatisfy` isLeft
+    it "ブロックを抜けた後の内部宣言変数の参照はエラー" $
+      compileSource "{\nlet x: i64 = 1;\n}\nx" `shouldBe` Left "undeclared variable: x"
+    it "同一ブロック内での同名再宣言はエラー" $
+      compileSource "{\nlet x: i64 = 1;\nlet x: i64 = 2;\n}\n1"
+        `shouldBe` Left "variable already declared: x"
+    it "外側と同名の変数をブロック内でletしてもエラーにならない（シャドーイング）" $
+      compileSource "let x: i64 = 1;\n{\nlet x: i64 = 2;\n}\nx" `shouldSatisfy` isRight
 
   describe "run（VM）" $ do
     it "Load/Storeで変数の値を保持する" $
@@ -394,6 +419,19 @@ main = hspec $ do
     it "to_i32とto_i64のラウンドトリップ（i32->i64->i32）は値を保存する" $ do
       result <- compileSourceAndRun "let x: i32 = 42;\nto_i32(to_i64(x))"
       result `shouldBe` "42"
+    it "ブロック内からの代入は外側の変数へ反映される" $ do
+      result <- compileSourceAndRun "let x: i64 = 1;\n{\nx = 2;\n}\nx"
+      result `shouldBe` "2"
+    it "シャドーイングされた変数はブロックを抜けると外側の値に戻る" $ do
+      result <- compileSourceAndRun "let x: i64 = 1;\n{\nlet x: i64 = 99;\n}\nx"
+      result `shouldBe` "1"
+    it "兄弟ブロックはそれぞれ独立にローカル変数を持てる（同名変数の再利用を含む）" $ do
+      result <- compileSourceAndRun
+        "let sum: i64 = 0;\n{\nlet y: i64 = 1;\nsum = sum + y;\n}\n{\nlet y: i64 = 2;\nsum = sum + y;\n}\nsum"
+      result `shouldBe` "3"
+    it "空ブロックは合法で何もしない" $ do
+      result <- compileSourceAndRun "let x: i64 = 1;\n{}\nx"
+      result `shouldBe` "1"
 
   describe "ゼロ除算の実行時エラー" $ do
     it "変数なしのゼロ除算はエラーメッセージを出力して非ゼロ終了する" $ do
