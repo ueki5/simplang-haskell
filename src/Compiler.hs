@@ -1,6 +1,8 @@
 module Compiler (Token (..), Expr (..), Stmt (..), Instr (..), Width (..), Type (..), Program, tokenize, parse, compile, run) where
 
 import Control.Monad (foldM, when)
+import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.State (StateT, evalStateT, get, put)
 import Data.Char (isAlpha, isAlphaNum, isDigit, isSpace)
 import Data.Int (Int32)
 import Data.Map (Map)
@@ -12,6 +14,8 @@ data Token
   = TInt Int
   | TIdent String
   | TLet
+  | TIf
+  | TElse
   | TTrue
   | TFalse
   | TColon
@@ -52,6 +56,8 @@ data Stmt
   = SLet String Type Expr
   | SAssign String Expr
   | SBlock [Stmt]
+  | -- if/else-if*/else?（値を返さない文。分岐は [(条件式, 本体)] の列＋任意のelse本体）
+    SIf [(Expr, [Stmt])] (Maybe [Stmt])
   deriving (Show, Eq)
 
 -- 文の列 + 必須の末尾式
@@ -76,6 +82,12 @@ data Instr
   | ICmpEq
   | ICmpNe
   | INot
+  | -- スタック先頭をpopしてゼロ判定し、真（非ゼロ）ならフォールスルー、偽（ゼロ）ならジャンプする
+    JmpIfZero String
+  | -- 無条件ジャンプ
+    Jmp String
+  | -- ジャンプ先ラベルの定義
+    Label String
   | -- 下位32bitを符号拡張して64bitへ戻す（to_i64/to_i32 で共通の命令。
     -- to_i64 側は被演算子が既に正規化済みi32であることが前提だが、
     -- リテラル直渡し等で正規化されていない値が漏れないよう、両方向とも同じ命令で強制的に正規化する）
@@ -97,6 +109,8 @@ tokenize (c : cs)
       let (ident, rest) = span (\ch -> isAlphaNum ch || ch == '_') (c : cs)
        in case ident of
             "let" -> (TLet :) <$> tokenize rest
+            "if" -> (TIf :) <$> tokenize rest
+            "else" -> (TElse :) <$> tokenize rest
             "true" -> (TTrue :) <$> tokenize rest
             "false" -> (TFalse :) <$> tokenize rest
             "to_i64" -> (TToI64 :) <$> tokenize rest
@@ -119,10 +133,11 @@ tokenize (c : cs)
 -- Parser
 --
 -- program    ::= stmt* expr
--- stmt       ::= let-stmt | assign-stmt | block-stmt
+-- stmt       ::= let-stmt | assign-stmt | block-stmt | if-stmt
 -- let-stmt    ::= 'let' IDENT ':' ('i32' | 'i64' | 'bool') '=' expr ';'
 -- assign-stmt ::= IDENT '=' expr ';'
 -- block-stmt ::= '{' stmt* '}'
+-- if-stmt    ::= 'if' expr '{' stmt* '}' ('else' 'if' expr '{' stmt* '}')* ('else' '{' stmt* '}')?
 -- expr     ::= equality
 -- equality ::= additive (('==' | '!=') additive)*
 -- additive ::= term (('+' | '-') term)*
@@ -153,6 +168,10 @@ parseStmts (TIdent name : TAssign : rest) = do
   Right (stmt : stmts, rest'')
 parseStmts (TLBrace : rest) = do
   (stmt, rest') <- parseBlockStmt rest
+  (stmts, rest'') <- parseStmts rest'
+  Right (stmt : stmts, rest'')
+parseStmts (TIf : rest) = do
+  (stmt, rest') <- parseIfStmt rest
   (stmts, rest'') <- parseStmts rest'
   Right (stmt : stmts, rest'')
 parseStmts tokens = Right ([], tokens)
@@ -190,6 +209,36 @@ parseBlockStmt tokens = do
   case rest of
     (TRBrace : rest') -> Right (SBlock stmts, rest')
     _ -> Left "expected closing brace"
+
+-- if-stmt ::= 'if' expr '{' stmt* '}' ('else' 'if' expr '{' stmt* '}')* ('else' '{' stmt* '}')?（先頭の'if'は呼び出し側で消費済み）
+parseIfStmt :: [Token] -> ParseResult Stmt
+parseIfStmt tokens = do
+  (branch, rest) <- parseIfBranch tokens
+  parseIfRest [branch] rest
+
+-- 条件式 + '{' stmt* '}' の1分岐分（'if'/'else if' 共通）
+parseIfBranch :: [Token] -> ParseResult (Expr, [Stmt])
+parseIfBranch tokens = do
+  (cond, rest) <- parseEquality tokens
+  rest' <- expectToken TLBrace rest
+  (body, rest'') <- parseStmts rest'
+  case rest'' of
+    (TRBrace : rest3) -> Right ((cond, body), rest3)
+    _ -> Left "expected closing brace"
+
+-- 'else if' の継続、末尾の 'else'、あるいはどちらも無ければ確定した分岐列でSIfを組み立てる
+parseIfRest :: [(Expr, [Stmt])] -> [Token] -> ParseResult Stmt
+parseIfRest acc (TElse : TIf : rest) = do
+  (branch, rest') <- parseIfBranch rest
+  parseIfRest (acc ++ [branch]) rest'
+parseIfRest acc (TElse : TLBrace : rest) = do
+  (elseBody, rest') <- parseStmts rest
+  case rest' of
+    (TRBrace : rest'') -> Right (SIf acc (Just elseBody), rest'')
+    _ -> Left "expected closing brace"
+parseIfRest _ (TElse : t : _) = Left ("expected 'if' or '{' after 'else', got: " ++ show t)
+parseIfRest _ [TElse] = Left "expected 'if' or '{' after 'else', got end of input"
+parseIfRest acc rest = Right (SIf acc Nothing, rest)
 
 -- 識別子の抽出（変数、型名など）
 expectIdent :: [Token] -> ParseResult String
@@ -326,43 +375,87 @@ compile (stmts, expr) = do
   exprInstrs <- compileExprTyped env finalType expr
   Right (finalType, stmtInstrs ++ exprInstrs)
 
--- 任意のEnv/cursorを起点に[文]から命令を抽出する（ブロックの再帰コンパイルに使う）
-compileStmtsFrom :: Env -> Int -> [Stmt] -> Either String (Env, Int, [Instr])
+-- if の分岐ラベル採番用のカウンタを持ち回るモナド。
+-- Env/cursor はブロックやif分岐を抜けるたびに「呼び出し前の値へ巻き戻す」必要がある一方、
+-- ラベル番号は逆に「巻き戻してはいけない」（同名ラベルの重複はアセンブル時に壊れる）。
+-- この非対称性を素朴なタプル要素として持ち回ると、SBlock のように戻り値のEnv/cursorを
+-- 握りつぶす実装をうっかりコピーしてラベルカウンタまで一緒に握りつぶす事故が起きやすい。
+-- StateT の状態として分離しておけば、Env/cursorをどう扱おうと状態は常に `>>=` の鎖に沿って
+-- 素通しされるため、この種の事故が構造的に起こらない。
+type CompileM = StateT Int (Either String)
+
+-- 新しい一意なラベル名を払い出す（.L はGASのローカルラベル慣習に合わせたプレフィックス）
+freshLabel :: String -> CompileM String
+freshLabel prefix = do
+  n <- get
+  put (n + 1)
+  pure (".L" ++ prefix ++ show n)
+
+-- 任意のEnv/cursorを起点に[文]から命令を抽出する（ブロック/if分岐の再帰コンパイルに使う）
+compileStmtsFrom :: Env -> Int -> [Stmt] -> CompileM (Env, Int, [Instr])
 compileStmtsFrom initEnv initCursor stmts = foldM step (initEnv, initCursor, []) stmts
  where
   -- let xxx: 型 = ...
   step (env, cursor, acc) (SLet name ty expr) = do
-    -- pTraceShowM ("compileStmtsFrom(Slet)" :: String, env)
     -- 変数の二重定義をチェック（同一ブロック内の再宣言のみ対象。外側との同名はシャドーイングとして許可）
-    when (declaredLocally name env) $ Left ("variable already declared: " ++ name)
+    when (declaredLocally name env) $ lift (Left ("variable already declared: " ++ name))
     -- 式の表現から命令を抽出（宣言された型を期待型として渡す）
-    instrs <- compileExprTyped env ty expr
+    instrs <- lift (compileExprTyped env ty expr)
     -- 新しく登録する変数のスタック上のアドレスを、型の物理格納幅分だけ詰めて計算
     let off = cursor - widthBytes (storageWidth ty)
     -- 変数とアドレスのマップ, 命令＋追加命令＋変数のストア
-    Right (insertVar name (off, ty) env, off, acc ++ instrs ++ [Store (storageWidth ty) off])
+    pure (insertVar name (off, ty) env, off, acc ++ instrs ++ [Store (storageWidth ty) off])
   -- xxx = ...
   step (env, cursor, acc) (SAssign name expr) = do
-    -- pTraceShowM ("compileStmtsFrom(SAssign)" :: String, env)
     -- 変数の定義をチェック（外側スコープの変数への書き込みも許可）
-    (off, ty) <- maybe (Left ("undeclared variable: " ++ name)) Right (lookupVar name env)
+    (off, ty) <- lift (maybe (Left ("undeclared variable: " ++ name)) Right (lookupVar name env))
     -- 式の表現から命令を抽出（既存の変数の型を期待型として渡す）
-    instrs <- compileExprTyped env ty expr
+    instrs <- lift (compileExprTyped env ty expr)
     -- 変数とアドレスのマップはそのまま, 命令＋追加命令＋変数のストア
-    Right (env, cursor, acc ++ instrs ++ [Store (storageWidth ty) off])
+    pure (env, cursor, acc ++ instrs ++ [Store (storageWidth ty) off])
   -- { ... }
   step (env, cursor, acc) (SBlock innerStmts) = do
-    -- pTraceShowM ("compileStmtsFrom(SBlock)" :: String, env)
     -- 先頭に空スコープをpushして再帰コンパイルし、返り値のEnv/cursorは破棄して呼び出し前の値をそのまま継続に使う
     -- （＝スコープアウトとスタックオフセットの巻き戻しを同時に実現する）
     (_, _, instrs) <- compileStmtsFrom (Map.empty : env) cursor innerStmts
-    Right (env, cursor, acc ++ instrs)
+    pure (env, cursor, acc ++ instrs)
+  -- if 式 {...} (else if 式 {...})* (else {...})?
+  step (env, cursor, acc) (SIf branches maybeElse) = do
+    instrs <- compileIf env cursor branches maybeElse
+    pure (env, cursor, acc ++ instrs)
+
+-- if/else-if/else の分岐列を、条件が偽なら次の分岐へジャンプする形の命令列へ展開する。
+-- 各分岐の本体はブロックと同じく独立スコープでコンパイルし、Env/cursorは呼び出し側へ伝播させない
+-- （if全体も値を返さない文であり、外側から見た変数の状態はifに入る前と変わらない）。
+compileIf :: Env -> Int -> [(Expr, [Stmt])] -> Maybe [Stmt] -> CompileM [Instr]
+compileIf env cursor branches maybeElse = do
+  endLabel <- freshLabel "if_end"
+  body <- go endLabel branches
+  pure (body ++ [Label endLabel])
+ where
+  go _ [] = case maybeElse of
+    Nothing -> pure []
+    Just elseStmts -> do
+      (_, _, instrs) <- compileStmtsFrom (Map.empty : env) cursor elseStmts
+      pure instrs
+  go endLabel ((cond, body) : rest) = do
+    -- 条件式は式木としては expected とは独立にbool型を要求する（if自体はexprを持たない）
+    condInstrs <- lift (compileExprTyped env TBool cond)
+    nextLabel <- freshLabel "if_next"
+    (_, _, bodyInstrs) <- compileStmtsFrom (Map.empty : env) cursor body
+    restInstrs <- go endLabel rest
+    pure
+      ( condInstrs
+          ++ [JmpIfZero nextLabel]
+          ++ bodyInstrs
+          ++ [Jmp endLabel, Label nextLabel]
+          ++ restInstrs
+      )
 
 -- [文]から命令を抽出
 compileStmts :: [Stmt] -> Either String (Env, [Instr])
 compileStmts stmts = do
-  (env, _cursor, instrs) <- compileStmtsFrom [Map.empty] 0 stmts
-  -- pTraceShowM ("compileStmts" :: String, env)
+  (env, _cursor, instrs) <- evalStateT (compileStmtsFrom [Map.empty] 0 stmts) 0
   Right (env, instrs)
 
 -- Maybe Type の単一化（Nothing = 整数リテラルなど未確定な部分木）

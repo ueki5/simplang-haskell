@@ -198,6 +198,17 @@ genInstr INot =
   , "    xorq  $1, %rax"
   , "    pushq %rax"
   ]
+genInstr (JmpIfZero lbl) =
+  [ "    popq  %rax"
+  , "    testq %rax, %rax"
+  , "    je    " ++ lbl
+  ]
+genInstr (Jmp lbl) =
+  [ "    jmp   " ++ lbl
+  ]
+genInstr (Label lbl) =
+  [ lbl ++ ":"
+  ]
 genInstr ISext32 =
   [ "    popq  %rax"
   , "    cltq"

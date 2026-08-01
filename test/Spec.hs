@@ -49,6 +49,10 @@ main = hspec $ do
       tokenize "to_i64 to_i32" `shouldBe` Right [TToI64, TToI32]
     it "to_i64/to_i32で始まる識別子はTIdentのまま" $
       tokenize "to_i64x to_i32_foo" `shouldBe` Right [TIdent "to_i64x", TIdent "to_i32_foo"]
+    it "if/else予約語を変換する" $
+      tokenize "if else" `shouldBe` Right [TIf, TElse]
+    it "if/elseで始まる識別子はTIdentのまま" $
+      tokenize "iffy elsewhere" `shouldBe` Right [TIdent "iffy", TIdent "elsewhere"]
 
   describe "parse" $ do
     it "整数リテラル" $
@@ -149,6 +153,43 @@ main = hspec $ do
         `shouldBe` Right ([SBlock [SBlock []]], Lit 1)
     it "閉じ括弧がないブロックはエラー" $
       parse [TLBrace] `shouldBe` Left "expected closing brace"
+    it "if文（elseなし）" $
+      parse [TIf, TTrue, TLBrace, TRBrace, TInt 1]
+        `shouldBe` Right ([SIf [(BoolLit True, [])] Nothing], Lit 1)
+    it "if-else文" $
+      parse [TIf, TTrue, TLBrace, TRBrace, TElse, TLBrace, TRBrace, TInt 1]
+        `shouldBe` Right ([SIf [(BoolLit True, [])] (Just [])], Lit 1)
+    it "if-else if-else文（複数のelse if）" $
+      parse
+        [ TIf, TTrue, TLBrace, TRBrace
+        , TElse, TIf, TFalse, TLBrace, TRBrace
+        , TElse, TIf, TTrue, TLBrace, TRBrace
+        , TElse, TLBrace, TRBrace
+        , TInt 1
+        ]
+        `shouldBe` Right
+          ( [SIf [(BoolLit True, []), (BoolLit False, []), (BoolLit True, [])] (Just [])]
+          , Lit 1
+          )
+    it "if文の本体にlet文を含む" $
+      parse
+        [ TIf, TTrue, TLBrace
+        , TLet, TIdent "x", TColon, TIdent "i64", TAssign, TInt 1, TSemicolon
+        , TRBrace
+        , TInt 2
+        ]
+        `shouldBe` Right ([SIf [(BoolLit True, [SLet "x" (TyInt W64) (Lit 1)])] Nothing], Lit 2)
+    it "if文はブロック文としてネストできる" $
+      parse [TLBrace, TIf, TTrue, TLBrace, TRBrace, TRBrace, TInt 1]
+        `shouldBe` Right ([SBlock [SIf [(BoolLit True, [])] Nothing]], Lit 1)
+    it "if文の条件式が無ければエラー" $
+      parse [TIf, TLBrace, TRBrace, TInt 1] `shouldSatisfy` isLeft
+    it "if文で閉じ波括弧がなければエラー" $
+      parse [TIf, TTrue, TLBrace, TInt 1] `shouldBe` Left "expected closing brace"
+    it "elseの後にifも{もなければエラー" $
+      parse [TIf, TTrue, TLBrace, TRBrace, TElse, TInt 1] `shouldSatisfy` isLeft
+    it "elseで入力が終わるとエラー" $
+      parse [TIf, TTrue, TLBrace, TRBrace, TElse] `shouldSatisfy` isLeft
 
   describe "codegen" $ do
     it "プロローグにmainラベルを含む" $
@@ -207,6 +248,14 @@ main = hspec $ do
       codegen (TyInt W64) [INot] `shouldContain` "xorq"
     it "ISext32をcltq命令に変換する（to_i64/to_i32共通の符号拡張正規化）" $
       codegen (TyInt W64) [ISext32] `shouldContain` "cltq"
+    it "JmpIfZeroはpop+testq+je命令に変換する" $ do
+      let asm = codegen (TyInt W64) [JmpIfZero ".Lfoo"]
+      asm `shouldContain` "testq %rax, %rax"
+      asm `shouldContain` "je    .Lfoo"
+    it "Jmpはjmp命令に変換する" $
+      codegen (TyInt W64) [Jmp ".Lfoo"] `shouldContain` "jmp   .Lfoo"
+    it "Labelはラベル定義行に変換する" $
+      codegen (TyInt W64) [Label ".Lfoo"] `shouldContain` ".Lfoo:"
     it "最終値がboolなら分岐でtrue/false文字列を出力する" $ do
       let asm = codegen TBool []
       asm `shouldContain` "testq %rax, %rax"
@@ -292,6 +341,16 @@ main = hspec $ do
         `shouldBe` Left "variable already declared: x"
     it "外側と同名の変数をブロック内でletしてもエラーにならない（シャドーイング）" $
       compileSource "let x: i64 = 1;\n{\nlet x: i64 = 2;\n}\nx" `shouldSatisfy` isRight
+    it "if文の条件式が整数リテラルはエラー" $
+      compileSource "if 1 {\n}\n1" `shouldBe` Left "type mismatch: expected bool, found integer literal"
+    it "if文の条件式が整数変数はエラー" $
+      compileSource "let x: i32 = 1;\nif x {\n}\n1"
+        `shouldBe` Left "type mismatch: expected bool, found i32"
+    it "if文の本体を抜けた後の内部宣言変数の参照はエラー" $
+      compileSource "if true {\nlet x: i64 = 1;\n}\nx" `shouldBe` Left "undeclared variable: x"
+    it "else if文の条件式が非bool式はエラー" $
+      compileSource "if false {\n} else if 1 {\n}\n1"
+        `shouldBe` Left "type mismatch: expected bool, found integer literal"
 
   describe "run（VM）" $ do
     it "Load/Storeで変数の値を保持する" $
@@ -432,6 +491,54 @@ main = hspec $ do
     it "空ブロックは合法で何もしない" $ do
       result <- compileSourceAndRun "let x: i64 = 1;\n{}\nx"
       result `shouldBe` "1"
+
+  describe "compile + codegen + gcc（if文の結合テスト）" $ do
+    it "条件が真ならif本体を実行する" $ do
+      result <- compileSourceAndRun "let x: i64 = 0;\nif true {\nx = 1;\n}\nx"
+      result `shouldBe` "1"
+    it "条件が偽ならif本体を実行しない（elseなし）" $ do
+      result <- compileSourceAndRun "let x: i64 = 0;\nif false {\nx = 1;\n}\nx"
+      result `shouldBe` "0"
+    it "条件が偽ならelse本体を実行する" $ do
+      result <- compileSourceAndRun "let x: i64 = 0;\nif false {\nx = 1;\n} else {\nx = 2;\n}\nx"
+      result `shouldBe` "2"
+    it "条件が真ならelseは実行されない" $ do
+      result <- compileSourceAndRun "let x: i64 = 0;\nif true {\nx = 1;\n} else {\nx = 2;\n}\nx"
+      result `shouldBe` "1"
+    it "比較演算子を条件式に使える" $ do
+      result <- compileSourceAndRun "let x: i32 = 3;\nlet y: i32 = 0;\nif x == 3 {\ny = 1;\n} else {\ny = 2;\n}\ny"
+      result `shouldBe` "1"
+    it "else ifで最初に真になった分岐だけを実行する" $ do
+      result <- compileSourceAndRun
+        "let x: i64 = 2;\nlet y: i64 = 0;\nif x == 1 {\ny = 1;\n} else if x == 2 {\ny = 2;\n} else if x == 2 {\ny = 3;\n} else {\ny = 4;\n}\ny"
+      result `shouldBe` "2"
+    it "else ifが全て偽ならelse本体を実行する" $ do
+      result <- compileSourceAndRun
+        "let x: i64 = 9;\nlet y: i64 = 0;\nif x == 1 {\ny = 1;\n} else if x == 2 {\ny = 2;\n} else {\ny = 3;\n}\ny"
+      result `shouldBe` "3"
+    it "else ifが全て偽でelseも無ければ何も実行しない" $ do
+      result <- compileSourceAndRun
+        "let x: i64 = 9;\nlet y: i64 = 0;\nif x == 1 {\ny = 1;\n} else if x == 2 {\ny = 2;\n}\ny"
+      result `shouldBe` "0"
+    it "ifをネストできる" $ do
+      result <- compileSourceAndRun
+        "let x: i64 = 1;\nif x == 1 {\nif x == 1 {\nx = 42;\n}\n}\nx"
+      result `shouldBe` "42"
+    it "ブロック内にifをネストできる" $ do
+      result <- compileSourceAndRun "let x: i64 = 1;\n{\nif x == 1 {\nx = 42;\n}\n}\nx"
+      result `shouldBe` "42"
+    it "then節とelse節はそれぞれ独立したローカル変数を持てる（同名変数の再利用を含む）" $ do
+      result <- compileSourceAndRun
+        "let sum: i64 = 0;\nif true {\nlet y: i64 = 1;\nsum = sum + y;\n} else {\nlet y: i64 = 99;\nsum = sum + y;\n}\nsum"
+      result `shouldBe` "1"
+    it "if本体を抜けるとその中で宣言した変数は不可視になる（シャドーイングも含めた回帰確認）" $ do
+      result <- compileSourceAndRun
+        "let x: i64 = 1;\nif true {\nlet x: i64 = 99;\nx = 2;\n}\nx"
+      result `shouldBe` "1"
+    it "複数のifが連続しても互いに独立して動作する" $ do
+      result <- compileSourceAndRun
+        "let a: i64 = 0;\nlet b: i64 = 0;\nif true {\na = 1;\n} else {\na = 2;\n}\nif false {\nb = 1;\n} else {\nb = 2;\n}\na + b"
+      result `shouldBe` "3"
 
   describe "ゼロ除算の実行時エラー" $ do
     it "変数なしのゼロ除算はエラーメッセージを出力して非ゼロ終了する" $ do
