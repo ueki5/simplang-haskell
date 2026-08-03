@@ -8,7 +8,13 @@ import Data.Int (Int32)
 import Data.Map (Map)
 import qualified Data.Map as Map
 
--- import Debug.Pretty.Simple (pTraceShowM)
+-- Debug Printサンプル（ipTraceShow: 純粋関数内, pTraceShowM: モナド内）
+import Debug.Pretty.Simple (pTraceShow, pTraceShowM)
+
+-- プリティ印刷が不要な場合
+-- trace: 純粋関数内(既存の第一引数を表示、第二引数を返却)
+-- print/putStrLn: IOモナド内
+import Debug.Trace (trace)
 
 data Token
   = TInt Int
@@ -337,7 +343,7 @@ type Env = [Map String (Int, Type)]
 lookupVar :: String -> Env -> Maybe (Int, Type)
 lookupVar _ [] = Nothing
 lookupVar name (scope : rest) =
-  case Map.lookup name scope of
+  pTraceShow ("name", name) $ case Map.lookup name scope of
     Just v -> Just v
     Nothing -> lookupVar name rest
 
@@ -389,6 +395,7 @@ freshLabel :: String -> CompileM String
 freshLabel prefix = do
   n <- get
   put (n + 1)
+  pTraceShowM ("freshLabel" :: String, ".L" ++ prefix ++ show n)
   pure (".L" ++ prefix ++ show n)
 
 -- 任意のEnv/cursorを起点に[文]から命令を抽出する（ブロック/if分岐の再帰コンパイルに使う）
