@@ -343,9 +343,10 @@ type Env = [Map String (Int, Type)]
 lookupVar :: String -> Env -> Maybe (Int, Type)
 lookupVar _ [] = Nothing
 lookupVar name (scope : rest) =
-  pTraceShow ("name", name) $ case Map.lookup name scope of
-    Just v -> Just v
-    Nothing -> lookupVar name rest
+  pTraceShow ("name", name) $
+    case Map.lookup name scope of
+      Just v -> Just v
+      Nothing -> lookupVar name rest
 
 -- 先頭スコープ（現在のブロック）にのみ宣言されているかを判定する（シャドーイング判定用）
 declaredLocally :: String -> Env -> Bool
