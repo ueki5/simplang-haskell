@@ -8,7 +8,7 @@ import Data.Int (Int32)
 import Data.Map (Map)
 import qualified Data.Map as Map
 
--- -- Debug Printサンプル（ipTraceShow: 純粋関数内, pTraceShowM: モナド内）
+-- -- Debug Printサンプル（pTraceShow: 純粋関数内, pTraceShowM: モナド内）
 -- import Debug.Pretty.Simple (pTraceShow, pTraceShowM)
 
 -- -- プリティ印刷が不要な場合
@@ -437,6 +437,7 @@ compileStmtsFrom initEnv initCursor stmts = foldM step (initEnv, initCursor, [])
 -- （if全体も値を返さない文であり、外側から見た変数の状態はifに入る前と変わらない）。
 compileIf :: Env -> Int -> [(Expr, [Stmt])] -> Maybe [Stmt] -> CompileM [Instr]
 compileIf env cursor branches maybeElse = do
+  -- pTraceShowM ("branches", branches)
   endLabel <- freshLabel "if_end"
   body <- go endLabel branches
   pure (body ++ [Label endLabel])
