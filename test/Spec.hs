@@ -53,6 +53,11 @@ main = hspec $ do
       tokenize "if else" `shouldBe` Right [TIf, TElse]
     it "if/elseで始まる識別子はTIdentのまま" $
       tokenize "iffy elsewhere" `shouldBe` Right [TIdent "iffy", TIdent "elsewhere"]
+    it "while/break/continue予約語を変換する" $
+      tokenize "while break continue" `shouldBe` Right [TWhile, TBreak, TContinue]
+    it "while/break/continueで始まる識別子はTIdentのまま" $
+      tokenize "whiley breaker continued"
+        `shouldBe` Right [TIdent "whiley", TIdent "breaker", TIdent "continued"]
 
   describe "parse" $ do
     it "整数リテラル" $
@@ -190,6 +195,32 @@ main = hspec $ do
       parse [TIf, TTrue, TLBrace, TRBrace, TElse, TInt 1] `shouldSatisfy` isLeft
     it "elseで入力が終わるとエラー" $
       parse [TIf, TTrue, TLBrace, TRBrace, TElse] `shouldSatisfy` isLeft
+    it "while文" $
+      parse [TWhile, TTrue, TLBrace, TRBrace, TInt 1]
+        `shouldBe` Right ([SWhile (BoolLit True) []], Lit 1)
+    it "while文の本体にlet文とbreak文を含む" $
+      parse
+        [ TWhile, TTrue, TLBrace
+        , TLet, TIdent "x", TColon, TIdent "i64", TAssign, TInt 1, TSemicolon
+        , TBreak, TSemicolon
+        , TRBrace
+        , TInt 2
+        ]
+        `shouldBe` Right ([SWhile (BoolLit True) [SLet "x" (TyInt W64) (Lit 1), SBreak]], Lit 2)
+    it "continue文" $
+      parse [TWhile, TTrue, TLBrace, TContinue, TSemicolon, TRBrace, TInt 1]
+        `shouldBe` Right ([SWhile (BoolLit True) [SContinue]], Lit 1)
+    it "while文はブロック文としてネストできる" $
+      parse [TLBrace, TWhile, TTrue, TLBrace, TRBrace, TRBrace, TInt 1]
+        `shouldBe` Right ([SBlock [SWhile (BoolLit True) []]], Lit 1)
+    it "while文の条件式が無ければエラー" $
+      parse [TWhile, TLBrace, TRBrace, TInt 1] `shouldSatisfy` isLeft
+    it "while文で閉じ波括弧がなければエラー" $
+      parse [TWhile, TTrue, TLBrace, TInt 1] `shouldBe` Left "expected closing brace"
+    it "break文に;が無ければエラー" $
+      parse [TWhile, TTrue, TLBrace, TBreak, TRBrace, TInt 1] `shouldSatisfy` isLeft
+    it "continue文に;が無ければエラー" $
+      parse [TWhile, TTrue, TLBrace, TContinue, TRBrace, TInt 1] `shouldSatisfy` isLeft
 
   describe "codegen" $ do
     it "プロローグにmainラベルを含む" $
@@ -351,6 +382,22 @@ main = hspec $ do
     it "else if文の条件式が非bool式はエラー" $
       compileSource "if false {\n} else if 1 {\n}\n1"
         `shouldBe` Left "type mismatch: expected bool, found integer literal"
+    it "while文の条件式が整数リテラルはエラー" $
+      compileSource "while 1 {\n}\n1"
+        `shouldBe` Left "type mismatch: expected bool, found integer literal"
+    it "while文の条件式が整数変数はエラー" $
+      compileSource "let x: i32 = 1;\nwhile x {\n}\n1"
+        `shouldBe` Left "type mismatch: expected bool, found i32"
+    it "while文の本体を抜けた後の内部宣言変数の参照はエラー" $
+      compileSource "while true {\nlet x: i64 = 1;\nbreak;\n}\nx" `shouldBe` Left "undeclared variable: x"
+    it "break文をループ外で使うとエラー" $
+      compileSource "break;\n1" `shouldBe` Left "break used outside loop"
+    it "continue文をループ外で使うとエラー" $
+      compileSource "continue;\n1" `shouldBe` Left "continue used outside loop"
+    it "break文をif文の中（ループ外）で使うとエラー" $
+      compileSource "if true {\nbreak;\n}\n1" `shouldBe` Left "break used outside loop"
+    it "break文をwhileの外側のブロックで使うとエラー（ループを抜けた後は無効）" $
+      compileSource "while true {\nbreak;\n}\n{\nbreak;\n}\n1" `shouldBe` Left "break used outside loop"
 
   describe "run（VM）" $ do
     it "Load/Storeで変数の値を保持する" $
@@ -539,6 +586,42 @@ main = hspec $ do
       result <- compileSourceAndRun
         "let a: i64 = 0;\nlet b: i64 = 0;\nif true {\na = 1;\n} else {\na = 2;\n}\nif false {\nb = 1;\n} else {\nb = 2;\n}\na + b"
       result `shouldBe` "3"
+
+  describe "compile + codegen + gcc（while文の結合テスト）" $ do
+    it "基本的なカウントダウンループを実行する" $ do
+      result <- compileSourceAndRun
+        "let x: i64 = 3;\nlet sum: i64 = 0;\nwhile x != 0 {\nsum = sum + x;\nx = x - 1;\n}\nsum"
+      result `shouldBe` "6"
+    it "条件が最初から偽なら本体を一度も実行しない" $ do
+      result <- compileSourceAndRun "let x: i64 = 0;\nwhile x != 0 {\nx = 1;\n}\nx"
+      result `shouldBe` "0"
+    it "breakでループを早期終了する" $ do
+      result <- compileSourceAndRun
+        "let x: i64 = 0;\nwhile true {\nx = x + 1;\nif x == 3 {\nbreak;\n}\n}\nx"
+      result `shouldBe` "3"
+    it "continueで本体の残りをスキップし条件を再評価する" $ do
+      result <- compileSourceAndRun
+        "let x: i64 = 0;\nlet sum: i64 = 0;\nwhile x != 5 {\nx = x + 1;\nif x == 3 {\ncontinue;\n}\nsum = sum + x;\n}\nsum"
+      result `shouldBe` "12"
+    it "whileをネストできる（内側のbreakは外側に影響しない）" $ do
+      result <- compileSourceAndRun
+        "let i: i64 = 0;\nlet count: i64 = 0;\nwhile i != 3 {\nlet j: i64 = 0;\nwhile j != 5 {\nif j == 2 {\nbreak;\n}\ncount = count + 1;\nj = j + 1;\n}\ni = i + 1;\n}\ncount"
+      result `shouldBe` "6"
+    it "whileのネストで内側のcontinueは外側ループに影響しない" $ do
+      result <- compileSourceAndRun
+        "let i: i64 = 0;\nlet count: i64 = 0;\nwhile i != 2 {\nlet j: i64 = 0;\nwhile j != 3 {\nj = j + 1;\nif j == 2 {\ncontinue;\n}\ncount = count + 1;\n}\ni = i + 1;\n}\ncount"
+      result `shouldBe` "4"
+    it "while本体を抜けるとその中で宣言した変数は不可視になる（毎イテレーション巻き戻る）" $ do
+      result <- compileSourceAndRun
+        "let x: i64 = 0;\nlet i: i64 = 0;\nwhile i != 3 {\nlet y: i64 = 100;\ny = y + 1;\ni = i + 1;\n}\nx"
+      result `shouldBe` "0"
+    it "ブロック内にwhileをネストできる" $ do
+      result <- compileSourceAndRun "let x: i64 = 0;\n{\nwhile x != 3 {\nx = x + 1;\n}\n}\nx"
+      result `shouldBe` "3"
+    it "複数のwhileが連続しても互いに独立して動作する（ラベルの一意性の間接的な確認）" $ do
+      result <- compileSourceAndRun
+        "let a: i64 = 0;\nwhile a != 2 {\na = a + 1;\n}\nlet b: i64 = 0;\nwhile b != 3 {\nb = b + 1;\n}\na + b"
+      result `shouldBe` "5"
 
   describe "ゼロ除算の実行時エラー" $ do
     it "変数なしのゼロ除算はエラーメッセージを出力して非ゼロ終了する" $ do
