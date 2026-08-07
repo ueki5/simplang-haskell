@@ -363,7 +363,7 @@ parseComparisonRest left (TGe : rest) = do
   parseComparisonRest (Ge left right) rest'
 parseComparisonRest left rest = Right (left, rest)
 
--- 加算・減算の抽出
+-- 式の抽出
 parseExpr :: [Token] -> ParseResult Expr
 parseExpr tokens = do
   (left, rest) <- parseTerm tokens
