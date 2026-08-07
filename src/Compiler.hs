@@ -31,6 +31,10 @@ data Token
   | TAssign
   | TEq
   | TNeq
+  | TLt
+  | TLe
+  | TGt
+  | TGe
   | TBang
   | TToI64
   | TToI32
@@ -56,6 +60,10 @@ data Expr
   | Neg Expr
   | Eq Expr Expr
   | Neq Expr Expr
+  | Lt Expr Expr
+  | Le Expr Expr
+  | Gt Expr Expr
+  | Ge Expr Expr
   | Not Expr
   | ToI64 Expr
   | ToI32 Expr
@@ -96,6 +104,10 @@ data Instr
   | Store Width Int
   | ICmpEq
   | ICmpNe
+  | ICmpLt
+  | ICmpLe
+  | ICmpGt
+  | ICmpGe
   | INot
   | -- スタック先頭をpopしてゼロ判定し、真（非ゼロ）ならフォールスルー、偽（ゼロ）ならジャンプする
     JmpIfZero String
@@ -115,6 +127,8 @@ tokenize :: String -> Either String [Token]
 tokenize [] = Right []
 tokenize ('=' : '=' : cs) = (TEq :) <$> tokenize cs
 tokenize ('!' : '=' : cs) = (TNeq :) <$> tokenize cs
+tokenize ('<' : '=' : cs) = (TLe :) <$> tokenize cs
+tokenize ('>' : '=' : cs) = (TGe :) <$> tokenize cs
 tokenize (c : cs)
   | isSpace c = tokenize cs
   | isDigit c =
@@ -145,6 +159,8 @@ tokenize (c : cs)
   | c == ':' = (TColon :) <$> tokenize cs
   | c == '=' = (TAssign :) <$> tokenize cs
   | c == '!' = (TBang :) <$> tokenize cs
+  | c == '<' = (TLt :) <$> tokenize cs
+  | c == '>' = (TGt :) <$> tokenize cs
   | c == ';' = (TSemicolon :) <$> tokenize cs
   | otherwise = Left ("unexpected character: " ++ [c])
 
@@ -159,12 +175,13 @@ tokenize (c : cs)
 -- while-stmt    ::= 'while' expr '{' stmt* '}'
 -- break-stmt    ::= 'break' ';'
 -- continue-stmt ::= 'continue' ';'
--- expr     ::= equality
--- equality ::= additive (('==' | '!=') additive)*
--- additive ::= term (('+' | '-') term)*
--- term     ::= factor (('*' | '/') factor)*
--- factor   ::= INT | 'true' | 'false' | IDENT | '(' expr ')' | '-' factor | '!' factor
---            | 'to_i64' factor | 'to_i32' factor
+-- expr       ::= equality
+-- equality   ::= comparison (('==' | '!=') comparison)*
+-- comparison ::= additive (('<' | '<=' | '>' | '>=') additive)*
+-- additive   ::= term (('+' | '-') term)*
+-- term       ::= factor (('*' | '/') factor)*
+-- factor     ::= INT | 'true' | 'false' | IDENT | '(' expr ')' | '-' factor | '!' factor
+--              | 'to_i64' factor | 'to_i32' factor
 
 type ParseResult a = Either String (a, [Token])
 
@@ -311,18 +328,40 @@ expectToken tok [] = Left ("expected " ++ show tok ++ ", got end of input")
 -- 等価・非等価の抽出（最低優先順位）
 parseEquality :: [Token] -> ParseResult Expr
 parseEquality tokens = do
-  (left, rest) <- parseExpr tokens
+  (left, rest) <- parseComparison tokens
   parseEqualityRest left rest
 
--- equality ::= additive (('==' | '!=') additive)*
+-- equality ::= comparison (('==' | '!=') comparison)*
 parseEqualityRest :: Expr -> [Token] -> ParseResult Expr
 parseEqualityRest left (TEq : rest) = do
-  (right, rest') <- parseExpr rest
+  (right, rest') <- parseComparison rest
   parseEqualityRest (Eq left right) rest'
 parseEqualityRest left (TNeq : rest) = do
-  (right, rest') <- parseExpr rest
+  (right, rest') <- parseComparison rest
   parseEqualityRest (Neq left right) rest'
 parseEqualityRest left rest = Right (left, rest)
+
+-- 大小比較の抽出（等価より高い優先順位、加減算より低い優先順位）
+parseComparison :: [Token] -> ParseResult Expr
+parseComparison tokens = do
+  (left, rest) <- parseExpr tokens
+  parseComparisonRest left rest
+
+-- comparison ::= additive (('<' | '<=' | '>' | '>=') additive)*
+parseComparisonRest :: Expr -> [Token] -> ParseResult Expr
+parseComparisonRest left (TLt : rest) = do
+  (right, rest') <- parseExpr rest
+  parseComparisonRest (Lt left right) rest'
+parseComparisonRest left (TLe : rest) = do
+  (right, rest') <- parseExpr rest
+  parseComparisonRest (Le left right) rest'
+parseComparisonRest left (TGt : rest) = do
+  (right, rest') <- parseExpr rest
+  parseComparisonRest (Gt left right) rest'
+parseComparisonRest left (TGe : rest) = do
+  (right, rest') <- parseExpr rest
+  parseComparisonRest (Ge left right) rest'
+parseComparisonRest left rest = Right (left, rest)
 
 -- 加算・減算の抽出
 parseExpr :: [Token] -> ParseResult Expr
@@ -593,6 +632,10 @@ inferMaybeType env = go
   -- （算術演算と異なり、被演算子の型と結果の型が一致しない）
   go (Eq a b) = combine a b >> Right (Just TBool)
   go (Neq a b) = combine a b >> Right (Just TBool)
+  go (Lt a b) = combine a b >> Right (Just TBool)
+  go (Le a b) = combine a b >> Right (Just TBool)
+  go (Gt a b) = combine a b >> Right (Just TBool)
+  go (Ge a b) = combine a b >> Right (Just TBool)
   -- to_i64/to_i32 の結果型は被演算子によらず常に確定する（BoolLit と同様、部分木を辿る必要はない）
   go (ToI64 _) = Right (Just (TyInt W64))
   go (ToI32 _) = Right (Just (TyInt W32))
@@ -683,6 +726,50 @@ compileExprTyped env TBool (Neq l r) = do
   li <- compileExprTyped env opTy l
   ri <- compileExprTyped env opTy r
   Right (li ++ ri ++ [ICmpNe])
+-- [let ]xxx = expr < expr;（比較演算子は i32/i64 のみに適用可能。bool同士の比較は不可）
+compileExprTyped _ expected@(TyInt _) (Lt _ _) =
+  Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
+compileExprTyped env TBool (Lt l r) = do
+  opTy <- operandType env l r
+  case opTy of
+    TBool -> Left "type mismatch: expected i32 or i64, found bool"
+    _ -> do
+      li <- compileExprTyped env opTy l
+      ri <- compileExprTyped env opTy r
+      Right (li ++ ri ++ [ICmpLt])
+-- [let ]xxx = expr <= expr;
+compileExprTyped _ expected@(TyInt _) (Le _ _) =
+  Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
+compileExprTyped env TBool (Le l r) = do
+  opTy <- operandType env l r
+  case opTy of
+    TBool -> Left "type mismatch: expected i32 or i64, found bool"
+    _ -> do
+      li <- compileExprTyped env opTy l
+      ri <- compileExprTyped env opTy r
+      Right (li ++ ri ++ [ICmpLe])
+-- [let ]xxx = expr > expr;
+compileExprTyped _ expected@(TyInt _) (Gt _ _) =
+  Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
+compileExprTyped env TBool (Gt l r) = do
+  opTy <- operandType env l r
+  case opTy of
+    TBool -> Left "type mismatch: expected i32 or i64, found bool"
+    _ -> do
+      li <- compileExprTyped env opTy l
+      ri <- compileExprTyped env opTy r
+      Right (li ++ ri ++ [ICmpGt])
+-- [let ]xxx = expr >= expr;
+compileExprTyped _ expected@(TyInt _) (Ge _ _) =
+  Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
+compileExprTyped env TBool (Ge l r) = do
+  opTy <- operandType env l r
+  case opTy of
+    TBool -> Left "type mismatch: expected i32 or i64, found bool"
+    _ -> do
+      li <- compileExprTyped env opTy l
+      ri <- compileExprTyped env opTy r
+      Right (li ++ ri ++ [ICmpGe])
 -- [let ]xxx = to_i64(expr);（結果は常にi64。被演算子はexpectedとは独立に常にi32を要求する）
 compileExprTyped _ TBool (ToI64 _) = Left "type mismatch: expected bool, found i64"
 compileExprTyped _ expected@(TyInt W32) (ToI64 _) =
@@ -721,6 +808,10 @@ run instrs = go instrs [] Map.empty
   go (Store w off : rest) (v : stack) vars = go rest stack (Map.insert off (trunc w v) vars)
   go (ICmpEq : rest) (b : a : stack) vars = go rest ((if a == b then 1 else 0) : stack) vars
   go (ICmpNe : rest) (b : a : stack) vars = go rest ((if a /= b then 1 else 0) : stack) vars
+  go (ICmpLt : rest) (b : a : stack) vars = go rest ((if a < b then 1 else 0) : stack) vars
+  go (ICmpLe : rest) (b : a : stack) vars = go rest ((if a <= b then 1 else 0) : stack) vars
+  go (ICmpGt : rest) (b : a : stack) vars = go rest ((if a > b then 1 else 0) : stack) vars
+  go (ICmpGe : rest) (b : a : stack) vars = go rest ((if a >= b then 1 else 0) : stack) vars
   go (INot : rest) (a : stack) vars = go rest ((if a == 0 then 1 else 0) : stack) vars
   go (ISext32 : rest) (a : stack) vars = go rest (trunc W32 a : stack) vars
   go _ _ _ = Left "stack underflow"
