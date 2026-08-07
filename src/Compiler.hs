@@ -22,6 +22,9 @@ data Token
   | TLet
   | TIf
   | TElse
+  | TWhile
+  | TBreak
+  | TContinue
   | TTrue
   | TFalse
   | TColon
@@ -64,6 +67,12 @@ data Stmt
   | SBlock [Stmt]
   | -- if/else-if*/else?（値を返さない文。分岐は [(条件式, 本体)] の列＋任意のelse本体）
     SIf [(Expr, [Stmt])] (Maybe [Stmt])
+  | -- while 条件式 {...}（条件が真である間、本体を繰り返す）
+    SWhile Expr [Stmt]
+  | -- 直近の外側ループを抜ける
+    SBreak
+  | -- 直近の外側ループの条件再評価へ進む
+    SContinue
   deriving (Show, Eq)
 
 -- 文の列 + 必須の末尾式
@@ -117,6 +126,9 @@ tokenize (c : cs)
             "let" -> (TLet :) <$> tokenize rest
             "if" -> (TIf :) <$> tokenize rest
             "else" -> (TElse :) <$> tokenize rest
+            "while" -> (TWhile :) <$> tokenize rest
+            "break" -> (TBreak :) <$> tokenize rest
+            "continue" -> (TContinue :) <$> tokenize rest
             "true" -> (TTrue :) <$> tokenize rest
             "false" -> (TFalse :) <$> tokenize rest
             "to_i64" -> (TToI64 :) <$> tokenize rest
@@ -139,11 +151,14 @@ tokenize (c : cs)
 -- Parser
 --
 -- program    ::= stmt* expr
--- stmt       ::= let-stmt | assign-stmt | block-stmt | if-stmt
+-- stmt       ::= let-stmt | assign-stmt | block-stmt | if-stmt | while-stmt | break-stmt | continue-stmt
 -- let-stmt    ::= 'let' IDENT ':' ('i32' | 'i64' | 'bool') '=' expr ';'
 -- assign-stmt ::= IDENT '=' expr ';'
 -- block-stmt ::= '{' stmt* '}'
 -- if-stmt    ::= 'if' expr '{' stmt* '}' ('else' 'if' expr '{' stmt* '}')* ('else' '{' stmt* '}')?
+-- while-stmt    ::= 'while' expr '{' stmt* '}'
+-- break-stmt    ::= 'break' ';'
+-- continue-stmt ::= 'continue' ';'
 -- expr     ::= equality
 -- equality ::= additive (('==' | '!=') additive)*
 -- additive ::= term (('+' | '-') term)*
@@ -178,6 +193,18 @@ parseStmts (TLBrace : rest) = do
   Right (stmt : stmts, rest'')
 parseStmts (TIf : rest) = do
   (stmt, rest') <- parseIfStmt rest
+  (stmts, rest'') <- parseStmts rest'
+  Right (stmt : stmts, rest'')
+parseStmts (TWhile : rest) = do
+  (stmt, rest') <- parseWhileStmt rest
+  (stmts, rest'') <- parseStmts rest'
+  Right (stmt : stmts, rest'')
+parseStmts (TBreak : rest) = do
+  (stmt, rest') <- parseBreakStmt rest
+  (stmts, rest'') <- parseStmts rest'
+  Right (stmt : stmts, rest'')
+parseStmts (TContinue : rest) = do
+  (stmt, rest') <- parseContinueStmt rest
   (stmts, rest'') <- parseStmts rest'
   Right (stmt : stmts, rest'')
 parseStmts tokens = Right ([], tokens)
@@ -245,6 +272,28 @@ parseIfRest acc (TElse : TLBrace : rest) = do
 parseIfRest _ (TElse : t : _) = Left ("expected 'if' or '{' after 'else', got: " ++ show t)
 parseIfRest _ [TElse] = Left "expected 'if' or '{' after 'else', got end of input"
 parseIfRest acc rest = Right (SIf acc Nothing, rest)
+
+-- while-stmt ::= 'while' expr '{' stmt* '}'（先頭の'while'は呼び出し側で消費済み）
+parseWhileStmt :: [Token] -> ParseResult Stmt
+parseWhileStmt tokens = do
+  (cond, rest) <- parseEquality tokens
+  rest' <- expectToken TLBrace rest
+  (body, rest'') <- parseStmts rest'
+  case rest'' of
+    (TRBrace : rest3) -> Right (SWhile cond body, rest3)
+    _ -> Left "expected closing brace"
+
+-- break-stmt ::= 'break' ';'（先頭の'break'は呼び出し側で消費済み）
+parseBreakStmt :: [Token] -> ParseResult Stmt
+parseBreakStmt tokens = do
+  rest <- expectToken TSemicolon tokens
+  Right (SBreak, rest)
+
+-- continue-stmt ::= 'continue' ';'（先頭の'continue'は呼び出し側で消費済み）
+parseContinueStmt :: [Token] -> ParseResult Stmt
+parseContinueStmt tokens = do
+  rest <- expectToken TSemicolon tokens
+  Right (SContinue, rest)
 
 -- 識別子の抽出（変数、型名など）
 expectIdent :: [Token] -> ParseResult String
@@ -399,9 +448,17 @@ freshLabel prefix = do
   -- pTraceShowM ("freshLabel" :: String, ".L" ++ prefix ++ show n)
   pure (".L" ++ prefix ++ show n)
 
--- 任意のEnv/cursorを起点に[文]から命令を抽出する（ブロック/if分岐の再帰コンパイルに使う）
-compileStmtsFrom :: Env -> Int -> [Stmt] -> CompileM (Env, Int, [Instr])
-compileStmtsFrom initEnv initCursor stmts = foldM step (initEnv, initCursor, []) stmts
+-- 直近の外側ループの (continueラベル, breakラベル)。ループの外側では Nothing であり、
+-- break/continueの使用はコンパイルエラーとなる。
+-- Env と同じく普通の関数引数として渡す（ネストしたwhileに入るときだけ新しい値に差し替え、
+-- 呼び出しから戻れば自動的に元の値に戻る）。ラベルカウンタ（StateT）と違って「巻き戻してはいけない」
+-- 状態ではなく、逆に「ブロック/ifを跨いでも外側ループの値を保ち続け、ループを抜けたら消える」
+-- スコープ的な情報なので、cursor/Envと同じ素朴な引数渡しがそのまま正しい挙動を与える。
+type LoopCtx = Maybe (String, String)
+
+-- 任意のEnv/cursor/loopCtxを起点に[文]から命令を抽出する（ブロック/if分岐/while本体の再帰コンパイルに使う）
+compileStmtsFrom :: Env -> Int -> LoopCtx -> [Stmt] -> CompileM (Env, Int, [Instr])
+compileStmtsFrom initEnv initCursor loopCtx stmts = foldM step (initEnv, initCursor, []) stmts
  where
   -- let xxx: 型 = ...
   step (env, cursor, acc) (SLet name ty expr) = do
@@ -424,19 +481,33 @@ compileStmtsFrom initEnv initCursor stmts = foldM step (initEnv, initCursor, [])
   -- { ... }
   step (env, cursor, acc) (SBlock innerStmts) = do
     -- 先頭に空スコープをpushして再帰コンパイルし、返り値のEnv/cursorは破棄して呼び出し前の値をそのまま継続に使う
-    -- （＝スコープアウトとスタックオフセットの巻き戻しを同時に実現する）
-    (_, _, instrs) <- compileStmtsFrom (Map.empty : env) cursor innerStmts
+    -- （＝スコープアウトとスタックオフセットの巻き戻しを同時に実現する）。loopCtxはそのまま素通しする
+    -- （ブロックにネストしても外側ループのbreak/continueが引き続き解決できるようにするため）
+    (_, _, instrs) <- compileStmtsFrom (Map.empty : env) cursor loopCtx innerStmts
     pure (env, cursor, acc ++ instrs)
   -- if 式 {...} (else if 式 {...})* (else {...})?
   step (env, cursor, acc) (SIf branches maybeElse) = do
-    instrs <- compileIf env cursor branches maybeElse
+    instrs <- compileIf env cursor loopCtx branches maybeElse
     pure (env, cursor, acc ++ instrs)
+  -- while 式 {...}
+  step (env, cursor, acc) (SWhile cond body) = do
+    instrs <- compileWhile env cursor cond body
+    pure (env, cursor, acc ++ instrs)
+  -- break;
+  step (env, cursor, acc) SBreak = do
+    lbl <- lift (maybe (Left "break used outside loop") (Right . snd) loopCtx)
+    pure (env, cursor, acc ++ [Jmp lbl])
+  -- continue;
+  step (env, cursor, acc) SContinue = do
+    lbl <- lift (maybe (Left "continue used outside loop") (Right . fst) loopCtx)
+    pure (env, cursor, acc ++ [Jmp lbl])
 
 -- if/else-if/else の分岐列を、条件が偽なら次の分岐へジャンプする形の命令列へ展開する。
 -- 各分岐の本体はブロックと同じく独立スコープでコンパイルし、Env/cursorは呼び出し側へ伝播させない
 -- （if全体も値を返さない文であり、外側から見た変数の状態はifに入る前と変わらない）。
-compileIf :: Env -> Int -> [(Expr, [Stmt])] -> Maybe [Stmt] -> CompileM [Instr]
-compileIf env cursor branches maybeElse = do
+-- loopCtxはそのまま素通しする（if本体にネストしても外側ループのbreak/continueが解決できるようにするため）。
+compileIf :: Env -> Int -> LoopCtx -> [(Expr, [Stmt])] -> Maybe [Stmt] -> CompileM [Instr]
+compileIf env cursor loopCtx branches maybeElse = do
   -- pTraceShowM ("branches", branches)
   endLabel <- freshLabel "if_end"
   body <- go endLabel branches
@@ -445,13 +516,13 @@ compileIf env cursor branches maybeElse = do
   go _ [] = case maybeElse of
     Nothing -> pure []
     Just elseStmts -> do
-      (_, _, instrs) <- compileStmtsFrom (Map.empty : env) cursor elseStmts
+      (_, _, instrs) <- compileStmtsFrom (Map.empty : env) cursor loopCtx elseStmts
       pure instrs
   go endLabel ((cond, body) : rest) = do
     -- 条件式は式木としては expected とは独立にbool型を要求する（if自体はexprを持たない）
     condInstrs <- lift (compileExprTyped env TBool cond)
     nextLabel <- freshLabel "if_next"
-    (_, _, bodyInstrs) <- compileStmtsFrom (Map.empty : env) cursor body
+    (_, _, bodyInstrs) <- compileStmtsFrom (Map.empty : env) cursor loopCtx body
     restInstrs <- go endLabel rest
     pure
       ( condInstrs
@@ -461,10 +532,30 @@ compileIf env cursor branches maybeElse = do
           ++ restInstrs
       )
 
+-- while を「先頭で条件を検査し、真なら本体を実行して先頭へ戻る」形の命令列へ展開する。
+-- 本体はブロックと同じく独立スコープでコンパイルし、Env/cursorは呼び出し側へ伝播させない。
+-- 本体コンパイルへ渡すloopCtxは常にこのwhile自身の(開始,終了)ラベルで上書きする
+-- （呼び出し元のloopCtxを受け取らないことで、ネストしたwhileのbreak/continueが必ず
+-- 直近の内側ループへ解決される）。
+compileWhile :: Env -> Int -> Expr -> [Stmt] -> CompileM [Instr]
+compileWhile env cursor cond body = do
+  startLabel <- freshLabel "while_start"
+  endLabel <- freshLabel "while_end"
+  -- 条件式はifと同様、expectedとは独立にbool型を要求する
+  condInstrs <- lift (compileExprTyped env TBool cond)
+  (_, _, bodyInstrs) <- compileStmtsFrom (Map.empty : env) cursor (Just (startLabel, endLabel)) body
+  pure
+    ( [Label startLabel]
+        ++ condInstrs
+        ++ [JmpIfZero endLabel]
+        ++ bodyInstrs
+        ++ [Jmp startLabel, Label endLabel]
+    )
+
 -- [文]から命令を抽出
 compileStmts :: [Stmt] -> Either String (Env, [Instr])
 compileStmts stmts = do
-  (env, _cursor, instrs) <- evalStateT (compileStmtsFrom [Map.empty] 0 stmts) 0
+  (env, _cursor, instrs) <- evalStateT (compileStmtsFrom [Map.empty] 0 Nothing stmts) 0
   Right (env, instrs)
 
 -- Maybe Type の単一化（Nothing = 整数リテラルなど未確定な部分木）
