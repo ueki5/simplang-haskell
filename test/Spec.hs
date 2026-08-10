@@ -37,6 +37,16 @@ main = hspec $ do
       tokenize "==" `shouldBe` Right [TEq]
     it "!=演算子を変換する" $
       tokenize "!=" `shouldBe` Right [TNeq]
+    it "<演算子を変換する" $
+      tokenize "<" `shouldBe` Right [TLt]
+    it "<=演算子を変換する" $
+      tokenize "<=" `shouldBe` Right [TLe]
+    it ">演算子を変換する" $
+      tokenize ">" `shouldBe` Right [TGt]
+    it ">=演算子を変換する" $
+      tokenize ">=" `shouldBe` Right [TGe]
+    it "<=/>=は2文字トークンとして認識され、<+=や>+=に分割されない" $
+      tokenize "<= >=" `shouldBe` Right [TLe, TGe]
     it "!演算子を変換する" $
       tokenize "!" `shouldBe` Right [TBang]
     it "=単体は引き続きTAssignになる（==との判別の回帰確認）" $
@@ -118,6 +128,23 @@ main = hspec $ do
       parse [TInt 1, TEq, TInt 2] `shouldBe` Right ([], Eq (Lit 1) (Lit 2))
     it "非等価演算子" $
       parse [TInt 1, TNeq, TInt 2] `shouldBe` Right ([], Neq (Lit 1) (Lit 2))
+    it "小なり演算子" $
+      parse [TInt 1, TLt, TInt 2] `shouldBe` Right ([], Lt (Lit 1) (Lit 2))
+    it "以下演算子" $
+      parse [TInt 1, TLe, TInt 2] `shouldBe` Right ([], Le (Lit 1) (Lit 2))
+    it "大なり演算子" $
+      parse [TInt 1, TGt, TInt 2] `shouldBe` Right ([], Gt (Lit 1) (Lit 2))
+    it "以上演算子" $
+      parse [TInt 1, TGe, TInt 2] `shouldBe` Right ([], Ge (Lit 1) (Lit 2))
+    it "比較演算子は加減算より優先順位が低い" $
+      parse [TInt 1, TPlus, TInt 2, TLt, TInt 3]
+        `shouldBe` Right ([], Lt (Add (Lit 1) (Lit 2)) (Lit 3))
+    it "比較演算子は等価演算子より強く結合する" $
+      parse [TInt 1, TLt, TInt 2, TEq, TTrue]
+        `shouldBe` Right ([], Eq (Lt (Lit 1) (Lit 2)) (BoolLit True))
+    it "括弧内の比較演算子をパースできる" $
+      parse [TLParen, TInt 1, TLt, TInt 2, TRParen]
+        `shouldBe` Right ([], Lt (Lit 1) (Lit 2))
     it "否定演算子" $
       parse [TBang, TTrue] `shouldBe` Right ([], Not (BoolLit True))
     it "等価演算子は加減算より優先順位が低い" $
@@ -275,6 +302,14 @@ main = hspec $ do
       codegen (TyInt W64) [ICmpEq] `shouldContain` "sete"
     it "ICmpNeをcmpq+setne命令に変換する" $
       codegen (TyInt W64) [ICmpNe] `shouldContain` "setne"
+    it "ICmpLtをcmpq+setl命令に変換する" $
+      codegen (TyInt W64) [ICmpLt] `shouldContain` "setl"
+    it "ICmpLeをcmpq+setle命令に変換する" $
+      codegen (TyInt W64) [ICmpLe] `shouldContain` "setle"
+    it "ICmpGtをcmpq+setg命令に変換する" $
+      codegen (TyInt W64) [ICmpGt] `shouldContain` "setg"
+    it "ICmpGeをcmpq+setge命令に変換する" $
+      codegen (TyInt W64) [ICmpGe] `shouldContain` "setge"
     it "INotをxorq命令に変換する" $
       codegen (TyInt W64) [INot] `shouldContain` "xorq"
     it "ISext32をcltq命令に変換する（to_i64/to_i32共通の符号拡張正規化）" $
@@ -344,6 +379,24 @@ main = hspec $ do
     it "let宣言の右辺での比較でi32とi64を混在させるとエラー" $
       compileSource "let x: i32 = 1;\nlet y: i64 = 2;\nlet z: bool = x == y;\nz"
         `shouldBe` Left "type mismatch: i32 and i64"
+    it "大小比較結果をintコンテキストで使うとエラー" $
+      compileSource "let x: i32 = 1;\nlet y: i32 = 2;\nlet z: i32 = x < y;\nz"
+        `shouldBe` Left "type mismatch: expected i32, found bool"
+    it "末尾式での大小比較でi32とi64を混在させるとエラー" $
+      compileSource "let x: i32 = 1;\nlet y: i64 = 2;\nx < y"
+        `shouldBe` Left "type mismatch: i32 and i64"
+    it "bool同士の大小比較（<）はエラー" $
+      compileSource "let x: bool = true;\nlet y: bool = false;\nx < y"
+        `shouldBe` Left "type mismatch: expected i32 or i64, found bool"
+    it "bool同士の大小比較（<=）はエラー" $
+      compileSource "true <= false"
+        `shouldBe` Left "type mismatch: expected i32 or i64, found bool"
+    it "bool同士の大小比較（>）はエラー" $
+      compileSource "true > false"
+        `shouldBe` Left "type mismatch: expected i32 or i64, found bool"
+    it "bool同士の大小比較（>=）はエラー" $
+      compileSource "true >= false"
+        `shouldBe` Left "type mismatch: expected i32 or i64, found bool"
     it "to_i64にi64値を渡すとエラー（拡大変換の対象はi32のみ）" $
       compileSource "let x: i64 = 1;\nto_i64(x)"
         `shouldBe` Left "type mismatch: expected i32, found i64"
@@ -412,6 +465,22 @@ main = hspec $ do
       run [Push 3, Push 4, ICmpEq] `shouldBe` Right 0
     it "ICmpNeは異なる値で1を返す" $
       run [Push 3, Push 4, ICmpNe] `shouldBe` Right 1
+    it "ICmpLtはa<bで1を返す" $
+      run [Push 3, Push 4, ICmpLt] `shouldBe` Right 1
+    it "ICmpLtはa>=bで0を返す" $
+      run [Push 4, Push 3, ICmpLt] `shouldBe` Right 0
+    it "ICmpLeはa==bで1を返す" $
+      run [Push 3, Push 3, ICmpLe] `shouldBe` Right 1
+    it "ICmpLeはa>bで0を返す" $
+      run [Push 4, Push 3, ICmpLe] `shouldBe` Right 0
+    it "ICmpGtはa>bで1を返す" $
+      run [Push 4, Push 3, ICmpGt] `shouldBe` Right 1
+    it "ICmpGtはa<=bで0を返す" $
+      run [Push 3, Push 4, ICmpGt] `shouldBe` Right 0
+    it "ICmpGeはa==bで1を返す" $
+      run [Push 3, Push 3, ICmpGe] `shouldBe` Right 1
+    it "ICmpGeはa<bで0を返す" $
+      run [Push 3, Push 4, ICmpGe] `shouldBe` Right 0
     it "INotは0を1に反転する" $
       run [Push 0, INot] `shouldBe` Right 1
     it "INotは1を0に反転する" $
@@ -459,6 +528,24 @@ main = hspec $ do
       result `shouldBe` "false"
     it "非等価演算子を評価する" $ do
       result <- compileAndRun (Neq (Lit 3) (Lit 4))
+      result `shouldBe` "true"
+    it "小なり演算子を評価する（true）" $ do
+      result <- compileAndRun (Lt (Lit 3) (Lit 4))
+      result `shouldBe` "true"
+    it "小なり演算子を評価する（false）" $ do
+      result <- compileAndRun (Lt (Lit 4) (Lit 3))
+      result `shouldBe` "false"
+    it "以下演算子を評価する（等しい場合はtrue）" $ do
+      result <- compileAndRun (Le (Lit 3) (Lit 3))
+      result `shouldBe` "true"
+    it "大なり演算子を評価する（true）" $ do
+      result <- compileAndRun (Gt (Lit 4) (Lit 3))
+      result `shouldBe` "true"
+    it "大なり演算子を評価する（false）" $ do
+      result <- compileAndRun (Gt (Lit 3) (Lit 4))
+      result `shouldBe` "false"
+    it "以上演算子を評価する（等しい場合はtrue）" $ do
+      result <- compileAndRun (Ge (Lit 3) (Lit 3))
       result `shouldBe` "true"
     it "否定演算子を評価する" $ do
       result <- compileAndRun (Not (BoolLit False))
@@ -513,6 +600,21 @@ main = hspec $ do
     it "算術式の結果同士の比較を評価する" $ do
       result <- compileSourceAndRun "let x: i32 = 1;\nlet y: i32 = 2;\n(x + 1) == y"
       result `shouldBe` "true"
+    it "i32変数同士の小なり比較を評価する" $ do
+      result <- compileSourceAndRun "let a: i32 = 3;\nlet b: i32 = 4;\na < b"
+      result `shouldBe` "true"
+    it "i32変数同士の以下比較を評価する（等しい場合）" $ do
+      result <- compileSourceAndRun "let a: i32 = 3;\nlet b: i32 = 3;\na <= b"
+      result `shouldBe` "true"
+    it "i64変数同士の大なり比較を評価する" $ do
+      result <- compileSourceAndRun "let x: i64 = 100;\nlet y: i64 = 50;\nx > y"
+      result `shouldBe` "true"
+    it "i64変数同士の以上比較を評価する（等しい場合）" $ do
+      result <- compileSourceAndRun "let x: i64 = 100;\nlet y: i64 = 100;\nx >= y"
+      result `shouldBe` "true"
+    it "否定演算子と小なり比較を組み合わせて評価する" $ do
+      result <- compileSourceAndRun "!(1 < 2)"
+      result `shouldBe` "false"
     it "to_i64はi32の値をそのままi64として保持する（拡大変換は値を保存する）" $ do
       result <- compileSourceAndRun "let x: i32 = 2147483647;\nlet y: i64 = to_i64(x);\ny"
       result `shouldBe` "2147483647"
@@ -554,6 +656,9 @@ main = hspec $ do
       result `shouldBe` "1"
     it "比較演算子を条件式に使える" $ do
       result <- compileSourceAndRun "let x: i32 = 3;\nlet y: i32 = 0;\nif x == 3 {\ny = 1;\n} else {\ny = 2;\n}\ny"
+      result `shouldBe` "1"
+    it "大小比較演算子を条件式に使える" $ do
+      result <- compileSourceAndRun "let x: i32 = 3;\nlet y: i32 = 0;\nif x < 5 {\ny = 1;\n} else {\ny = 2;\n}\ny"
       result `shouldBe` "1"
     it "else ifで最初に真になった分岐だけを実行する" $ do
       result <- compileSourceAndRun
@@ -622,6 +727,10 @@ main = hspec $ do
       result <- compileSourceAndRun
         "let a: i64 = 0;\nwhile a != 2 {\na = a + 1;\n}\nlet b: i64 = 0;\nwhile b != 3 {\nb = b + 1;\n}\na + b"
       result `shouldBe` "5"
+    it "小なり演算子をwhileの条件式に使える（sample/src008.sl相当）" $ do
+      result <- compileSourceAndRun
+        "let a: i64 = 0;\nlet sum: i64 = 0;\nwhile a < 10 {\nsum = sum + a;\na = a + 1;\n}\nsum"
+      result `shouldBe` "45"
 
   describe "ゼロ除算の実行時エラー" $ do
     it "変数なしのゼロ除算はエラーメッセージを出力して非ゼロ終了する" $ do

@@ -193,6 +193,38 @@ genInstr ICmpNe =
   , "    movzbq %al, %rax"
   , "    pushq %rax"
   ]
+genInstr ICmpLt =
+  [ "    popq  %rbx"
+  , "    popq  %rax"
+  , "    cmpq  %rbx, %rax"
+  , "    setl  %al"
+  , "    movzbq %al, %rax"
+  , "    pushq %rax"
+  ]
+genInstr ICmpLe =
+  [ "    popq  %rbx"
+  , "    popq  %rax"
+  , "    cmpq  %rbx, %rax"
+  , "    setle %al"
+  , "    movzbq %al, %rax"
+  , "    pushq %rax"
+  ]
+genInstr ICmpGt =
+  [ "    popq  %rbx"
+  , "    popq  %rax"
+  , "    cmpq  %rbx, %rax"
+  , "    setg  %al"
+  , "    movzbq %al, %rax"
+  , "    pushq %rax"
+  ]
+genInstr ICmpGe =
+  [ "    popq  %rbx"
+  , "    popq  %rax"
+  , "    cmpq  %rbx, %rax"
+  , "    setge %al"
+  , "    movzbq %al, %rax"
+  , "    pushq %rax"
+  ]
 genInstr INot =
   [ "    popq  %rax"
   , "    xorq  $1, %rax"
