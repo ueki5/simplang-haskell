@@ -1,6 +1,6 @@
 module Main where
 
-import Compiler (Expr (..), Instr (..), Stmt (..), Token (..), Type (..), Width (..), compile, parse, run, tokenize)
+import Compiler (Expr (..), FnDecl (..), Instr (..), Stmt (..), Token (..), Type (..), Width (..), compile, parse, run, tokenize)
 import Data.Either (isLeft, isRight)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
@@ -68,42 +68,54 @@ main = hspec $ do
     it "while/break/continueで始まる識別子はTIdentのまま" $
       tokenize "whiley breaker continued"
         `shouldBe` Right [TIdent "whiley", TIdent "breaker", TIdent "continued"]
+    it "fn/return予約語を変換する" $
+      tokenize "fn return" `shouldBe` Right [TFn, TReturn]
+    it "fn/returnで始まる識別子はTIdentのまま" $
+      tokenize "fnord returned" `shouldBe` Right [TIdent "fnord", TIdent "returned"]
+    it "->演算子を変換する" $
+      tokenize "->" `shouldBe` Right [TArrow]
+    it "->は2文字トークンとして認識され、-と>に分割されない" $
+      tokenize "a -> b" `shouldBe` Right [TIdent "a", TArrow, TIdent "b"]
+    it "-単体は引き続きTMinusになる（->との判別の回帰確認）" $
+      tokenize "1 - 2" `shouldBe` Right [TInt 1, TMinus, TInt 2]
+    it "カンマを変換する" $
+      tokenize "a, b" `shouldBe` Right [TIdent "a", TComma, TIdent "b"]
 
   describe "parse" $ do
     it "整数リテラル" $
-      parse [TInt 5] `shouldBe` Right ([], Lit 5)
+      parse [TInt 5] `shouldBe` Right ([], [], Lit 5)
     it "加算" $
-      parse [TInt 1, TPlus, TInt 2] `shouldBe` Right ([], Add (Lit 1) (Lit 2))
+      parse [TInt 1, TPlus, TInt 2] `shouldBe` Right ([], [], Add (Lit 1) (Lit 2))
     it "減算" $
-      parse [TInt 3, TMinus, TInt 1] `shouldBe` Right ([], Sub (Lit 3) (Lit 1))
+      parse [TInt 3, TMinus, TInt 1] `shouldBe` Right ([], [], Sub (Lit 3) (Lit 1))
     it "乗算が加算より優先される" $
       parse [TInt 1, TPlus, TInt 2, TStar, TInt 3]
-        `shouldBe` Right ([], Add (Lit 1) (Mul (Lit 2) (Lit 3)))
+        `shouldBe` Right ([], [], Add (Lit 1) (Mul (Lit 2) (Lit 3)))
     it "括弧で優先度を変える" $
       parse [TLParen, TInt 1, TPlus, TInt 2, TRParen, TStar, TInt 3]
-        `shouldBe` Right ([], Mul (Add (Lit 1) (Lit 2)) (Lit 3))
+        `shouldBe` Right ([], [], Mul (Add (Lit 1) (Lit 2)) (Lit 3))
     it "単項マイナス" $
-      parse [TMinus, TInt 5] `shouldBe` Right ([], Neg (Lit 5))
+      parse [TMinus, TInt 5] `shouldBe` Right ([], [], Neg (Lit 5))
     it "空入力はエラー" $
       parse [] `shouldBe` Left "unexpected end of input"
     it "変数参照" $
-      parse [TIdent "x"] `shouldBe` Right ([], Var "x")
+      parse [TIdent "x"] `shouldBe` Right ([], [], Var "x")
     it "let宣言（i64）" $
       parse [TLet, TIdent "x", TColon, TIdent "i64", TAssign, TInt 1, TSemicolon, TIdent "x"]
-        `shouldBe` Right ([SLet "x" (TyInt W64) (Lit 1)], Var "x")
+        `shouldBe` Right ([], [SLet "x" (TyInt W64) (Lit 1)], Var "x")
     it "let宣言（i32）" $
       parse [TLet, TIdent "x", TColon, TIdent "i32", TAssign, TInt 1, TSemicolon, TIdent "x"]
-        `shouldBe` Right ([SLet "x" (TyInt W32) (Lit 1)], Var "x")
+        `shouldBe` Right ([], [SLet "x" (TyInt W32) (Lit 1)], Var "x")
     it "let宣言（bool）" $
       parse [TLet, TIdent "x", TColon, TIdent "bool", TAssign, TTrue, TSemicolon, TIdent "x"]
-        `shouldBe` Right ([SLet "x" TBool (BoolLit True)], Var "x")
+        `shouldBe` Right ([], [SLet "x" TBool (BoolLit True)], Var "x")
     it "代入文" $
       parse
         [ TLet, TIdent "x", TColon, TIdent "i64", TAssign, TInt 1, TSemicolon
         , TIdent "x", TAssign, TInt 2, TSemicolon
         , TIdent "x"
         ]
-        `shouldBe` Right ([SLet "x" (TyInt W64) (Lit 1), SAssign "x" (Lit 2)], Var "x")
+        `shouldBe` Right ([], [SLet "x" (TyInt W64) (Lit 1), SAssign "x" (Lit 2)], Var "x")
     it "let宣言でコロンが無ければエラー" $
       parse [TLet, TIdent "x", TAssign, TInt 1, TSemicolon, TIdent "x"] `shouldSatisfy` isLeft
     it "let宣言で型がi32/i64/bool以外ならエラー" $
@@ -121,57 +133,57 @@ main = hspec $ do
     it "末尾式の後に;を書くとエラー" $
       parse [TInt 1, TSemicolon] `shouldSatisfy` isLeft
     it "boolリテラル（true）" $
-      parse [TTrue] `shouldBe` Right ([], BoolLit True)
+      parse [TTrue] `shouldBe` Right ([], [], BoolLit True)
     it "boolリテラル（false）" $
-      parse [TFalse] `shouldBe` Right ([], BoolLit False)
+      parse [TFalse] `shouldBe` Right ([], [], BoolLit False)
     it "等価演算子" $
-      parse [TInt 1, TEq, TInt 2] `shouldBe` Right ([], Eq (Lit 1) (Lit 2))
+      parse [TInt 1, TEq, TInt 2] `shouldBe` Right ([], [], Eq (Lit 1) (Lit 2))
     it "非等価演算子" $
-      parse [TInt 1, TNeq, TInt 2] `shouldBe` Right ([], Neq (Lit 1) (Lit 2))
+      parse [TInt 1, TNeq, TInt 2] `shouldBe` Right ([], [], Neq (Lit 1) (Lit 2))
     it "小なり演算子" $
-      parse [TInt 1, TLt, TInt 2] `shouldBe` Right ([], Lt (Lit 1) (Lit 2))
+      parse [TInt 1, TLt, TInt 2] `shouldBe` Right ([], [], Lt (Lit 1) (Lit 2))
     it "以下演算子" $
-      parse [TInt 1, TLe, TInt 2] `shouldBe` Right ([], Le (Lit 1) (Lit 2))
+      parse [TInt 1, TLe, TInt 2] `shouldBe` Right ([], [], Le (Lit 1) (Lit 2))
     it "大なり演算子" $
-      parse [TInt 1, TGt, TInt 2] `shouldBe` Right ([], Gt (Lit 1) (Lit 2))
+      parse [TInt 1, TGt, TInt 2] `shouldBe` Right ([], [], Gt (Lit 1) (Lit 2))
     it "以上演算子" $
-      parse [TInt 1, TGe, TInt 2] `shouldBe` Right ([], Ge (Lit 1) (Lit 2))
+      parse [TInt 1, TGe, TInt 2] `shouldBe` Right ([], [], Ge (Lit 1) (Lit 2))
     it "比較演算子は加減算より優先順位が低い" $
       parse [TInt 1, TPlus, TInt 2, TLt, TInt 3]
-        `shouldBe` Right ([], Lt (Add (Lit 1) (Lit 2)) (Lit 3))
+        `shouldBe` Right ([], [], Lt (Add (Lit 1) (Lit 2)) (Lit 3))
     it "比較演算子は等価演算子より強く結合する" $
       parse [TInt 1, TLt, TInt 2, TEq, TTrue]
-        `shouldBe` Right ([], Eq (Lt (Lit 1) (Lit 2)) (BoolLit True))
+        `shouldBe` Right ([], [], Eq (Lt (Lit 1) (Lit 2)) (BoolLit True))
     it "括弧内の比較演算子をパースできる" $
       parse [TLParen, TInt 1, TLt, TInt 2, TRParen]
-        `shouldBe` Right ([], Lt (Lit 1) (Lit 2))
+        `shouldBe` Right ([], [], Lt (Lit 1) (Lit 2))
     it "否定演算子" $
-      parse [TBang, TTrue] `shouldBe` Right ([], Not (BoolLit True))
+      parse [TBang, TTrue] `shouldBe` Right ([], [], Not (BoolLit True))
     it "等価演算子は加減算より優先順位が低い" $
       parse [TInt 1, TPlus, TInt 2, TEq, TInt 3]
-        `shouldBe` Right ([], Eq (Add (Lit 1) (Lit 2)) (Lit 3))
+        `shouldBe` Right ([], [], Eq (Add (Lit 1) (Lit 2)) (Lit 3))
     it "否定演算子は等価演算子より強く結合する" $
       parse [TBang, TTrue, TEq, TFalse]
-        `shouldBe` Right ([], Eq (Not (BoolLit True)) (BoolLit False))
+        `shouldBe` Right ([], [], Eq (Not (BoolLit True)) (BoolLit False))
     it "括弧内の等価演算子をパースできる" $
       parse [TLParen, TInt 1, TEq, TInt 1, TRParen]
-        `shouldBe` Right ([], Eq (Lit 1) (Lit 1))
+        `shouldBe` Right ([], [], Eq (Lit 1) (Lit 1))
     it "to_i64演算子（括弧なし）" $
-      parse [TToI64, TInt 64] `shouldBe` Right ([], ToI64 (Lit 64))
+      parse [TToI64, TInt 64] `shouldBe` Right ([], [], ToI64 (Lit 64))
     it "to_i32演算子（括弧なし）" $
-      parse [TToI32, TInt 64] `shouldBe` Right ([], ToI32 (Lit 64))
+      parse [TToI32, TInt 64] `shouldBe` Right ([], [], ToI32 (Lit 64))
     it "to_i64演算子（括弧あり）は括弧なしと同じASTになる" $
       parse [TToI64, TLParen, TIdent "x", TRParen]
-        `shouldBe` Right ([], ToI64 (Var "x"))
+        `shouldBe` Right ([], [], ToI64 (Var "x"))
     it "to_i32とto_i64は入れ子にできる" $
       parse [TToI32, TToI64, TIdent "x"]
-        `shouldBe` Right ([], ToI32 (ToI64 (Var "x")))
+        `shouldBe` Right ([], [], ToI32 (ToI64 (Var "x")))
     it "単項マイナスはto_i32より強く結合する" $
       parse [TToI32, TMinus, TInt 5]
-        `shouldBe` Right ([], ToI32 (Neg (Lit 5)))
+        `shouldBe` Right ([], [], ToI32 (Neg (Lit 5)))
     it "空ブロック" $
       parse [TLBrace, TRBrace, TInt 5]
-        `shouldBe` Right ([SBlock []], Lit 5)
+        `shouldBe` Right ([], [SBlock []], Lit 5)
     it "ブロック内にlet文を含む" $
       parse
         [ TLBrace
@@ -179,18 +191,18 @@ main = hspec $ do
         , TRBrace
         , TInt 2
         ]
-        `shouldBe` Right ([SBlock [SLet "x" (TyInt W64) (Lit 1)]], Lit 2)
+        `shouldBe` Right ([], [SBlock [SLet "x" (TyInt W64) (Lit 1)]], Lit 2)
     it "ネストしたブロック" $
       parse [TLBrace, TLBrace, TRBrace, TRBrace, TInt 1]
-        `shouldBe` Right ([SBlock [SBlock []]], Lit 1)
+        `shouldBe` Right ([], [SBlock [SBlock []]], Lit 1)
     it "閉じ括弧がないブロックはエラー" $
       parse [TLBrace] `shouldBe` Left "expected closing brace"
     it "if文（elseなし）" $
       parse [TIf, TTrue, TLBrace, TRBrace, TInt 1]
-        `shouldBe` Right ([SIf [(BoolLit True, [])] Nothing], Lit 1)
+        `shouldBe` Right ([], [SIf [(BoolLit True, [])] Nothing], Lit 1)
     it "if-else文" $
       parse [TIf, TTrue, TLBrace, TRBrace, TElse, TLBrace, TRBrace, TInt 1]
-        `shouldBe` Right ([SIf [(BoolLit True, [])] (Just [])], Lit 1)
+        `shouldBe` Right ([], [SIf [(BoolLit True, [])] (Just [])], Lit 1)
     it "if-else if-else文（複数のelse if）" $
       parse
         [ TIf, TTrue, TLBrace, TRBrace
@@ -200,7 +212,8 @@ main = hspec $ do
         , TInt 1
         ]
         `shouldBe` Right
-          ( [SIf [(BoolLit True, []), (BoolLit False, []), (BoolLit True, [])] (Just [])]
+          ( []
+          , [SIf [(BoolLit True, []), (BoolLit False, []), (BoolLit True, [])] (Just [])]
           , Lit 1
           )
     it "if文の本体にlet文を含む" $
@@ -210,10 +223,10 @@ main = hspec $ do
         , TRBrace
         , TInt 2
         ]
-        `shouldBe` Right ([SIf [(BoolLit True, [SLet "x" (TyInt W64) (Lit 1)])] Nothing], Lit 2)
+        `shouldBe` Right ([], [SIf [(BoolLit True, [SLet "x" (TyInt W64) (Lit 1)])] Nothing], Lit 2)
     it "if文はブロック文としてネストできる" $
       parse [TLBrace, TIf, TTrue, TLBrace, TRBrace, TRBrace, TInt 1]
-        `shouldBe` Right ([SBlock [SIf [(BoolLit True, [])] Nothing]], Lit 1)
+        `shouldBe` Right ([], [SBlock [SIf [(BoolLit True, [])] Nothing]], Lit 1)
     it "if文の条件式が無ければエラー" $
       parse [TIf, TLBrace, TRBrace, TInt 1] `shouldSatisfy` isLeft
     it "if文で閉じ波括弧がなければエラー" $
@@ -224,7 +237,7 @@ main = hspec $ do
       parse [TIf, TTrue, TLBrace, TRBrace, TElse] `shouldSatisfy` isLeft
     it "while文" $
       parse [TWhile, TTrue, TLBrace, TRBrace, TInt 1]
-        `shouldBe` Right ([SWhile (BoolLit True) []], Lit 1)
+        `shouldBe` Right ([], [SWhile (BoolLit True) []], Lit 1)
     it "while文の本体にlet文とbreak文を含む" $
       parse
         [ TWhile, TTrue, TLBrace
@@ -233,13 +246,13 @@ main = hspec $ do
         , TRBrace
         , TInt 2
         ]
-        `shouldBe` Right ([SWhile (BoolLit True) [SLet "x" (TyInt W64) (Lit 1), SBreak]], Lit 2)
+        `shouldBe` Right ([], [SWhile (BoolLit True) [SLet "x" (TyInt W64) (Lit 1), SBreak]], Lit 2)
     it "continue文" $
       parse [TWhile, TTrue, TLBrace, TContinue, TSemicolon, TRBrace, TInt 1]
-        `shouldBe` Right ([SWhile (BoolLit True) [SContinue]], Lit 1)
+        `shouldBe` Right ([], [SWhile (BoolLit True) [SContinue]], Lit 1)
     it "while文はブロック文としてネストできる" $
       parse [TLBrace, TWhile, TTrue, TLBrace, TRBrace, TRBrace, TInt 1]
-        `shouldBe` Right ([SBlock [SWhile (BoolLit True) []]], Lit 1)
+        `shouldBe` Right ([], [SBlock [SWhile (BoolLit True) []]], Lit 1)
     it "while文の条件式が無ければエラー" $
       parse [TWhile, TLBrace, TRBrace, TInt 1] `shouldSatisfy` isLeft
     it "while文で閉じ波括弧がなければエラー" $
@@ -249,81 +262,145 @@ main = hspec $ do
     it "continue文に;が無ければエラー" $
       parse [TWhile, TTrue, TLBrace, TContinue, TRBrace, TInt 1] `shouldSatisfy` isLeft
 
+  describe "parse（fn定義・呼び出し・return）" $ do
+    let parseSrc src = tokenize src >>= parse
+    it "引数無しのfn定義" $
+      parseSrc "fn f() -> i64 {\n1\n}\n2"
+        `shouldBe` Right ([FnDecl "f" [] (TyInt W64) ([], Lit 1)], [], Lit 2)
+    it "引数1個のfn定義" $
+      parseSrc "fn f(a: i64) -> i64 {\na\n}\n2"
+        `shouldBe` Right ([FnDecl "f" [("a", TyInt W64)] (TyInt W64) ([], Var "a")], [], Lit 2)
+    it "引数複数個のfn定義（型が混在してもパースできる。型検査は別）" $
+      parseSrc "fn f(a: i64, b: i32, c: bool) -> i64 {\na\n}\n2"
+        `shouldBe` Right
+          ( [FnDecl "f" [("a", TyInt W64), ("b", TyInt W32), ("c", TBool)] (TyInt W64) ([], Var "a")]
+          , []
+          , Lit 2
+          )
+    it "fn本体は文の列＋末尾式を持てる" $
+      parseSrc "fn f() -> i64 {\nlet x: i64 = 1;\nx\n}\n2"
+        `shouldBe` Right
+          ( [FnDecl "f" [] (TyInt W64) ([SLet "x" (TyInt W64) (Lit 1)], Var "x")]
+          , []
+          , Lit 2
+          )
+    it "fn定義は複数並べられる" $
+      parseSrc "fn f() -> i64 {\n1\n}\nfn g() -> i64 {\n2\n}\n3"
+        `shouldBe` Right
+          ( [ FnDecl "f" [] (TyInt W64) ([], Lit 1)
+            , FnDecl "g" [] (TyInt W64) ([], Lit 2)
+            ]
+          , []
+          , Lit 3
+          )
+    it "fn定義は暗黙main本体の文と自由に混在できる" $
+      parseSrc "let a: i64 = 1;\nfn f() -> i64 {\n1\n}\nlet b: i64 = 2;\na + b"
+        `shouldBe` Right
+          ( [FnDecl "f" [] (TyInt W64) ([], Lit 1)]
+          , [SLet "a" (TyInt W64) (Lit 1), SLet "b" (TyInt W64) (Lit 2)]
+          , Add (Var "a") (Var "b")
+          )
+    it "fn本体に末尾式が無ければエラー（ユニット型は採用しないため）" $
+      parseSrc "fn f() -> i64 {\nlet x: i64 = 1;\n}\n2" `shouldSatisfy` isLeft
+    it "戻り値の型（->）が無ければエラー" $
+      parseSrc "fn f() {\n1\n}\n2" `shouldSatisfy` isLeft
+    it "引数無しの呼び出し式" $
+      parseSrc "f()" `shouldBe` Right ([], [], Call "f" [])
+    it "引数1個の呼び出し式" $
+      parseSrc "f(1)" `shouldBe` Right ([], [], Call "f" [Lit 1])
+    it "引数複数個の呼び出し式（カンマ区切り）" $
+      parseSrc "f(1, 2 + 3, x)" `shouldBe` Right ([], [], Call "f" [Lit 1, Add (Lit 2) (Lit 3), Var "x"])
+    it "呼び出し式は算術式の中で使える" $
+      parseSrc "1 + f(2)" `shouldBe` Right ([], [], Add (Lit 1) (Call "f" [Lit 2]))
+    it "呼び出し式は入れ子にできる" $
+      parseSrc "f(g(1))" `shouldBe` Right ([], [], Call "f" [Call "g" [Lit 1]])
+    it "return文（値付き）" $
+      parseSrc "fn f() -> i64 {\nreturn 1;\n2\n}\n3"
+        `shouldBe` Right
+          ( [FnDecl "f" [] (TyInt W64) ([SReturn (Lit 1)], Lit 2)]
+          , []
+          , Lit 3
+          )
+    it "値の無いreturn文はエラー（ユニット型は採用しないため）" $
+      parseSrc "fn f() -> i64 {\nreturn;\n1\n}\n2" `shouldSatisfy` isLeft
+    it "return文に;が無ければエラー" $
+      parseSrc "fn f() -> i64 {\nreturn 1\n2\n}\n3" `shouldSatisfy` isLeft
+
   describe "codegen" $ do
     it "プロローグにmainラベルを含む" $
-      codegen (TyInt W64) [] `shouldContain` "main:"
+      codegen [] (TyInt W64) [] `shouldContain` "main:"
     it "Push nをmovabsq+pushq命令に変換する" $
-      codegen (TyInt W64) [Push 42] `shouldContain` "movabsq $42, %rax"
+      codegen [] (TyInt W64) [Push 42] `shouldContain` "movabsq $42, %rax"
     it "IAdd W64をaddq命令に変換する" $
-      codegen (TyInt W64) [IAdd W64] `shouldContain` "addq"
+      codegen [] (TyInt W64) [IAdd W64] `shouldContain` "addq"
     it "ISub W64をsubq命令に変換する" $
-      codegen (TyInt W64) [ISub W64] `shouldContain` "subq"
+      codegen [] (TyInt W64) [ISub W64] `shouldContain` "subq"
     it "IMul W64をimulq命令に変換する" $
-      codegen (TyInt W64) [IMul W64] `shouldContain` "imulq"
+      codegen [] (TyInt W64) [IMul W64] `shouldContain` "imulq"
     it "IDiv W64をidivq命令に変換する" $
-      codegen (TyInt W64) [IDiv W64] `shouldContain` "idivq"
+      codegen [] (TyInt W64) [IDiv W64] `shouldContain` "idivq"
     it "INeg W64をnegq命令に変換する" $
-      codegen (TyInt W64) [INeg W64] `shouldContain` "negq"
+      codegen [] (TyInt W64) [INeg W64] `shouldContain` "negq"
     it "IAdd W32をaddl命令に変換する" $
-      codegen (TyInt W32) [IAdd W32] `shouldContain` "addl"
+      codegen [] (TyInt W32) [IAdd W32] `shouldContain` "addl"
     it "ISub W32をsubl命令に変換する" $
-      codegen (TyInt W32) [ISub W32] `shouldContain` "subl"
+      codegen [] (TyInt W32) [ISub W32] `shouldContain` "subl"
     it "IMul W32をimull命令に変換する" $
-      codegen (TyInt W32) [IMul W32] `shouldContain` "imull"
+      codegen [] (TyInt W32) [IMul W32] `shouldContain` "imull"
     it "IDiv W32をidivl命令に変換する" $
-      codegen (TyInt W32) [IDiv W32] `shouldContain` "idivl"
+      codegen [] (TyInt W32) [IDiv W32] `shouldContain` "idivl"
     it "INeg W32をnegl命令に変換する" $
-      codegen (TyInt W32) [INeg W32] `shouldContain` "negl"
+      codegen [] (TyInt W32) [INeg W32] `shouldContain` "negl"
     it "IDivにゼロ除算チェックを含む" $
-      codegen (TyInt W64) [IDiv W64] `shouldContain` ".Ldiv_zero_error"
+      codegen [] (TyInt W64) [IDiv W64] `shouldContain` ".Ldiv_zero_error"
     it "エピローグにprintf呼び出しを含む" $
-      codegen (TyInt W64) [] `shouldContain` "call  printf"
+      codegen [] (TyInt W64) [] `shouldContain` "call  printf"
     it "最終値がi64なら%ldフォーマットを使う" $
-      codegen (TyInt W64) [] `shouldContain` "\"%ld\\n\""
+      codegen [] (TyInt W64) [] `shouldContain` "\"%ld\\n\""
     it "最終値がi32なら%dフォーマットを使う" $
-      codegen (TyInt W32) [] `shouldContain` "\"%d\\n\""
+      codegen [] (TyInt W32) [] `shouldContain` "\"%d\\n\""
     it "Load W64をmovq+pushqに変換する" $
-      codegen (TyInt W64) [Load W64 (-8)] `shouldContain` "movq  -8(%rbp), %rax"
+      codegen [] (TyInt W64) [Load W64 (-8)] `shouldContain` "movq  -8(%rbp), %rax"
     it "Store W64をpopq+movqに変換する" $
-      codegen (TyInt W64) [Store W64 (-8)] `shouldContain` "movq  %rax, -8(%rbp)"
+      codegen [] (TyInt W64) [Store W64 (-8)] `shouldContain` "movq  %rax, -8(%rbp)"
     it "Load W32をmovslq+pushqに変換する（符号拡張ロード）" $
-      codegen (TyInt W32) [Load W32 (-4)] `shouldContain` "movslq -4(%rbp), %rax"
+      codegen [] (TyInt W32) [Load W32 (-4)] `shouldContain` "movslq -4(%rbp), %rax"
     it "Store W32をpopq+movlに変換する（切り詰めストア）" $
-      codegen (TyInt W32) [Store W32 (-4)] `shouldContain` "movl  %eax, -4(%rbp)"
-    it "変数がある場合はsubqでスタックフレームを確保する" $
-      codegen (TyInt W64) [Store W64 (-8)] `shouldContain` "subq  $8, %rsp"
+      codegen [] (TyInt W32) [Store W32 (-4)] `shouldContain` "movl  %eax, -4(%rbp)"
+    it "変数がある場合はsubqでスタックフレームを確保する（16バイト境界へ切り上げ）" $
+      codegen [] (TyInt W64) [Store W64 (-8)] `shouldContain` "subq  $16, %rsp"
     it "変数が無ければsubqを出さない" $
-      codegen (TyInt W64) [] `shouldNotContain` "subq"
+      codegen [] (TyInt W64) [] `shouldNotContain` "subq"
     it "printf呼び出し前にスタックアライメントを揃える" $
-      codegen (TyInt W64) [] `shouldContain` "andq  $-16, %rsp"
+      codegen [] (TyInt W64) [] `shouldContain` "andq  $-16, %rsp"
     it "エピローグはleave命令を使う" $
-      codegen (TyInt W64) [] `shouldContain` "leave"
+      codegen [] (TyInt W64) [] `shouldContain` "leave"
     it "ICmpEqをcmpq+sete命令に変換する" $
-      codegen (TyInt W64) [ICmpEq] `shouldContain` "sete"
+      codegen [] (TyInt W64) [ICmpEq] `shouldContain` "sete"
     it "ICmpNeをcmpq+setne命令に変換する" $
-      codegen (TyInt W64) [ICmpNe] `shouldContain` "setne"
+      codegen [] (TyInt W64) [ICmpNe] `shouldContain` "setne"
     it "ICmpLtをcmpq+setl命令に変換する" $
-      codegen (TyInt W64) [ICmpLt] `shouldContain` "setl"
+      codegen [] (TyInt W64) [ICmpLt] `shouldContain` "setl"
     it "ICmpLeをcmpq+setle命令に変換する" $
-      codegen (TyInt W64) [ICmpLe] `shouldContain` "setle"
+      codegen [] (TyInt W64) [ICmpLe] `shouldContain` "setle"
     it "ICmpGtをcmpq+setg命令に変換する" $
-      codegen (TyInt W64) [ICmpGt] `shouldContain` "setg"
+      codegen [] (TyInt W64) [ICmpGt] `shouldContain` "setg"
     it "ICmpGeをcmpq+setge命令に変換する" $
-      codegen (TyInt W64) [ICmpGe] `shouldContain` "setge"
+      codegen [] (TyInt W64) [ICmpGe] `shouldContain` "setge"
     it "INotをxorq命令に変換する" $
-      codegen (TyInt W64) [INot] `shouldContain` "xorq"
+      codegen [] (TyInt W64) [INot] `shouldContain` "xorq"
     it "ISext32をcltq命令に変換する（to_i64/to_i32共通の符号拡張正規化）" $
-      codegen (TyInt W64) [ISext32] `shouldContain` "cltq"
+      codegen [] (TyInt W64) [ISext32] `shouldContain` "cltq"
     it "JmpIfZeroはpop+testq+je命令に変換する" $ do
-      let asm = codegen (TyInt W64) [JmpIfZero ".Lfoo"]
+      let asm = codegen [] (TyInt W64) [JmpIfZero ".Lfoo"]
       asm `shouldContain` "testq %rax, %rax"
       asm `shouldContain` "je    .Lfoo"
     it "Jmpはjmp命令に変換する" $
-      codegen (TyInt W64) [Jmp ".Lfoo"] `shouldContain` "jmp   .Lfoo"
+      codegen [] (TyInt W64) [Jmp ".Lfoo"] `shouldContain` "jmp   .Lfoo"
     it "Labelはラベル定義行に変換する" $
-      codegen (TyInt W64) [Label ".Lfoo"] `shouldContain` ".Lfoo:"
+      codegen [] (TyInt W64) [Label ".Lfoo"] `shouldContain` ".Lfoo:"
     it "最終値がboolなら分岐でtrue/false文字列を出力する" $ do
-      let asm = codegen TBool []
+      let asm = codegen [] TBool []
       asm `shouldContain` "testq %rax, %rax"
       asm `shouldContain` "\"true\\n\""
       asm `shouldContain` "\"false\\n\""
@@ -451,6 +528,38 @@ main = hspec $ do
       compileSource "if true {\nbreak;\n}\n1" `shouldBe` Left "break used outside loop"
     it "break文をwhileの外側のブロックで使うとエラー（ループを抜けた後は無効）" $
       compileSource "while true {\nbreak;\n}\n{\nbreak;\n}\n1" `shouldBe` Left "break used outside loop"
+
+  describe "意味論エラー（fn定義・呼び出し）" $ do
+    let compileSource src = tokenize src >>= parse >>= compile
+    it "未定義関数の呼び出しはエラー" $
+      compileSource "f()" `shouldBe` Left "undeclared function: f"
+    it "引数個数が足りない呼び出しはエラー" $
+      compileSource "fn f(a: i64, b: i64) -> i64 {\na + b\n}\nf(1)"
+        `shouldBe` Left "wrong number of arguments for f: expected 2, found 1"
+    it "引数個数が多すぎる呼び出しはエラー" $
+      compileSource "fn f(a: i64) -> i64 {\na\n}\nf(1, 2)"
+        `shouldBe` Left "wrong number of arguments for f: expected 1, found 2"
+    it "引数の型が宣言と異なる呼び出しはエラー（暗黙変換は行わない）" $
+      compileSource "fn f(a: i64) -> i64 {\na\n}\nlet x: i32 = 1;\nf(x)"
+        `shouldBe` Left "type mismatch: expected i64, found i32"
+    it "戻り値の型が期待と異なるとエラー" $
+      compileSource "fn f() -> i64 {\n1\n}\nlet x: i32 = f();\nx"
+        `shouldBe` Left "type mismatch: expected i32, found i64"
+    it "関数名'main'は予約されておりエラー" $
+      compileSource "fn main() -> i64 {\n1\n}\n2" `shouldBe` Left "function name 'main' is reserved"
+    it "同名の関数を再定義するとエラー" $
+      compileSource "fn f() -> i64 {\n1\n}\nfn f() -> i64 {\n2\n}\n3"
+        `shouldBe` Left "function already declared: f"
+    it "引数が7個を超える関数定義はエラー（レジスタ渡しの上限）" $
+      compileSource
+        "fn f(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 {\na\n}\nf(1,2,3,4,5,6,7)"
+        `shouldBe` Left "too many parameters (max 6): f"
+    it "関数外でのreturnはエラー" $
+      compileSource "return 1;\n2" `shouldBe` Left "return used outside function"
+    it "宣言順に依存しない相互再帰は成功する（二パスコンパイルの確認）" $
+      compileSource
+        "fn is_even(n: i64) -> bool {\nif n == 0 {\nreturn true;\n}\nis_odd(n - 1)\n}\nfn is_odd(n: i64) -> bool {\nif n == 0 {\nreturn false;\n}\nis_even(n - 1)\n}\nis_even(4)"
+        `shouldSatisfy` isRight
 
   describe "run（VM）" $ do
     it "Load/Storeで変数の値を保持する" $
@@ -732,6 +841,44 @@ main = hspec $ do
         "let a: i64 = 0;\nlet sum: i64 = 0;\nwhile a < 10 {\nsum = sum + a;\na = a + 1;\n}\nsum"
       result `shouldBe` "45"
 
+  describe "compile + codegen + gcc（fn定義・呼び出しの結合テスト）" $ do
+    it "単純な関数呼び出しを評価する" $ do
+      result <- compileSourceAndRun "fn add(a: i64, b: i64) -> i64 {\na + b\n}\nlet x: i64 = add(1, 2);\nx"
+      result `shouldBe` "3"
+    it "引数の型がi32の関数を評価する" $ do
+      result <- compileSourceAndRun "fn add(a: i32, b: i32) -> i32 {\na + b\n}\nadd(1, 2)"
+      result `shouldBe` "3"
+    it "戻り値がboolの関数を評価する" $ do
+      result <- compileSourceAndRun "fn isPositive(x: i64) -> bool {\nx > 0\n}\nisPositive(5)"
+      result `shouldBe` "true"
+    it "早期returnを評価する" $ do
+      result <- compileSourceAndRun
+        "fn abs(x: i64) -> i64 {\nif x < 0 {\nreturn 0 - x;\n}\nx\n}\nabs(0 - 5)"
+      result `shouldBe` "5"
+    it "自己再帰（階乗）を評価する" $ do
+      result <- compileSourceAndRun
+        "fn fact(n: i64) -> i64 {\nif n <= 1 {\nreturn 1;\n}\nn * fact(n - 1)\n}\nfact(10)"
+      result `shouldBe` "3628800"
+    it "宣言順に依存しない相互再帰を評価する" $ do
+      result <- compileSourceAndRun
+        "fn is_even(n: i64) -> bool {\nif n == 0 {\nreturn true;\n}\nis_odd(n - 1)\n}\nfn is_odd(n: i64) -> bool {\nif n == 0 {\nreturn false;\n}\nis_even(n - 1)\n}\nis_even(10)"
+      result `shouldBe` "true"
+    it "6個の引数（レジスタ渡しの上限）を持つ関数を評価する" $ do
+      result <- compileSourceAndRun
+        "fn sum6(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64 {\na + b + c + d + e + f\n}\nsum6(1, 2, 3, 4, 5, 6)"
+      result `shouldBe` "21"
+    it "呼び出しは他の呼び出しの引数として入れ子にできる" $ do
+      result <- compileSourceAndRun
+        "fn inc(x: i64) -> i64 {\nx + 1\n}\ninc(inc(inc(0)))"
+      result `shouldBe` "3"
+    it "式の途中（奇数深さ）でのユーザー関数呼び出しでもスタックアライメントが崩れない" $ do
+      result <- compileSourceAndRun "fn foo(x: i64) -> i64 {\nx * 2\n}\n1 + 2 + foo(3)"
+      result `shouldBe` "9"
+    it "fn定義は暗黙main本体の文と自由に混在できる（実行結果の確認）" $ do
+      result <- compileSourceAndRun
+        "let a: i64 = 1;\nfn double(x: i64) -> i64 {\nx * 2\n}\nlet b: i64 = double(a);\nfn triple(x: i64) -> i64 {\nx * 3\n}\ntriple(b)"
+      result `shouldBe` "6"
+
   describe "ゼロ除算の実行時エラー" $ do
     it "変数なしのゼロ除算はエラーメッセージを出力して非ゼロ終了する" $ do
       (code, out) <- compileSourceAndRunExit "1 / 0"
@@ -751,10 +898,10 @@ compileAndRun expr =
   withSystemTempDirectory "hs006" $ \tmpDir -> do
     let asmPath = tmpDir </> "out.s"
         binPath = tmpDir </> "out"
-    case compile ([], expr) of
+    case compile ([], [], expr) of
       Left err -> error ("compile failed: " ++ err)
-      Right (finalType, instrs) -> do
-        writeFile asmPath (codegen finalType instrs)
+      Right (fns, finalType, instrs) -> do
+        writeFile asmPath (codegen fns finalType instrs)
         _ <- readProcess "gcc" [asmPath, "-o", binPath] ""
         output <- readProcess binPath [] ""
         return (takeWhile (/= '\n') output)
@@ -767,8 +914,8 @@ buildAndRun runBinary src =
         binPath = tmpDir </> "out"
     case tokenize src >>= parse >>= compile of
       Left err -> error ("compile failed: " ++ err)
-      Right (finalType, instrs) -> do
-        writeFile asmPath (codegen finalType instrs)
+      Right (fns, finalType, instrs) -> do
+        writeFile asmPath (codegen fns finalType instrs)
         _ <- readProcess "gcc" [asmPath, "-o", binPath] ""
         runBinary binPath
 
