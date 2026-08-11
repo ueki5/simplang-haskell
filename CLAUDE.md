@@ -1,7 +1,18 @@
 # simplang-haskell
 
 Haskell で実装されており、GCC をリンカとして利用する。
-アプリケーション仕様（Architecture）は `docs/step000.md`、変数・代入機能の設計は `docs/step001.md`、i32型の設計は `docs/step002.md` を参照。
+各種設計ドキュメントは以下を参照。
+
+- アプリケーション仕様（Architecture）: `docs/step000.md`
+- 変数・代入機能の設計: `docs/step001.md`
+- i32型の設計: `docs/step002.md`
+- bool型と等価/非等価/否定演算子の設計: `docs/step003.md`
+- to_i64/to_i32単項演算子の設計: `docs/step004.md`
+- コードブロック`{}`（変数スコープ）の設計: `docs/step005.md`
+- if/else if/elseの設計: `docs/step006.md`
+- while/break/continueの設計: `docs/step007.md`
+- 比較演算子（`<`, `<=`, `>`, `>=`）の設計: `docs/step008.md`
+- 関数定義（fn）の設計: `docs/step009.md`
 
 ## Build & Run
 
