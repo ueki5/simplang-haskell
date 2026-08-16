@@ -9,8 +9,8 @@ Haskell で実装されており、GCC をリンカとして利用する。
 
 ```
 Source text
-  → tokenize  (src/Compiler.hs)  -- 字句解析
-  → parse     (src/Compiler.hs)  -- 再帰下降パーサ（演算子優先順位あり）
+  → tokenize  (src/Parser.hs)    -- 字句解析
+  → parse     (src/Parser.hs)    -- 再帰下降パーサ（演算子優先順位あり）
   → compile   (src/Compiler.hs)  -- AST → スタックベース中間命令列
   → codegen   (src/CodeGen.hs)   -- 中間命令 → x86-64 AT&T 構文アセンブリ
   → gcc       (app/Main.hs)      -- .s → ネイティブバイナリ
@@ -20,7 +20,8 @@ Source text
 
 | ファイル | 責務 |
 |---|---|
-| `src/Compiler.hs` | Lexer / Parser / IR Compiler / Stack VM（テスト用） |
+| `src/Parser.hs` | Lexer / Parser（AST・`Type`/`Width`の定義を含む） |
+| `src/Compiler.hs` | IR Compiler / Stack VM（テスト用） |
 | `src/CodeGen.hs` | x86-64 アセンブリ生成 |
 | `app/Main.hs` | CLI (optparse-applicative)、パイプライン統合 |
 | `test/Spec.hs` | Hspec テストスイート |

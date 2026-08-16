@@ -1,7 +1,8 @@
 module CodeGen (codegen) where
 
-import Compiler (Instr (..), Type (..), Width (..))
+import Compiler (Instr (..))
 import Data.List (mapAccumL)
+import Parser (Type (..), Width (..))
 
 -- 各fn（(名前, 命令列)）＋暗黙main（末尾式の型, 命令列）からアセンブリ全体を組み立てる。
 -- .text/.globl main はファイル全体で一度だけ、各fnラベルはその後に、暗黙mainはmain:として
