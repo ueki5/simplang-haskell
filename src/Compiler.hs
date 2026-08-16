@@ -419,6 +419,20 @@ expectToken tok (t : rest)
   | otherwise = Left ("expected " ++ show tok ++ ", got: " ++ show t)
 expectToken tok [] = Left ("expected " ++ show tok ++ ", got end of input")
 
+{- 参考：haskellにおける演算子の優先度
+infixr 9  .
+infixl 9  !!
+infixr 8  ^, ^^, **
+infixl 7  *, /
+infixl 6  +, -
+infixr 5  ++, :
+infix  4  ==, /=, <, <=, >, >=
+infixr 3  &&
+infixr 2  ||
+infixl 1  >>, >>=
+infixr 1  =
+infixr 0  $, $!
+-}
 -- 等価・非等価の抽出（最低優先順位）
 parseEquality :: [Token] -> ParseResult Expr
 parseEquality tokens = do
