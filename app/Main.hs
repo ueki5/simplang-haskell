@@ -1,7 +1,8 @@
 module Main where
 
 import CodeGen (codegen)
-import Compiler (compile, parse, tokenize)
+import Compiler (compile)
+import Parser (parse, tokenize)
 import Options.Applicative
 import System.Directory (getTemporaryDirectory, renameFile)
 import System.Exit (exitFailure)

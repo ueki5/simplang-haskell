@@ -12,7 +12,7 @@ common warnings
 
 library
     import:           warnings
-    exposed-modules:  Compiler, CodeGen
+    exposed-modules:  Compiler, CodeGen, Parser
     build-depends:    base ^>=4.19.2.0,
                       containers,
                       transformers,

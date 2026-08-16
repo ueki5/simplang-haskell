@@ -1,7 +1,8 @@
 module Main where
 
-import Compiler (Expr (..), FnDecl (..), Instr (..), Stmt (..), Token (..), Type (..), Width (..), compile, parse, run, tokenize)
+import Compiler (Instr (..), compile, run)
 import Data.Either (isLeft, isRight)
+import Parser (Expr (..), FnDecl (..), Stmt (..), Token (..), Type (..), Width (..), parse, tokenize)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
