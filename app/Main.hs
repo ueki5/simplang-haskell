@@ -34,8 +34,8 @@ main = do
   source <- readFile (sourceFile opts)
   case tokenize source >>= parse >>= compile of
     Left err -> putStrLn ("Error: " ++ err) >> exitFailure
-    Right (finalType, instrs) -> do
-      let asm = codegen finalType instrs
+    Right (fns, finalType, instrs) -> do
+      let asm = codegen fns finalType instrs
       tmpDir <- getTemporaryDirectory
       (tmpPath, tmpHandle) <- openTempFile tmpDir "hs006.s"
       hPutStr tmpHandle asm
