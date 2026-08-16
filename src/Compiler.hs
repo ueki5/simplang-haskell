@@ -205,8 +205,8 @@ tokenize (c : cs)
 -- expr       ::= equality
 -- equality   ::= comparison (('==' | '!=') comparison)*
 -- comparison ::= additive (('<' | '<=' | '>' | '>=') additive)*
--- additive   ::= term (('+' | '-') term)*
--- term       ::= factor (('*' | '/') factor)*
+-- additive   ::= multiplicative (('+' | '-') multiplicative)*
+-- multiplicative       ::= factor (('*' | '/') factor)*
 -- factor     ::= INT | 'true' | 'false' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
 --              | '(' expr ')' | '-' factor | '!' factor | 'to_i64' factor | 'to_i32' factor
 
@@ -216,7 +216,7 @@ type ParseResult a = Either String (a, [Token])
 parse :: [Token] -> Either String Program
 parse tokens = do
   (fnDecls, stmts, rest) <- parseTopLevel tokens
-  (expr, rest') <- parseEquality rest
+  (expr, rest') <- parseExpr rest
   case rest' of
     [] -> Right (fnDecls, stmts, expr)
     (t : _) -> Left ("unexpected token: " ++ show t)
@@ -248,7 +248,7 @@ parseFnDecl tokens = do
   retTy <- parseType tyName
   rest5 <- expectToken TLBrace rest4
   (stmts, rest6) <- parseStmts rest5
-  (tailExpr, rest7) <- parseEquality rest6
+  (tailExpr, rest7) <- parseExpr rest6
   case rest7 of
     (TRBrace : rest8) -> Right (FnDecl name params retTy (stmts, tailExpr), rest8)
     _ -> Left "expected closing brace"
@@ -321,7 +321,7 @@ parseLetStmt tokens = do
   (tyName, rest'') <- expectIdent rest'
   ty <- parseType tyName
   rest3 <- expectToken TAssign rest''
-  (expr, rest4) <- parseEquality rest3
+  (expr, rest4) <- parseExpr rest3
   rest5 <- expectToken TSemicolon rest4
   Right (SLet name ty expr, rest5)
 
@@ -335,7 +335,7 @@ parseType ty = Left ("unsupported type: " ++ ty)
 -- assign-stmt ::= IDENT '=' expr ';'
 parseAssignStmt :: String -> [Token] -> ParseResult Stmt
 parseAssignStmt name tokens = do
-  (expr, rest) <- parseEquality tokens
+  (expr, rest) <- parseExpr tokens
   rest' <- expectToken TSemicolon rest
   Right (SAssign name expr, rest')
 
@@ -356,7 +356,7 @@ parseIfStmt tokens = do
 -- 条件式 + '{' stmt* '}' の1分岐分（'if'/'else if' 共通）
 parseIfBranch :: [Token] -> ParseResult (Expr, [Stmt])
 parseIfBranch tokens = do
-  (cond, rest) <- parseEquality tokens
+  (cond, rest) <- parseExpr tokens
   rest' <- expectToken TLBrace rest
   (body, rest'') <- parseStmts rest'
   case rest'' of
@@ -380,7 +380,7 @@ parseIfRest acc rest = Right (SIf acc Nothing, rest)
 -- while-stmt ::= 'while' expr '{' stmt* '}'（先頭の'while'は呼び出し側で消費済み）
 parseWhileStmt :: [Token] -> ParseResult Stmt
 parseWhileStmt tokens = do
-  (cond, rest) <- parseEquality tokens
+  (cond, rest) <- parseExpr tokens
   rest' <- expectToken TLBrace rest
   (body, rest'') <- parseStmts rest'
   case rest'' of
@@ -402,7 +402,7 @@ parseContinueStmt tokens = do
 -- return-stmt ::= 'return' expr ';'（先頭の'return'は呼び出し側で消費済み。値は必須）
 parseReturnStmt :: [Token] -> ParseResult Stmt
 parseReturnStmt tokens = do
-  (expr, rest) <- parseEquality tokens
+  (expr, rest) <- parseExpr tokens
   rest' <- expectToken TSemicolon rest
   Right (SReturn expr, rest')
 
@@ -433,6 +433,11 @@ infixl 1  >>, >>=
 infixr 1  =
 infixr 0  $, $!
 -}
+
+-- 式の抽出
+parseExpr :: [Token] -> ParseResult Expr
+parseExpr = parseEquality
+
 -- 等価・非等価の抽出（最低優先順位）
 parseEquality :: [Token] -> ParseResult Expr
 parseEquality tokens = do
@@ -452,56 +457,56 @@ parseEqualityRest left rest = Right (left, rest)
 -- 大小比較の抽出（等価より高い優先順位、加減算より低い優先順位）
 parseComparison :: [Token] -> ParseResult Expr
 parseComparison tokens = do
-  (left, rest) <- parseExpr tokens
+  (left, rest) <- parseAdditive tokens
   parseComparisonRest left rest
 
 -- comparison ::= additive (('<' | '<=' | '>' | '>=') additive)*
 parseComparisonRest :: Expr -> [Token] -> ParseResult Expr
 parseComparisonRest left (TLt : rest) = do
-  (right, rest') <- parseExpr rest
+  (right, rest') <- parseAdditive rest
   parseComparisonRest (Lt left right) rest'
 parseComparisonRest left (TLe : rest) = do
-  (right, rest') <- parseExpr rest
+  (right, rest') <- parseAdditive rest
   parseComparisonRest (Le left right) rest'
 parseComparisonRest left (TGt : rest) = do
-  (right, rest') <- parseExpr rest
+  (right, rest') <- parseAdditive rest
   parseComparisonRest (Gt left right) rest'
 parseComparisonRest left (TGe : rest) = do
-  (right, rest') <- parseExpr rest
+  (right, rest') <- parseAdditive rest
   parseComparisonRest (Ge left right) rest'
 parseComparisonRest left rest = Right (left, rest)
 
--- 式の抽出
-parseExpr :: [Token] -> ParseResult Expr
-parseExpr tokens = do
-  (left, rest) <- parseTerm tokens
-  parseExprRest left rest
+-- 加算・減算の抽出
+parseAdditive :: [Token] -> ParseResult Expr
+parseAdditive tokens = do
+  (left, rest) <- parseMultiplicative tokens
+  parseAdditiveRest left rest
 
--- additive ::= term (('+' | '-') term)*
-parseExprRest :: Expr -> [Token] -> ParseResult Expr
-parseExprRest left (TPlus : rest) = do
-  (right, rest') <- parseTerm rest
-  parseExprRest (Add left right) rest'
-parseExprRest left (TMinus : rest) = do
-  (right, rest') <- parseTerm rest
-  parseExprRest (Sub left right) rest'
-parseExprRest left rest = Right (left, rest)
+-- additive ::= multiplicative (('+' | '-') multiplicative)*
+parseAdditiveRest :: Expr -> [Token] -> ParseResult Expr
+parseAdditiveRest left (TPlus : rest) = do
+  (right, rest') <- parseMultiplicative rest
+  parseAdditiveRest (Add left right) rest'
+parseAdditiveRest left (TMinus : rest) = do
+  (right, rest') <- parseMultiplicative rest
+  parseAdditiveRest (Sub left right) rest'
+parseAdditiveRest left rest = Right (left, rest)
 
 -- 乗算・除算の抽出
-parseTerm :: [Token] -> ParseResult Expr
-parseTerm tokens = do
+parseMultiplicative :: [Token] -> ParseResult Expr
+parseMultiplicative tokens = do
   (left, rest) <- parseFactor tokens
-  parseTermRest left rest
+  parseMultiplicativeRest left rest
 
--- term ::= factor (('*' | '/') factor)*
-parseTermRest :: Expr -> [Token] -> ParseResult Expr
-parseTermRest left (TStar : rest) = do
+-- multiplicative ::= factor (('*' | '/') factor)*
+parseMultiplicativeRest :: Expr -> [Token] -> ParseResult Expr
+parseMultiplicativeRest left (TStar : rest) = do
   (right, rest') <- parseFactor rest
-  parseTermRest (Mul left right) rest'
-parseTermRest left (TSlash : rest) = do
+  parseMultiplicativeRest (Mul left right) rest'
+parseMultiplicativeRest left (TSlash : rest) = do
   (right, rest') <- parseFactor rest
-  parseTermRest (Div left right) rest'
-parseTermRest left rest = Right (left, rest)
+  parseMultiplicativeRest (Div left right) rest'
+parseMultiplicativeRest left rest = Right (left, rest)
 
 -- factor ::= INT | 'true' | 'false' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
 --          | '(' expr ')' | '-' factor | '!' factor | 'to_i64' factor | 'to_i32' factor
@@ -514,7 +519,7 @@ parseFactor (TIdent name : TLParen : rest) = do
   Right (Call name args, rest')
 parseFactor (TIdent name : rest) = Right (Var name, rest)
 parseFactor (TLParen : rest) = do
-  (expr, rest') <- parseEquality rest
+  (expr, rest') <- parseExpr rest
   case rest' of
     (TRParen : rest'') -> Right (expr, rest'')
     _ -> Left "expected closing parenthesis"
@@ -537,12 +542,12 @@ parseFactor (t : _) = Left ("unexpected token: " ++ show t)
 parseArgList :: [Token] -> ParseResult [Expr]
 parseArgList (TRParen : rest) = Right ([], rest)
 parseArgList tokens = do
-  (arg, rest) <- parseEquality tokens
+  (arg, rest) <- parseExpr tokens
   parseArgListRest [arg] rest
 
 parseArgListRest :: [Expr] -> [Token] -> ParseResult [Expr]
 parseArgListRest acc (TComma : rest) = do
-  (arg, rest') <- parseEquality rest
+  (arg, rest') <- parseExpr rest
   parseArgListRest (acc ++ [arg]) rest'
 parseArgListRest acc (TRParen : rest) = Right (acc, rest)
 parseArgListRest _ (t : _) = Left ("expected ',' or ')', got: " ++ show t)
