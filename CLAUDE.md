@@ -13,6 +13,8 @@ Haskell で実装されており、GCC をリンカとして利用する。
 - while/break/continueの設計: `docs/step007.md`
 - 比較演算子（`<`, `<=`, `>`, `>=`）の設計: `docs/step008.md`
 - 関数定義（fn）の設計: `docs/step009.md`
+- リファクタリング（関数名見直し）: `docs/step010.md`
+- リファクタリング（モジュール構成見直し）: `docs/step011.md`
 
 ## Build & Run
 
