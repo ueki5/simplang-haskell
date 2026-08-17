@@ -9,11 +9,11 @@ import qualified Data.Map as Map
 import Parser (Expr (..), FnDecl (..), Program, Stmt (..), Type (..), Width (..))
 
 -- -- Debug Printサンプル（pTraceShow: 純粋関数内, pTraceShowM: モナド内）
--- import Debug.Pretty.Simple (pTraceShow, pTraceShowM)
+import Debug.Pretty.Simple (pTraceShow, pTraceShowM)
 
 -- -- プリティ印刷が不要な場合
--- trace: 純粋関数内(既存の第一引数を表示、第二引数を返却)
--- print/putStrLn: IOモナド内
+-- -- trace: 純粋関数内(既存の第一引数を表示、第二引数を返却)
+-- -- print/putStrLn: IOモナド内
 -- import Debug.Trace (trace)
 
 data Instr
@@ -128,6 +128,7 @@ compileProgram fnSigs fnDecls stmts expr = do
   (env, _cursor, stmtInstrs) <- compileStmtsFrom fnSigs [Map.empty] 0 Nothing Nothing stmts
   finalType <- lift (inferType fnSigs env expr)
   exprInstrs <- lift (compileExprTyped fnSigs env finalType expr)
+  pTraceShowM ("env", env)
   pure (fns, finalType, stmtInstrs ++ exprInstrs)
 
 -- if の分岐ラベル採番用のカウンタを持ち回るモナド。
@@ -285,6 +286,9 @@ compileFnDecl fnSigs (FnDecl name params retTy (stmts, tailExpr)) = do
       returnCtx = Just (retTy, endLabel)
   (env1, _cursor1, stmtInstrs) <- compileStmtsFrom fnSigs env0 paramCursor Nothing returnCtx stmts
   tailInstrs <- lift (compileExprTyped fnSigs env1 retTy tailExpr)
+  -- pTraceShowM ("assigned of " ++ name, assigned)
+  -- pTraceShowM ("env0 of " ++ name, env0)
+  -- pTraceShowM ("env1 of " ++ name, env1)
   pure (name, spillInstrs ++ stmtInstrs ++ tailInstrs ++ [Label endLabel])
 
 -- Maybe Type の単一化（Nothing = 整数リテラルなど未確定な部分木）
