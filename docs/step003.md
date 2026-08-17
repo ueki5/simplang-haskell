@@ -59,11 +59,11 @@ data Type = TyInt Width | TBool deriving (Show, Eq)
 - 文法に等価演算子の優先順位レベルを追加した:
 
   ```
-  expr     ::= equality
-  equality ::= additive (('==' | '!=') additive)*
-  additive ::= term (('+' | '-') term)*
-  term     ::= factor (('*' | '/') factor)*
-  factor   ::= INT | 'true' | 'false' | IDENT | '(' expr ')' | '-' factor | '!' factor
+  expr           ::= equality
+  equality       ::= additive (('==' | '!=') additive)*
+  additive       ::= multiplicative (('+' | '-') multiplicative)*
+  multiplicative ::= factor (('*' | '/') factor)*
+  factor         ::= INT | 'true' | 'false' | IDENT | '(' expr ')' | '-' factor | '!' factor
   ```
 
   `parseEquality`/`parseEqualityRest` を既存の `parseExpr`（加減算）の上位として追加し、式が現れる場所（プログラムの末尾式、`let`/代入の右辺、括弧の中）はすべて `parseEquality` を呼ぶように変更した。`!` は単項 `-` と同じ形で `parseFactor` に追加する（`Not <$> parseFactor rest`）ため、`-`/`!` の単項演算子は `==`/`!=` より強く結合する

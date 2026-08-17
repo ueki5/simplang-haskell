@@ -19,11 +19,11 @@
 - **トークン追加**: `TLt`（`<`）、`TLe`（`<=`）、`TGt`（`>`）、`TGe`（`>=`）。`tokenize` では `==`/`!=` と同じ「マルチ文字パターンを単体ガードより先に置く」方式で `<=`/`>=` を `<`/`>` 単体より先に判別する
 - **文法**:
   ```
-  expr       ::= equality
-  equality   ::= comparison (('==' | '!=') comparison)*
-  comparison ::= additive (('<' | '<=' | '>' | '>=') additive)*
-  additive   ::= term (('+' | '-') term)*
-  term       ::= factor (('*' | '/') factor)*
+  expr           ::= equality
+  equality       ::= comparison (('==' | '!=') comparison)*
+  comparison     ::= additive (('<' | '<=' | '>' | '>=') additive)*
+  additive       ::= multiplicative (('+' | '-') multiplicative)*
+  multiplicative ::= factor (('*' | '/') factor)*
   ```
 - **AST追加**: `Expr` に `Lt Expr Expr`、`Le Expr Expr`、`Gt Expr Expr`、`Ge Expr Expr` を追加。`Eq`/`Neq` と同じく専用コンストラクタ方式（共通の `BinOp` 型は導入しない）
 - **`parseComparison`/`parseComparisonRest`**: `parseEquality`（等価演算子の抽出）と `parseExpr`（加減算の抽出）の間に新設。`parseEquality` は加減算の抽出（`parseExpr`）を直接呼んでいた箇所をすべて `parseComparison` 経由に差し替える。式が登場する全箇所（末尾式、`let`/代入右辺、if/while条件、括弧内）は引き続き `parseEquality` を呼ぶだけでよく、呼び出し元の変更は不要
