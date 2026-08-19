@@ -4,6 +4,14 @@ import Compiler (Instr (..))
 import Data.List (mapAccumL)
 import Parser (Type (..), Width (..))
 
+-- -- Debug Printサンプル（pTraceShow: 純粋関数内, pTraceShowM: モナド内）
+import Debug.Pretty.Simple (pTraceShow, pTraceShowM)
+
+-- -- プリティ印刷が不要な場合
+-- -- trace: 純粋関数内(既存の第一引数を表示、第二引数を返却)
+-- -- print/putStrLn: IOモナド内
+-- import Debug.Trace (trace)
+
 -- 各fn（(名前, 命令列)）＋暗黙main（末尾式の型, 命令列）からアセンブリ全体を組み立てる。
 -- .text/.globl main はファイル全体で一度だけ、各fnラベルはその後に、暗黙mainはmain:として
 -- 最後に並べる（GASのラベル解決は出現順に依存しないため順序自体に意味はない）
@@ -14,30 +22,30 @@ codegen fns finalType mainInstrs =
       ++ concatMap genFn fns
       ++ genMain
       ++ commonTail
-  where
-    genFn (name, instrs) =
-      (name ++ ":")
-        : prologueBody (frameSize instrs)
-          ++ genBody instrs
-          ++ epilogueRet
-    genMain =
-      "main:"
-        : prologueBody (frameSize mainInstrs)
-          ++ genBody mainInstrs
-          ++ epilogue finalType
+ where
+  genFn (name, instrs) =
+    (name ++ ":")
+      : prologueBody (frameSize instrs)
+      ++ genBody instrs
+      ++ epilogueRet
+  genMain =
+    "main:"
+      : prologueBody (frameSize mainInstrs)
+      ++ genBody mainInstrs
+      ++ epilogue finalType
 
 -- ローカル変数・仮引数のスピル用に確保するスタックフレームのサイズ（バイト、16バイト境界に切り上げ）。
 -- Load/Store/StoreArg が保持する %rbp 相対オフセットの絶対値の最大が最低限必要な確保量になる。
 -- 16バイトへの切り上げは、プロローグ直後を「操作スタックの深さ0＝16バイト境界」という既知の基準点
 -- として使うために必要（式の途中でのユーザー関数呼び出し時のアライメント調整、genBody参照）
 frameSize :: [Instr] -> Int
-frameSize instrs = roundUp16 (maximum (0 : concatMap offsetOf instrs))
-  where
-    offsetOf (Load _ off) = [abs off]
-    offsetOf (Store _ off) = [abs off]
-    offsetOf (StoreArg _ _ off) = [abs off]
-    offsetOf _ = []
-    roundUp16 n = ((n + 15) `div` 16) * 16
+frameSize instrs = {-pTraceShow ("instrs:", instrs) $-} roundUp16 (maximum (0 : concatMap offsetOf instrs))
+ where
+  offsetOf (Load _ off) = [abs off]
+  offsetOf (Store _ off) = [abs off]
+  offsetOf (StoreArg _ _ off) = [abs off]
+  offsetOf _ = []
+  roundUp16 n = ((n + 15) `div` 16) * 16
 
 prologueBody :: Int -> [String]
 prologueBody size =
@@ -121,9 +129,9 @@ fmtLabel W64 = "fmt64"
 -- 深さが食い違うことはなく、単純な線形走査で静的に決定できる
 genBody :: [Instr] -> [String]
 genBody instrs = concat (snd (mapAccumL genAt 0 instrs))
-  where
-    genAt depth (ICall name n) = (depth + 1 - n, genCall depth n name)
-    genAt depth instr = (depth + stackDelta instr, genInstr instr)
+ where
+  genAt depth (ICall name n) = (depth + 1 - n, genCall depth n name)
+  genAt depth instr = (depth + stackDelta instr, genInstr instr)
 
 -- 各命令の操作スタックへの正味の増減（8バイトスロット単位）
 stackDelta :: Instr -> Int
@@ -160,8 +168,8 @@ genCall depthAtCall n name =
     ++ ["    call  " ++ name]
     ++ ["    addq  $8, %rsp" | needsPad]
     ++ ["    pushq %rax"]
-  where
-    needsPad = odd (depthAtCall - n)
+ where
+  needsPad = odd (depthAtCall - n)
 
 -- SysV AMD64の整数引数レジスタ（0始まり、最大6個）
 argReg64 :: Int -> String

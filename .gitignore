@@ -1,6 +1,6 @@
 dist-newstyle/
 .stack-work/
-out/
+output/
 *.hi
 *.o
 *.dyn_hi
