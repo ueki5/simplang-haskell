@@ -5,7 +5,7 @@ import Data.List (mapAccumL)
 import Parser (Type (..), Width (..))
 
 -- -- Debug Printサンプル（pTraceShow: 純粋関数内, pTraceShowM: モナド内）
-import Debug.Pretty.Simple (pTraceShow, pTraceShowM)
+-- import Debug.Pretty.Simple (pTraceShow, pTraceShowM)
 
 -- -- プリティ印刷が不要な場合
 -- -- trace: 純粋関数内(既存の第一引数を表示、第二引数を返却)
