@@ -33,6 +33,7 @@ data Token
   | TMinus
   | TStar
   | TSlash
+  | TAmp
   | TLParen
   | TRParen
   | TLBrace
@@ -58,6 +59,8 @@ data Expr
   | ToI64 Expr
   | ToI32 Expr
   | Call String [Expr]
+  | AddrOf Expr
+  | Deref Expr
   deriving (Show, Eq)
 
 data Stmt
@@ -90,8 +93,8 @@ type Program = ([FnDecl], [Stmt], Expr)
 data Width = W32 | W64 deriving (Show, Eq)
 
 -- ソースレベルの論理型。Width は整数のレジスタ幅を表すのに対し、
--- Type はレジスタ幅を持たない bool も含めたソース上の型を表す。
-data Type = TyInt Width | TBool deriving (Show, Eq)
+-- Type はレジスタ幅を持たない bool・再帰的なポインタ型も含めたソース上の型を表す。
+data Type = TyInt Width | TBool | TPtr Type deriving (Show, Eq)
 
 -- Lexer
 
@@ -127,6 +130,7 @@ tokenize (c : cs)
   | c == '-' = (TMinus :) <$> tokenize cs
   | c == '*' = (TStar :) <$> tokenize cs
   | c == '/' = (TSlash :) <$> tokenize cs
+  | c == '&' = (TAmp :) <$> tokenize cs
   | c == '(' = (TLParen :) <$> tokenize cs
   | c == ')' = (TRParen :) <$> tokenize cs
   | c == '{' = (TLBrace :) <$> tokenize cs
@@ -145,7 +149,7 @@ tokenize (c : cs)
 -- program    ::= (fn-decl | stmt)* expr
 -- fn-decl    ::= 'fn' IDENT '(' (IDENT ':' 型 (',' IDENT ':' 型)*)? ')' '->' 型 '{' stmt* expr '}'
 -- stmt       ::= let-stmt | assign-stmt | block-stmt | if-stmt | while-stmt | break-stmt | continue-stmt | return-stmt
--- let-stmt    ::= 'let' IDENT ':' ('i32' | 'i64' | 'bool') '=' expr ';'
+-- let-stmt    ::= 'let' IDENT ':' 型 '=' expr ';'
 -- assign-stmt ::= IDENT '=' expr ';'
 -- block-stmt ::= '{' stmt* '}'
 -- if-stmt    ::= 'if' expr '{' stmt* '}' ('else' 'if' expr '{' stmt* '}')* ('else' '{' stmt* '}')?
@@ -153,6 +157,7 @@ tokenize (c : cs)
 -- break-stmt    ::= 'break' ';'
 -- continue-stmt ::= 'continue' ';'
 -- return-stmt   ::= 'return' expr ';'
+-- 型         ::= '&' 型 | 'i32' | 'i64' | 'bool'
 -- expr       ::= equality
 -- equality   ::= comparison (('==' | '!=') comparison)*
 -- comparison ::= additive (('<' | '<=' | '>' | '>=') additive)*
@@ -160,6 +165,7 @@ tokenize (c : cs)
 -- multiplicative       ::= factor (('*' | '/') factor)*
 -- factor     ::= INT | 'true' | 'false' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
 --              | '(' expr ')' | '-' factor | '!' factor | 'to_i64' factor | 'to_i32' factor
+--              | '&' factor | '*' factor
 
 type ParseResult a = Either String (a, [Token])
 
@@ -195,8 +201,7 @@ parseFnDecl tokens = do
   rest' <- expectToken TLParen rest
   (params, rest'') <- parseParamList rest'
   rest3 <- expectToken TArrow rest''
-  (tyName, rest4) <- expectIdent rest3
-  retTy <- parseType tyName
+  (retTy, rest4) <- parseTypeAnnotation rest3
   rest5 <- expectToken TLBrace rest4
   (stmts, rest6) <- parseStmts rest5
   (tailExpr, rest7) <- parseExpr rest6
@@ -216,8 +221,7 @@ parseParam :: [Token] -> ParseResult (String, Type)
 parseParam tokens = do
   (name, rest) <- expectIdent tokens
   rest' <- expectToken TColon rest
-  (tyName, rest'') <- expectIdent rest'
-  ty <- parseType tyName
+  (ty, rest'') <- parseTypeAnnotation rest'
   Right ((name, ty), rest'')
 
 parseParamListRest :: [(String, Type)] -> [Token] -> ParseResult [(String, Type)]
@@ -264,24 +268,33 @@ parseStmts (TReturn : rest) = do
   Right (stmt : stmts, rest'')
 parseStmts tokens = Right ([], tokens)
 
--- let-stmt    ::= 'let' IDENT ':' ('i32' | 'i64' | 'bool') '=' expr ';'
+-- let-stmt    ::= 'let' IDENT ':' 型 '=' expr ';'
 parseLetStmt :: [Token] -> ParseResult Stmt
 parseLetStmt tokens = do
   (name, rest) <- expectIdent tokens
   rest' <- expectToken TColon rest
-  (tyName, rest'') <- expectIdent rest'
-  ty <- parseType tyName
+  (ty, rest'') <- parseTypeAnnotation rest'
   rest3 <- expectToken TAssign rest''
   (expr, rest4) <- parseExpr rest3
   rest5 <- expectToken TSemicolon rest4
   Right (SLet name ty expr, rest5)
 
--- 型名 -> Type の変換（現状 i32 / i64 / bool のみ対応）
+-- 型名 -> Type の変換（ベース型のみ。'&'接頭辞は parseTypeAnnotation 側で処理する）
 parseType :: String -> Either String Type
 parseType "i32" = Right (TyInt W32)
 parseType "i64" = Right (TyInt W64)
 parseType "bool" = Right TBool
 parseType ty = Left ("unsupported type: " ++ ty)
+
+-- 型 ::= '&' 型 | IDENT（IDENTは parseType でベース型に変換する）
+parseTypeAnnotation :: [Token] -> ParseResult Type
+parseTypeAnnotation (TAmp : rest) = do
+  (inner, rest') <- parseTypeAnnotation rest
+  Right (TPtr inner, rest')
+parseTypeAnnotation tokens = do
+  (tyName, rest) <- expectIdent tokens
+  ty <- parseType tyName
+  Right (ty, rest)
 
 -- assign-stmt ::= IDENT '=' expr ';'
 parseAssignStmt :: String -> [Token] -> ParseResult Stmt
@@ -461,6 +474,7 @@ parseMultiplicativeRest left rest = Right (left, rest)
 
 -- factor ::= INT | 'true' | 'false' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
 --          | '(' expr ')' | '-' factor | '!' factor | 'to_i64' factor | 'to_i32' factor
+--          | '&' factor | '*' factor
 parseFactor :: [Token] -> ParseResult Expr
 parseFactor (TInt n : rest) = Right (Lit n, rest)
 parseFactor (TTrue : rest) = Right (BoolLit True, rest)
@@ -486,6 +500,12 @@ parseFactor (TToI64 : rest) = do
 parseFactor (TToI32 : rest) = do
   (expr, rest') <- parseFactor rest
   Right (ToI32 expr, rest')
+parseFactor (TAmp : rest) = do
+  (expr, rest') <- parseFactor rest
+  Right (AddrOf expr, rest')
+parseFactor (TStar : rest) = do
+  (expr, rest') <- parseFactor rest
+  Right (Deref expr, rest')
 parseFactor [] = Left "unexpected end of input"
 parseFactor (t : _) = Left ("unexpected token: " ++ show t)
 

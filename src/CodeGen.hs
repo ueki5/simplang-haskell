@@ -44,6 +44,7 @@ frameSize instrs = {-pTraceShow ("instrs:", instrs) $-} roundUp16 (maximum (0 : 
   offsetOf (Load _ off) = [abs off]
   offsetOf (Store _ off) = [abs off]
   offsetOf (StoreArg _ _ off) = [abs off]
+  offsetOf (LoadAddr off) = [abs off]
   offsetOf _ = []
   roundUp16 n = ((n + 15) `div` 16) * 16
 
@@ -65,18 +66,10 @@ epilogueRet =
   ]
 
 -- 末尾式の型ごとに printf への引数の渡し方を切り替える（暗黙main専用）。
--- 整数型はそのまま値を %rsi に渡すが、bool は 0/1 を "true"/"false" 文字列へ分岐させる。
+-- 整数型・ポインタ型はそのまま値を %rsi に渡すが、bool は 0/1 を "true"/"false" 文字列へ分岐させる。
 epilogue :: Type -> [String]
-epilogue (TyInt w) =
-  [ "    popq  %rsi"
-  , "    andq  $-16, %rsp"
-  , "    leaq  " ++ fmtLabel w ++ "(%rip), %rdi"
-  , "    xorl  %eax, %eax"
-  , "    call  printf"
-  , "    xorl  %eax, %eax"
-  , "    leave"
-  , "    ret"
-  ]
+epilogue (TyInt w) = printfEpilogue (fmtLabel w)
+epilogue (TPtr _) = printfEpilogue "fmtPtr"
 epilogue TBool =
   [ "    popq  %rax"
   , "    andq  $-16, %rsp"
@@ -87,6 +80,19 @@ epilogue TBool =
   , ".Lbool_true:"
   , "    leaq  strTrue(%rip), %rdi"
   , ".Lbool_print:"
+  , "    xorl  %eax, %eax"
+  , "    call  printf"
+  , "    xorl  %eax, %eax"
+  , "    leave"
+  , "    ret"
+  ]
+
+-- printf(fmtLabel, 値) の形で末尾式を出力する共通処理（i32/i64/ポインタで共有、フォーマットラベルのみ差し替える）
+printfEpilogue :: String -> [String]
+printfEpilogue label =
+  [ "    popq  %rsi"
+  , "    andq  $-16, %rsp"
+  , "    leaq  " ++ label ++ "(%rip), %rdi"
   , "    xorl  %eax, %eax"
   , "    call  printf"
   , "    xorl  %eax, %eax"
@@ -108,6 +114,8 @@ commonTail =
   , "    .string \"%d\\n\""
   , "fmt64:"
   , "    .string \"%ld\\n\""
+  , "fmtPtr:"
+  , "    .string \"%p\\n\""
   , "strTrue:"
   , "    .string \"true\\n\""
   , "strFalse:"
@@ -154,6 +162,8 @@ stackDelta (JmpIfZero _) = -1
 stackDelta (Jmp _) = 0
 stackDelta (Label _) = 0
 stackDelta ISext32 = 0
+stackDelta (LoadAddr _) = 1
+stackDelta (LoadInd _) = 0
 stackDelta (StoreArg _ _ _) = 0
 stackDelta (ICall _ n) = 1 - n
 
@@ -347,6 +357,20 @@ genInstr (Label lbl) =
 genInstr ISext32 =
   [ "    popq  %rax"
   , "    cltq"
+  , "    pushq %rax"
+  ]
+genInstr (LoadAddr off) =
+  [ "    leaq  " ++ show off ++ "(%rbp), %rax"
+  , "    pushq %rax"
+  ]
+genInstr (LoadInd W64) =
+  [ "    popq  %rax"
+  , "    movq  (%rax), %rax"
+  , "    pushq %rax"
+  ]
+genInstr (LoadInd W32) =
+  [ "    popq  %rax"
+  , "    movslq (%rax), %rax"
   , "    pushq %rax"
   ]
 genInstr (StoreArg i W64 off) =

@@ -81,6 +81,12 @@ main = hspec $ do
       tokenize "1 - 2" `shouldBe` Right [TInt 1, TMinus, TInt 2]
     it "カンマを変換する" $
       tokenize "a, b" `shouldBe` Right [TIdent "a", TComma, TIdent "b"]
+    it "&演算子を変換する" $
+      tokenize "&" `shouldBe` Right [TAmp]
+    it "&で始まる識別子とは別トークンとして分割される" $
+      tokenize "&a" `shouldBe` Right [TAmp, TIdent "a"]
+    it "&&は2つのTAmpとして分割される（論理積演算子は存在しない）" $
+      tokenize "&&i64" `shouldBe` Right [TAmp, TAmp, TIdent "i64"]
 
   describe "parse" $ do
     it "整数リテラル" $
@@ -110,6 +116,39 @@ main = hspec $ do
     it "let宣言（bool）" $
       parse [TLet, TIdent "x", TColon, TIdent "bool", TAssign, TTrue, TSemicolon, TIdent "x"]
         `shouldBe` Right ([], [SLet "x" TBool (BoolLit True)], Var "x")
+    it "let宣言（&i64、アドレス取得）" $
+      parse
+        [ TLet, TIdent "a", TColon, TIdent "i64", TAssign, TInt 0, TSemicolon
+        , TLet, TIdent "b", TColon, TAmp, TIdent "i64", TAssign, TAmp, TIdent "a", TSemicolon
+        , TIdent "b"
+        ]
+        `shouldBe` Right
+          ( []
+          , [SLet "a" (TyInt W64) (Lit 0), SLet "b" (TPtr (TyInt W64)) (AddrOf (Var "a"))]
+          , Var "b"
+          )
+    it "let宣言（&&i64、ポインタのポインタ）" $
+      parse [TLet, TIdent "b", TColon, TAmp, TAmp, TIdent "i64", TAssign, TIdent "b", TSemicolon, TIdent "b"]
+        `shouldBe` Right ([], [SLet "b" (TPtr (TPtr (TyInt W64))) (Var "b")], Var "b")
+    it "let宣言（&bool）" $
+      parse [TLet, TIdent "b", TColon, TAmp, TIdent "bool", TAssign, TIdent "b", TSemicolon, TIdent "b"]
+        `shouldBe` Right ([], [SLet "b" (TPtr TBool) (Var "b")], Var "b")
+    it "デリファレンス（*式）" $
+      parse [TStar, TIdent "b"] `shouldBe` Right ([], [], Deref (Var "b"))
+    it "二重デリファレンス（**式）" $
+      parse [TStar, TStar, TIdent "p"] `shouldBe` Right ([], [], Deref (Deref (Var "p")))
+    it "アドレス取得と乗算は位置で判別される（回帰確認）: 1 * 2 は不変" $
+      parse [TInt 1, TStar, TInt 2] `shouldBe` Right ([], [], Mul (Lit 1) (Lit 2))
+    it "被乗数側のデリファレンス: a * *b" $
+      parse [TIdent "a", TStar, TStar, TIdent "b"]
+        `shouldBe` Right ([], [], Mul (Var "a") (Deref (Var "b")))
+    it "乗数側のデリファレンス: *a * b" $
+      parse [TStar, TIdent "a", TStar, TIdent "b"]
+        `shouldBe` Right ([], [], Mul (Deref (Var "a")) (Var "b"))
+    it "アドレス取得演算子（&式）" $
+      parse [TAmp, TIdent "a"] `shouldBe` Right ([], [], AddrOf (Var "a"))
+    it "アドレス取得したポインタのデリファレンス（&*p）" $
+      parse [TAmp, TStar, TIdent "p"] `shouldBe` Right ([], [], AddrOf (Deref (Var "p")))
     it "代入文" $
       parse
         [ TLet, TIdent "x", TColon, TIdent "i64", TAssign, TInt 1, TSemicolon
@@ -405,6 +444,16 @@ main = hspec $ do
       asm `shouldContain` "testq %rax, %rax"
       asm `shouldContain` "\"true\\n\""
       asm `shouldContain` "\"false\\n\""
+    it "LoadAddrをleaq+pushqに変換する（実効アドレス計算）" $
+      codegen [] (TyInt W64) [LoadAddr (-8)] `shouldContain` "leaq  -8(%rbp), %rax"
+    it "LoadInd W64をレジスタ間接movqに変換する" $
+      codegen [] (TyInt W64) [LoadInd W64] `shouldContain` "movq  (%rax), %rax"
+    it "LoadInd W32をレジスタ間接movslqに変換する（符号拡張ロード）" $
+      codegen [] (TyInt W32) [LoadInd W32] `shouldContain` "movslq (%rax), %rax"
+    it "最終値がポインタ型なら%pフォーマットを使う" $ do
+      let asm = codegen [] (TPtr (TyInt W64)) []
+      asm `shouldContain` "fmtPtr"
+      asm `shouldContain` "\"%p\\n\""
 
   describe "意味論エラー（compile）" $ do
     let compileSource src = tokenize src >>= parse >>= compile
@@ -496,6 +545,27 @@ main = hspec $ do
     it "to_i64の結果をboolコンテキストで使うとエラー" $
       compileSource "let x: i32 = 1;\nto_i64(x) == true"
         `shouldSatisfy` isLeft
+    it "未宣言変数への&はエラー" $
+      compileSource "let a: &i64 = &b;\na" `shouldBe` Left "undeclared variable: b"
+    it "&の結果を誤った型コンテキストで使うとエラー" $
+      compileSource "let a: i64 = 0;\nlet b: i64 = &a;\nb"
+        `shouldBe` Left "type mismatch: expected i64, found &i64"
+    it "非ポインタのデリファレンスはエラー" $
+      compileSource "let a: i64 = 0;\nlet b: i64 = *a;\nb"
+        `shouldBe` Left "type mismatch: expected &i64, found i64"
+    it "rvalue（整数リテラル）への&はエラー（lvalueではない）" $
+      compileSource "let a: &i64 = &5;\na"
+        `shouldBe` Left "invalid operand for &: not an lvalue: Lit 5"
+    it "rvalue（算術式）への&はエラー" $
+      compileSource "let a: i64 = 1;\nlet b: i64 = 2;\nlet c: &i64 = &(a + b);\nc"
+        `shouldBe` Left "invalid operand for &: not an lvalue: Add (Var \"a\") (Var \"b\")"
+    it "ポインタの加算はエラー（ポインタ演算は未対応）" $
+      compileSource "let a: i64 = 0;\nlet b: &i64 = &a;\nlet c: &i64 = b + 1;\nc"
+        `shouldBe` Left "type mismatch: expected &i64, found arithmetic expression"
+    it "&*pはpと同じ型・同じ値になる" $ do
+      compileSource "let a: i64 = 9;\nlet p: &i64 = &a;\nlet q: &i64 = &*p;\n*q" `shouldSatisfy` isRight
+    it "ポインタ同士の等価比較は許可される" $
+      compileSource "let a: i64 = 0;\nlet b: &i64 = &a;\nlet c: &i64 = &a;\nb == c" `shouldSatisfy` isRight
     it "ブロックを抜けた後の内部宣言変数の参照はエラー" $
       compileSource "{\nlet x: i64 = 1;\n}\nx" `shouldBe` Left "undeclared variable: x"
     it "同一ブロック内での同名再宣言はエラー" $
@@ -601,6 +671,8 @@ main = hspec $ do
       run [Push 4294967296, ISext32] `shouldBe` Right 0
     it "ISext32はi32範囲外の値を符号拡張してラップアラウンドさせる" $
       run [Push 2147483648, ISext32] `shouldBe` Right (-2147483648)
+    it "LoadAddr/LoadIndの往復で変数の値を読み出せる" $
+      run [Push 5, Store W64 (-8), LoadAddr (-8), LoadInd W64] `shouldBe` Right 5
 
   describe "compile + codegen + gcc（結合テスト）" $ do
     it "リテラルを評価する" $ do
@@ -879,6 +951,30 @@ main = hspec $ do
       result <- compileSourceAndRun
         "let a: i64 = 1;\nfn double(x: i64) -> i64 {\nx * 2\n}\nlet b: i64 = double(a);\nfn triple(x: i64) -> i64 {\nx * 3\n}\ntriple(b)"
       result `shouldBe` "6"
+
+  describe "compile + codegen + gcc（ポインタ型の結合テスト）" $ do
+    it "&で取得したアドレスを*で読み戻す（仕様例）" $ do
+      result <- compileSourceAndRun "let a:i64 = 0;\nlet b:&i64 = &a;\nlet c:i64 = *b;\nc"
+      result `shouldBe` "0"
+    it "&aで取得したアドレスは実体を指す（aへの再代入後の*bが変更後の値を返す）" $ do
+      result <- compileSourceAndRun "let a:i64 = 1;\nlet b:&i64 = &a;\na = 42;\nlet c:i64 = *b;\nc"
+      result `shouldBe` "42"
+    it "&&i64（ポインタのポインタ）の往復" $ do
+      result <-
+        compileSourceAndRun
+          "let a:i64 = 7;\nlet b:&i64 = &a;\nlet c:&&i64 = &b;\nlet d:i64 = **c;\nd"
+      result `shouldBe` "7"
+    it "&*p はpと同じ値を指す" $ do
+      result <- compileSourceAndRun "let a:i64 = 9;\nlet p:&i64 = &a;\nlet q:&i64 = &*p;\n*q"
+      result `shouldBe` "9"
+    it "ポインタ型の関数引数・戻り値を扱える" $ do
+      result <-
+        compileSourceAndRun
+          "fn deref(p: &i64) -> i64 {\n*p\n}\nlet a:i64 = 3;\nderef(&a)"
+      result `shouldBe` "3"
+    it "末尾式がポインタ型のとき%p形式（0xで始まる）で出力する" $ do
+      result <- compileSourceAndRun "let a:i64 = 0;\nlet b:&i64 = &a;\nb"
+      take 2 result `shouldBe` "0x"
 
   describe "ゼロ除算の実行時エラー" $ do
     it "変数なしのゼロ除算はエラーメッセージを出力して非ゼロ終了する" $ do
