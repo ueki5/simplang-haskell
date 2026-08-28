@@ -147,9 +147,9 @@ tokenize (c : cs)
 -- Parser
 --
 -- program    ::= (fn-decl | stmt)* expr
--- fn-decl    ::= 'fn' IDENT '(' (IDENT ':' 型 (',' IDENT ':' 型)*)? ')' '->' 型 '{' stmt* expr '}'
+-- fn-decl    ::= 'fn' IDENT '(' (IDENT ':' type (',' IDENT ':' type)*)? ')' '->' type '{' stmt* expr '}'
 -- stmt       ::= let-stmt | assign-stmt | block-stmt | if-stmt | while-stmt | break-stmt | continue-stmt | return-stmt
--- let-stmt    ::= 'let' IDENT ':' 型 '=' expr ';'
+-- let-stmt    ::= 'let' IDENT ':' type '=' expr ';'
 -- assign-stmt ::= IDENT '=' expr ';'
 -- block-stmt ::= '{' stmt* '}'
 -- if-stmt    ::= 'if' expr '{' stmt* '}' ('else' 'if' expr '{' stmt* '}')* ('else' '{' stmt* '}')?
@@ -157,7 +157,7 @@ tokenize (c : cs)
 -- break-stmt    ::= 'break' ';'
 -- continue-stmt ::= 'continue' ';'
 -- return-stmt   ::= 'return' expr ';'
--- 型         ::= '&' 型 | 'i32' | 'i64' | 'bool'
+-- type       ::= '&' type | 'i32' | 'i64' | 'bool'
 -- expr       ::= equality
 -- equality   ::= comparison (('==' | '!=') comparison)*
 -- comparison ::= additive (('<' | '<=' | '>' | '>=') additive)*
@@ -209,14 +209,14 @@ parseFnDecl tokens = do
     (TRBrace : rest8) -> Right (FnDecl name params retTy (stmts, tailExpr), rest8)
     _ -> Left "expected closing brace"
 
--- 仮引数リスト: (IDENT ':' 型 (',' IDENT ':' 型)*)?（'(' は呼び出し側で消費済み、終端の ')' はここで消費する）
+-- 仮引数リスト: (IDENT ':' type (',' IDENT ':' type)*)?（'(' は呼び出し側で消費済み、終端の ')' はここで消費する）
 parseParamList :: [Token] -> ParseResult [(String, Type)]
 parseParamList (TRParen : rest) = Right ([], rest)
 parseParamList tokens = do
   (param, rest) <- parseParam tokens
   parseParamListRest [param] rest
 
--- IDENT ':' 型
+-- IDENT ':' type
 parseParam :: [Token] -> ParseResult (String, Type)
 parseParam tokens = do
   (name, rest) <- expectIdent tokens
@@ -268,7 +268,7 @@ parseStmts (TReturn : rest) = do
   Right (stmt : stmts, rest'')
 parseStmts tokens = Right ([], tokens)
 
--- let-stmt    ::= 'let' IDENT ':' 型 '=' expr ';'
+-- let-stmt    ::= 'let' IDENT ':' type '=' expr ';'
 parseLetStmt :: [Token] -> ParseResult Stmt
 parseLetStmt tokens = do
   (name, rest) <- expectIdent tokens
@@ -286,7 +286,7 @@ parseType "i64" = Right (TyInt W64)
 parseType "bool" = Right TBool
 parseType ty = Left ("unsupported type: " ++ ty)
 
--- 型 ::= '&' 型 | IDENT（IDENTは parseType でベース型に変換する）
+-- type ::= '&' type | IDENT（IDENTは parseType でベース型に変換する）
 parseTypeAnnotation :: [Token] -> ParseResult Type
 parseTypeAnnotation (TAmp : rest) = do
   (inner, rest') <- parseTypeAnnotation rest
