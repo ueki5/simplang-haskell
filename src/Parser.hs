@@ -1,9 +1,12 @@
 module Parser (Token (..), Expr (..), Stmt (..), FnDecl (..), Width (..), Type (..), Program, tokenize, parse) where
 
 import Data.Char (isAlpha, isAlphaNum, isDigit, isSpace)
+import Data.List (stripPrefix)
 
 data Token
   = TInt Int
+  | -- 'i32'/'i64'サフィックス付き整数リテラル（例: `9999i64`）。空白を挟まず直接連結される
+    TIntSuffixed Int Width
   | TIdent String
   | TLet
   | TIf
@@ -42,6 +45,8 @@ data Token
 
 data Expr
   = Lit Int
+  | -- 'i32'/'i64'サフィックスで型を固定した整数リテラル（例: `9999i64`）。Litと異なりexpectedとは無関係に型が確定する
+    LitTyped Int Width
   | BoolLit Bool
   | Var String
   | Add Expr Expr
@@ -109,7 +114,9 @@ tokenize (c : cs)
   | isSpace c = tokenize cs
   | isDigit c =
       let (digits, rest) = span isDigit (c : cs)
-       in (TInt (read digits) :) <$> tokenize rest
+       in case matchIntSuffix rest of
+            Just (w, rest') -> (TIntSuffixed (read digits) w :) <$> tokenize rest'
+            Nothing -> (TInt (read digits) :) <$> tokenize rest
   | isAlpha c =
       let (ident, rest) = span (\ch -> isAlphaNum ch || ch == '_') (c : cs)
        in case ident of
@@ -144,6 +151,18 @@ tokenize (c : cs)
   | c == ';' = (TSemicolon :) <$> tokenize cs
   | otherwise = Left ("unexpected character: " ++ [c])
 
+-- 整数リテラル直後の型サフィックス（'i64'/'i32'）を認識する。識別子境界（次の文字が
+-- 識別子構成文字でない、または入力終端）まで含めて判定することで、`10i64`は`TIntSuffixed`に、
+-- `10i64x`や`10i65`は誤ってサフィックスとして消費せず従来どおり`TInt`+`TIdent`のトークン列にする
+matchIntSuffix :: String -> Maybe (Width, String)
+matchIntSuffix s
+  | Just rest <- stripPrefix "i64" s, boundary rest = Just (W64, rest)
+  | Just rest <- stripPrefix "i32" s, boundary rest = Just (W32, rest)
+  | otherwise = Nothing
+ where
+  boundary (ch : _) = not (isAlphaNum ch || ch == '_')
+  boundary [] = True
+
 -- Parser
 --
 -- program    ::= (fn-decl | stmt)* expr
@@ -163,9 +182,10 @@ tokenize (c : cs)
 -- comparison ::= additive (('<' | '<=' | '>' | '>=') additive)*
 -- additive   ::= multiplicative (('+' | '-') multiplicative)*
 -- multiplicative       ::= factor (('*' | '/') factor)*
--- factor     ::= INT | 'true' | 'false' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
+-- factor     ::= INT | INT ('i64' | 'i32') | 'true' | 'false' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
 --              | '(' expr ')' | '-' factor | '!' factor | 'to_i64' factor | 'to_i32' factor
 --              | '&' factor | '*' factor
+--              ※ INT ('i64'|'i32') は字句解析側で空白を挟まず1トークン（TIntSuffixed）に融合される
 
 type ParseResult a = Either String (a, [Token])
 
@@ -472,11 +492,12 @@ parseMultiplicativeRest left (TSlash : rest) = do
   parseMultiplicativeRest (Div left right) rest'
 parseMultiplicativeRest left rest = Right (left, rest)
 
--- factor ::= INT | 'true' | 'false' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
+-- factor ::= INT | INT ('i64' | 'i32') | 'true' | 'false' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
 --          | '(' expr ')' | '-' factor | '!' factor | 'to_i64' factor | 'to_i32' factor
 --          | '&' factor | '*' factor
 parseFactor :: [Token] -> ParseResult Expr
 parseFactor (TInt n : rest) = Right (Lit n, rest)
+parseFactor (TIntSuffixed n w : rest) = Right (LitTyped n w, rest)
 parseFactor (TTrue : rest) = Right (BoolLit True, rest)
 parseFactor (TFalse : rest) = Right (BoolLit False, rest)
 parseFactor (TIdent name : TLParen : rest) = do
