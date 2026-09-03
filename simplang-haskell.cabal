@@ -46,6 +46,9 @@ test-suite simplang-haskell-test
         hspec,
         process,
         temporary,
-        filepath
+        filepath,
+        pretty-simple,
+        QuickCheck,
+        checkers
     hs-source-dirs:   test
     default-language: Haskell2010

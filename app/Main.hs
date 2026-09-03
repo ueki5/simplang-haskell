@@ -2,8 +2,8 @@ module Main where
 
 import CodeGen (codegen)
 import Compiler (compile)
-import Parser (parse, tokenize)
 import Options.Applicative
+import Parser (parse, tokenize)
 import System.Directory (getTemporaryDirectory, renameFile)
 import System.Exit (exitFailure)
 import System.IO (hClose, hPutStr, openTempFile)
@@ -12,7 +12,7 @@ import System.Process (callProcess)
 data Options = Options
   { sourceFile :: FilePath
   , outputFile :: FilePath
-  , asmFile    :: Maybe FilePath
+  , asmFile :: Maybe FilePath
   }
 
 optionsParser :: Parser Options
@@ -43,5 +43,5 @@ main = do
       hClose tmpHandle
       asmPath <- case asmFile opts of
         Just path -> renameFile tmpPath path >> return path
-        Nothing   -> return tmpPath
-      callProcess "gcc" [asmPath, "-o", outputFile opts]
+        Nothing -> return tmpPath
+      callProcess "gcc" [asmPath, "-g", "-o", outputFile opts]
