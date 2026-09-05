@@ -87,10 +87,27 @@ main = hspec $ do
       tokenize "&a" `shouldBe` Right [TAmp, TIdent "a"]
     it "&&は2つのTAmpとして分割される（論理積演算子は存在しない）" $
       tokenize "&&i64" `shouldBe` Right [TAmp, TAmp, TIdent "i64"]
+    it "i64サフィックス付き整数リテラルを変換する" $
+      tokenize "9999i64" `shouldBe` Right [TIntSuffixed 9999 W64]
+    it "i32サフィックス付き整数リテラルを変換する" $
+      tokenize "123i32" `shouldBe` Right [TIntSuffixed 123 W32]
+    it "サフィックス付き整数リテラルは空白を挟まなくても後続トークンと分割される" $
+      tokenize "9999i64+1" `shouldBe` Right [TIntSuffixed 9999 W64, TPlus, TInt 1]
+    it "数字の直後が'i64'/'i32'に一致しない識別子ならサフィックスとして扱わずTInt+TIdentのまま" $
+      tokenize "10abc" `shouldBe` Right [TInt 10, TIdent "abc"]
+    it "'i64'/'i32'の直後に識別子構成文字が続く場合はサフィックスとして誤消費しない" $
+      tokenize "10i64x" `shouldBe` Right [TInt 10, TIdent "i64x"]
 
   describe "parse" $ do
     it "整数リテラル" $
       parse [TInt 5] `shouldBe` Right ([], [], Lit 5)
+    it "i64サフィックス付き整数リテラル" $
+      parse [TIntSuffixed 9999 W64] `shouldBe` Right ([], [], LitTyped 9999 W64)
+    it "i32サフィックス付き整数リテラル" $
+      parse [TIntSuffixed 123 W32] `shouldBe` Right ([], [], LitTyped 123 W32)
+    it "サフィックス付き整数リテラルの加算" $
+      parse [TIntSuffixed 1 W64, TPlus, TInt 2]
+        `shouldBe` Right ([], [], Add (LitTyped 1 W64) (Lit 2))
     it "加算" $
       parse [TInt 1, TPlus, TInt 2] `shouldBe` Right ([], [], Add (Lit 1) (Lit 2))
     it "減算" $
@@ -488,6 +505,24 @@ main = hspec $ do
     it "整数変数にboolリテラルを代入するとエラー" $
       compileSource "let x: i32 = true;\nx"
         `shouldBe` Left "type mismatch: expected i32, found bool"
+    it "i64サフィックス付きリテラル単体はi64としてコンパイルされる" $
+      compileSource "9999i64" `shouldBe` Right ([], TyInt W64, [Push 9999])
+    it "i32サフィックス付きリテラル単体はi32としてコンパイルされる" $
+      compileSource "9999i32" `shouldBe` Right ([], TyInt W32, [Push 9999])
+    it "i64サフィックス付きリテラルをi32変数へ代入すると幅不一致でエラー" $
+      compileSource "let x: i32 = 9999i64;\nx"
+        `shouldBe` Left "type mismatch: expected i32, found i64"
+    it "i32サフィックス付きリテラルをi64変数へ代入すると幅不一致でエラー" $
+      compileSource "let x: i64 = 9999i32;\nx"
+        `shouldBe` Left "type mismatch: expected i64, found i32"
+    it "サフィックス付きリテラルをbool変数へ代入するとエラー" $
+      compileSource "let x: bool = 9999i64;\nx"
+        `shouldBe` Left "type mismatch: expected bool, found i64"
+    it "無型リテラルとの混在ではサフィックス側の型に固定される" $
+      compileSource "9999i32 + 5" `shouldBe` Right ([], TyInt W32, [Push 9999, Push 5, IAdd W32])
+    it "サフィックス付きリテラル同士でi32とi64を混在させるとエラー" $
+      compileSource "9999i32 + 5i64"
+        `shouldBe` Left "type mismatch: i32 and i64"
     it "boolに対する算術演算はエラー" $
       compileSource "true + 1"
         `shouldBe` Left "type mismatch: expected bool, found arithmetic expression"
@@ -758,6 +793,21 @@ main = hspec $ do
     it "i64の末尾式は%ldで正しく出力される（64bit値の潜在バグ修正の確認）" $ do
       result <- compileSourceAndRun "let x: i64 = 1;\nlet y: i64 = 2;\ny"
       result `shouldBe` "2"
+    it "i64サフィックス付きリテラルはlet無しでもi64として%ldで出力される" $ do
+      result <- compileSourceAndRun "9999i64"
+      result `shouldBe` "9999"
+    it "i32サフィックス付きリテラルはlet無しでもi32として%dで出力される" $ do
+      result <- compileSourceAndRun "9999i32"
+      result `shouldBe` "9999"
+    it "i64サフィックス付きリテラルをi64変数に束縛して評価する" $ do
+      result <- compileSourceAndRun "let x: i64 = 9999i64;\nx + 1"
+      result `shouldBe` "10000"
+    it "i32サフィックス付きリテラルをi32変数に束縛して評価する" $ do
+      result <- compileSourceAndRun "let x: i32 = 9999i32;\nx + 1"
+      result `shouldBe` "10000"
+    it "サフィックス付きリテラルと宣言型が食い違うとコンパイルエラーになる" $
+      (tokenize "let x: i64 = 9999i32;\nx" >>= parse >>= compile)
+        `shouldBe` Left "type mismatch: expected i64, found i32"
     it "bool変数の宣言・末尾式出力を評価する" $ do
       result <- compileSourceAndRun "let flag: bool = true;\nflag"
       result `shouldBe` "true"

@@ -336,6 +336,8 @@ inferMaybeType :: FnSigs -> Env -> Expr -> Either String (Maybe Type)
 inferMaybeType fnSigs env = go
  where
   go (Lit _) = Right Nothing
+  -- サフィックス付きリテラルは Var と同様、常に確定した型を持つ（expectedとは無関係）
+  go (LitTyped _ w) = Right (Just (TyInt w))
   go (BoolLit _) = Right (Just TBool)
   go (Var name) =
     maybe (Left ("undeclared variable: " ++ name)) (Right . Just . snd) (lookupVar name env)
@@ -432,6 +434,10 @@ compileExprTyped _ _ TBool (Lit _) = Left "type mismatch: expected bool, found i
 compileExprTyped _ _ expected@(TPtr _) (Lit _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found integer literal")
 compileExprTyped _ _ (TyInt _) (Lit n) = Right [Push n]
+-- [let ]xxx = 1234i64; / 1234i32;（サフィックスで型が確定済み。Varと同様、expectedと食い違えばエラー）
+compileExprTyped _ _ expected (LitTyped n w)
+  | expected == TyInt w = Right [Push n]
+  | otherwise = Left ("type mismatch: expected " ++ typeName expected ++ ", found " ++ typeName (TyInt w))
 -- [let ]xxx = true; / false;（bool以外のコンテキストでは不可）
 compileExprTyped _ _ TBool (BoolLit b) = Right [Push (if b then 1 else 0)]
 compileExprTyped _ _ expected@(TyInt _) (BoolLit _) =
