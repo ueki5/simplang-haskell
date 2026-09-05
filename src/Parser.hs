@@ -70,6 +70,8 @@ data Expr
 
 data Stmt
   = SLet String Type Expr
+  | -- 型注釈を省略したlet（例: `let x = 5;`）。型はcompileExprTyped側でinferTypeにより推論する
+    SLetInferred String Expr
   | SAssign String Expr
   | SBlock [Stmt]
   | -- if/else-if*/else?（値を返さない文。分岐は [(条件式, 本体)] の列＋任意のelse本体）
@@ -168,7 +170,7 @@ matchIntSuffix s
 -- program    ::= (fn-decl | stmt)* expr
 -- fn-decl    ::= 'fn' IDENT '(' (IDENT ':' type (',' IDENT ':' type)*)? ')' '->' type '{' stmt* expr '}'
 -- stmt       ::= let-stmt | assign-stmt | block-stmt | if-stmt | while-stmt | break-stmt | continue-stmt | return-stmt
--- let-stmt    ::= 'let' IDENT ':' type '=' expr ';'
+-- let-stmt    ::= 'let' IDENT ':' type '=' expr ';' | 'let' IDENT '=' expr ';'
 -- assign-stmt ::= IDENT '=' expr ';'
 -- block-stmt ::= '{' stmt* '}'
 -- if-stmt    ::= 'if' expr '{' stmt* '}' ('else' 'if' expr '{' stmt* '}')* ('else' '{' stmt* '}')?
@@ -288,16 +290,23 @@ parseStmts (TReturn : rest) = do
   Right (stmt : stmts, rest'')
 parseStmts tokens = Right ([], tokens)
 
--- let-stmt    ::= 'let' IDENT ':' type '=' expr ';'
+-- let-stmt    ::= 'let' IDENT ':' type '=' expr ';' | 'let' IDENT '=' expr ';'
 parseLetStmt :: [Token] -> ParseResult Stmt
 parseLetStmt tokens = do
   (name, rest) <- expectIdent tokens
-  rest' <- expectToken TColon rest
-  (ty, rest'') <- parseTypeAnnotation rest'
-  rest3 <- expectToken TAssign rest''
-  (expr, rest4) <- parseExpr rest3
-  rest5 <- expectToken TSemicolon rest4
-  Right (SLet name ty expr, rest5)
+  case rest of
+    (TColon : rest') -> do
+      (ty, rest'') <- parseTypeAnnotation rest'
+      rest3 <- expectToken TAssign rest''
+      (expr, rest4) <- parseExpr rest3
+      rest5 <- expectToken TSemicolon rest4
+      Right (SLet name ty expr, rest5)
+    -- 型注釈省略: 'let' IDENT '=' expr ';'（型はcompile側でinferTypeにより推論する）
+    _ -> do
+      rest' <- expectToken TAssign rest
+      (expr, rest'') <- parseExpr rest'
+      rest3 <- expectToken TSemicolon rest''
+      Right (SLetInferred name expr, rest3)
 
 -- 型名 -> Type の変換（ベース型のみ。'&'接頭辞は parseTypeAnnotation 側で処理する）
 parseType :: String -> Either String Type

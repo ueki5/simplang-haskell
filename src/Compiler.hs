@@ -203,6 +203,13 @@ compileStmtsFrom fnSigs initEnv initCursor loopCtx returnCtx stmts = foldM step 
     let off = cursor - widthBytes (storageWidth ty)
     -- 変数とアドレスのマップ, 命令＋追加命令＋変数のストア
     pure (insertVar name (off, ty) env, off, acc ++ instrs ++ [Store (storageWidth ty) off])
+  -- let xxx = ...（型注釈省略。inferTypeで推論し、最後まで未確定ならi64をデフォルトとする）
+  step (env, cursor, acc) (SLetInferred name expr) = do
+    when (declaredLocally name env) $ lift (Left ("variable already declared: " ++ name))
+    ty <- lift (inferType fnSigs env expr)
+    instrs <- lift (compileExprTyped fnSigs env ty expr)
+    let off = cursor - widthBytes (storageWidth ty)
+    pure (insertVar name (off, ty) env, off, acc ++ instrs ++ [Store (storageWidth ty) off])
   -- xxx = ...
   step (env, cursor, acc) (SAssign name expr) = do
     -- 変数の定義をチェック（外側スコープの変数への書き込みも許可）
