@@ -173,8 +173,22 @@ main = hspec $ do
         , TIdent "x"
         ]
         `shouldBe` Right ([], [SLet "x" (TyInt W64) (Lit 1), SAssign "x" (Lit 2)], Var "x")
-    it "let宣言でコロンが無ければエラー" $
-      parse [TLet, TIdent "x", TAssign, TInt 1, TSemicolon, TIdent "x"] `shouldSatisfy` isLeft
+    it "let宣言（型注釈省略）: コロンが無ければSLetInferredとしてパースする" $
+      parse [TLet, TIdent "x", TAssign, TInt 1, TSemicolon, TIdent "x"]
+        `shouldBe` Right ([], [SLetInferred "x" (Lit 1)], Var "x")
+    it "let宣言（型注釈省略、サフィックス付きリテラル）" $
+      parse [TLet, TIdent "x", TAssign, TIntSuffixed 1 W32, TSemicolon, TIdent "x"]
+        `shouldBe` Right ([], [SLetInferred "x" (LitTyped 1 W32)], Var "x")
+    it "let宣言（型注釈あり・省略）が混在しても両方正しくパースされる" $
+      parse
+        [ TLet, TIdent "a", TColon, TIdent "i32", TAssign, TInt 1, TSemicolon
+        , TLet, TIdent "b", TAssign, TIdent "a", TSemicolon
+        , TIdent "b"
+        ]
+        `shouldBe` Right
+          ([], [SLet "a" (TyInt W32) (Lit 1), SLetInferred "b" (Var "a")], Var "b")
+    it "let宣言（型注釈省略）で=が無ければエラー" $
+      parse [TLet, TIdent "x", TInt 1, TSemicolon, TIdent "x"] `shouldSatisfy` isLeft
     it "let宣言で型がi32/i64/bool以外ならエラー" $
       parse [TLet, TIdent "x", TColon, TIdent "i16", TAssign, TInt 1, TSemicolon, TIdent "x"]
         `shouldBe` Left "unsupported type: i16"
@@ -608,6 +622,38 @@ main = hspec $ do
         `shouldBe` Left "variable already declared: x"
     it "外側と同名の変数をブロック内でletしてもエラーにならない（シャドーイング）" $
       compileSource "let x: i64 = 1;\n{\nlet x: i64 = 2;\n}\nx" `shouldSatisfy` isRight
+    it "let宣言（型注釈省略）: 無型リテラルはi64にデフォルトされる" $
+      compileSource "let x = 5;\nx"
+        `shouldBe` Right ([], TyInt W64, [Push 5, Store W64 (-8), Load W64 (-8)])
+    it "let宣言（型注釈省略）: サフィックス付きリテラルはその型で確定する" $
+      compileSource "let x = 5i32;\nx"
+        `shouldBe` Right ([], TyInt W32, [Push 5, Store W32 (-4), Load W32 (-4)])
+    it "let宣言（型注釈省略）: boolリテラルはboolとして推論される" $
+      compileSource "let x = true;\nx"
+        `shouldBe` Right ([], TBool, [Push 1, Store W32 (-4), Load W32 (-4)])
+    it "let宣言（型注釈省略）: &lvalueからポインタ型が推論される" $
+      compileSource "let a: i32 = 1;\nlet p = &a;\n*p"
+        `shouldBe` Right
+          ( []
+          , TyInt W32
+          , [Push 1, Store W32 (-4), LoadAddr (-4), Store W64 (-12), Load W64 (-12), LoadInd W32]
+          )
+    it "let宣言（型注釈省略）: 関数呼び出しの戻り値型が推論される" $
+      compileSource "fn f() -> i32 {\n1\n}\nlet x = f();\nx"
+        `shouldBe` Right
+          ( [("f", [Push 1, Label ".Lfn_end0"])]
+          , TyInt W32
+          , [ICall "f" 0, Store W32 (-4), Load W32 (-4)]
+          )
+    it "let宣言（型注釈省略）: 無型リテラルとboolの算術演算は型不一致エラー（inferMaybeTypeの単一化はi32/i64のみ検出しないが、後続のcompileExprTypedで検出される）" $
+      compileSource "let x = 5 + true;\nx"
+        `shouldBe` Left "type mismatch: expected bool, found arithmetic expression"
+    it "let宣言（型注釈省略）: 推論結果と宣言済み変数のi32/i64混在はエラー" $
+      compileSource "let x: i32 = 1;\nlet y = x + 1i64;\ny"
+        `shouldBe` Left "type mismatch: i32 and i64"
+    it "let宣言（型注釈省略）と同名の再宣言（同一ブロック内）はエラー" $
+      compileSource "let x = 1;\nlet x = 2;\nx"
+        `shouldBe` Left "variable already declared: x"
     it "if文の条件式が整数リテラルはエラー" $
       compileSource "if 1 {\n}\n1" `shouldBe` Left "type mismatch: expected bool, found integer literal"
     it "if文の条件式が整数変数はエラー" $
@@ -808,6 +854,18 @@ main = hspec $ do
     it "サフィックス付きリテラルと宣言型が食い違うとコンパイルエラーになる" $
       (tokenize "let x: i64 = 9999i32;\nx" >>= parse >>= compile)
         `shouldBe` Left "type mismatch: expected i64, found i32"
+    it "let宣言（型注釈省略）: 無型リテラルはi64にデフォルトされ%ldで出力される" $ do
+      result <- compileSourceAndRun "let x = 5;\nx + 1"
+      result `shouldBe` "6"
+    it "let宣言（型注釈省略）: サフィックス付きリテラルからi32が推論され%dで出力される" $ do
+      result <- compileSourceAndRun "let x = 9999i32;\nx + 1"
+      result `shouldBe` "10000"
+    it "let宣言（型注釈省略）と型注釈ありのletが混在しても正しく動作する" $ do
+      result <- compileSourceAndRun "let x: i32 = 1;\nlet y = x + 2;\ny"
+      result `shouldBe` "3"
+    it "let宣言（型注釈省略）: &lvalueからポインタ型を推論し、デリファレンスで元の値を復元する" $ do
+      result <- compileSourceAndRun "let a: i32 = 42;\nlet p = &a;\n*p"
+      result `shouldBe` "42"
     it "bool変数の宣言・末尾式出力を評価する" $ do
       result <- compileSourceAndRun "let flag: bool = true;\nflag"
       result `shouldBe` "true"
