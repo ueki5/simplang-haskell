@@ -61,24 +61,39 @@ data Instr
 -- 変数名 -> (%rbp相対オフセット, 型)。スコープのスタック（先頭が最内側）
 type Env = [Map String (Int, Type)]
 
--- 先頭スコープから順に変数を探す（外側のスコープも参照できる）
-lookupVar :: String -> Env -> Maybe (Int, Type)
-lookupVar _ [] = Nothing
-lookupVar name (scope : rest) =
+-- スコープのスタック（[Map String v]、先頭が最内側）に対する共通ロジック。
+-- Env（値は (Int, Type)）とLocalEnv（値は Either Slot Type）はどちらもこの形をしている
+
+-- 先頭スコープから順に探し、無ければ外側へフォールバックする
+lookupInScopes :: String -> [Map String v] -> Maybe v
+lookupInScopes _ [] = Nothing
+lookupInScopes name (scope : rest) =
   -- pTraceShow ("name", name) $
   case Map.lookup name scope of
     Just v -> Just v
-    Nothing -> lookupVar name rest
+    Nothing -> lookupInScopes name rest
+
+-- 先頭スコープ（現在のブロック）にのみ宣言されているかを判定する
+memberInScope :: String -> [Map String v] -> Bool
+memberInScope name (scope : _) = Map.member name scope
+memberInScope _ [] = False
+
+-- 先頭スコープにのみ値を挿入する
+insertInScope :: String -> v -> [Map String v] -> [Map String v]
+insertInScope name v (scope : rest) = Map.insert name v scope : rest
+insertInScope _ _ [] = []
+
+-- 先頭スコープから順に変数を探す（外側のスコープも参照できる）
+lookupVar :: String -> Env -> Maybe (Int, Type)
+lookupVar = lookupInScopes
 
 -- 先頭スコープ（現在のブロック）にのみ宣言されているかを判定する（シャドーイング判定用）
 declaredLocally :: String -> Env -> Bool
-declaredLocally name (scope : _) = Map.member name scope
-declaredLocally _ [] = False
+declaredLocally = memberInScope
 
 -- 先頭スコープにのみ変数を追加する
 insertVar :: String -> (Int, Type) -> Env -> Env
-insertVar name v (scope : rest) = Map.insert name v scope : rest
-insertVar _ _ [] = []
+insertVar = insertInScope
 
 -- 型ごとのスタック占有バイト数（物理格納幅）
 widthBytes :: Width -> Int
@@ -447,14 +462,10 @@ type ResolvedSlots = Map Slot Type
 type LocalEnv = [Map String (Either Slot Type)]
 
 lookupLocal :: String -> LocalEnv -> Maybe (Either Slot Type)
-lookupLocal _ [] = Nothing
-lookupLocal name (scope : rest) = case Map.lookup name scope of
-  Just v -> Just v
-  Nothing -> lookupLocal name rest
+lookupLocal = lookupInScopes
 
 setLocal :: String -> Either Slot Type -> LocalEnv -> LocalEnv
-setLocal name v (scope : rest) = Map.insert name v scope : rest
-setLocal _ _ [] = []
+setLocal = insertInScope
 
 -- 1個の式を型付けしようとした結果:
 --   Left err          = 確定的な型エラー（未宣言変数・未宣言関数・bool/ポインタ関連の不整合等）
