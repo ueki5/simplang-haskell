@@ -365,7 +365,7 @@ inferMaybeType fnSigs env = go
   go (AddrOf e) = do
     (pointeeTy, _) <- addressOf fnSigs env e
     Right (Just (TPtr pointeeTy))
-  -- *ptr の型は ptr 自身の型からポインタを一枚剥がしたもの
+  --  *ptr の型は ptr 自身の型からポインタを一枚剥がしたもの
   go (Deref e) = do
     t <- go e
     case t of
@@ -573,8 +573,8 @@ callEvidence fnDeclMap resolved env = go
 
 -- 関数本体（または暗黙main）内の文列を辿り、(対象スロット, 証拠) を集める。compileStmtsFrom と同じ形
 -- （スコープのpush/pop、SBlock/SIf/SWhileの再帰）だが、命令列の代わりに証拠を集める点だけが異なる
-collectEvidenceStmts
-  :: Map String FnDecl -> ResolvedSlots -> Maybe String -> LocalEnv -> [Stmt] -> Either String (LocalEnv, Evidence)
+collectEvidenceStmts ::
+  Map String FnDecl -> ResolvedSlots -> Maybe String -> LocalEnv -> [Stmt] -> Either String (LocalEnv, Evidence)
 collectEvidenceStmts fnDeclMap resolved curFn = go
  where
   go env [] = Right (env, [])
@@ -682,8 +682,8 @@ initialSlots fnDecls = (Map.fromList resolved, unresolved)
 -- 1個のスロットについて、自分自身待ちの証拠は無視する（通常の自己再帰が誤って循環と
 -- 判定されるのを防ぐ）。1ラウンドで1つも前進しなければ、残りは（自己ループ以外の）
 -- 未解決スロット同士で行き詰まっている＝循環と判定してエラーとする
-resolveSlots
-  :: Map String FnDecl -> [FnDecl] -> [Stmt] -> Expr -> ResolvedSlots -> [Slot] -> Either String ResolvedSlots
+resolveSlots ::
+  Map String FnDecl -> [FnDecl] -> [Stmt] -> Expr -> ResolvedSlots -> [Slot] -> Either String ResolvedSlots
 resolveSlots _ _ _ _ resolved [] = Right resolved
 resolveSlots fnDeclMap fnDecls stmts tailExpr resolved pending = do
   evidence <- programEvidence fnDeclMap resolved fnDecls stmts tailExpr
@@ -702,14 +702,18 @@ resolveSlots fnDeclMap fnDecls stmts tailExpr resolved pending = do
               ++ " (add an explicit type annotation to break the cycle)"
           )
     else resolveSlots fnDeclMap fnDecls stmts tailExpr (Map.union (Map.fromList advanced) resolved) stillPending
- where
-  resolveOne evidence slot = do
-    let candidates = [c | (s, c) <- evidence, s == slot, c /= Left slot]
-    case [s' | Left s' <- candidates] of
-      (blocker : _) -> Right (Left blocker)
-      [] -> do
-        u <- foldM unifyMaybeType Nothing [mty | Right mty <- candidates]
-        Right (Right (maybe (TyInt W64) id u))
+
+-- evidenceから対象スロット == slotかつ自分自身待ち（Left slot）ではないものだけをcandidatesとして抜き出す（自己再帰の自己参照は無視 — これがfactのような自己再帰やis_even/is_oddの相互再帰を誤って循環と判定しないための仕組み）
+-- candidatesの中にLeft blocker（他のスロット待ち）が1つでも残っていれば、slotはまだblocker待ちとしてRight (Left blocker)を返す（＝今ラウンドでは前進しない）
+-- 残りが全部Right mtyなら、それらをunifyMaybeTypeで1つに単一化する。証拠が1つも無ければi64にデフォルトする
+resolveOne :: (Eq a) => [(a, Either a (Maybe Type))] -> a -> Either String (Either a Type)
+resolveOne evidence slot = do
+  let candidates = [c | (s, c) <- evidence, s == slot, c /= Left slot]
+  case [s' | Left s' <- candidates] of
+    (blocker : _) -> Right (Left blocker)
+    [] -> do
+      u <- foldM unifyMaybeType Nothing [mty | Right mty <- candidates]
+      Right (Right (maybe (TyInt W64) id u))
 
 -- 全fn定義から（型注釈省略を含めて）FnSigsを一括解決する（本体のコンパイルより前に行う1パス目）。
 -- 呼び出し規約・スタックスロット割り付けが必要とする具体的なTypeを、注釈または
