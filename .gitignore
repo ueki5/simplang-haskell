@@ -6,3 +6,4 @@ output/
 *.dyn_hi
 *.dyn_o
 .ghc.environment.*
+scratch/

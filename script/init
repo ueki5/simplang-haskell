@@ -1,0 +1,20 @@
+-- Parser, Compiler, CodeGen は常にソースからロードする（非公開資産を参照可能にするため）
+:l src/Parser.hs src/Compiler.hs src/CodeGen.hs
+:m +Compiler Parser CodeGen
+source = "fn add(a, b){a + b}add(5i64, 3)"
+Right (fnDecls, stmts, tailExpr) = tokenize source >>= parse
+fnDeclMap = Map.fromList [(name, d) | d@(FnDecl name _ _ _) <- fnDecls]
+(initResolved, pending) = initialSlots fnDecls
+Right evidence = programEvidence fnDeclMap resolved fnDecls stmts tailExpr
+:{
+resolveOne evidence slot = do
+  let candidates = [c | (s, c) <- evidence, s == slot, c /= Left slot]
+  case [s' | Left s' <- candidates] of
+    (blocker : _) -> Right (Left blocker)
+    [] -> do
+      u <- foldM unifyMaybeType Nothing [mty | Right mty <- candidates]
+      Right (Right (maybe (TyInt W64) id u))
+:}
+Right results = mapM (resolveOne evidence) pending
+Right resolved = resolveSlots fnDeclMap fnDecls stmts tailExpr initResolved pending
+
