@@ -1,11 +1,16 @@
 -- Parser, Compiler, CodeGen は常にソースからロードする（非公開資産を参照可能にするため）
-:l src/Parser.hs src/Compiler.hs src/CodeGen.hs
-:m +Compiler Parser CodeGen
+-- 複数ターゲットを:lすると、GHCiはコンテキストを自動設定しない（単一ターゲットなら*Moduleが自動設定される）ため、
+-- 非公開識別子（initialSlotsなど）を無修飾で使うには明示的に*付きでモジュールをコンテキストに追加する必要がある
+:l src/Parser.hs src/CodeGen.hs src/Compiler.hs
+:m *Parser *CodeGen *Compiler
+import Data.Int (Int32)
+import Data.Map (Map)
+import qualified Data.Map as Map
 source = "fn add(a, b){a + b}add(5i64, 3)"
 Right (fnDecls, stmts, tailExpr) = tokenize source >>= parse
 fnDeclMap = Map.fromList [(name, d) | d@(FnDecl name _ _ _) <- fnDecls]
 (initResolved, pending) = initialSlots fnDecls
-Right evidence = programEvidence fnDeclMap resolved fnDecls stmts tailExpr
+Right evidence = programEvidence fnDeclMap initResolved fnDecls stmts tailExpr
 :{
 resolveOne evidence slot = do
   let candidates = [c | (s, c) <- evidence, s == slot, c /= Left slot]
