@@ -9,7 +9,7 @@ import qualified Data.Map as Map
 import Parser (Expr (..), FnDecl (..), Program, Stmt (..), Type (..), Width (..))
 
 -- -- Debug Printサンプル（pTraceShow: 純粋関数内, pTraceShowM: モナド内）
--- import Debug.Pretty.Simple (pTraceShow, pTraceShowM)
+import Debug.Pretty.Simple (pTraceShow, pTraceShowM)
 
 -- -- プリティ印刷が不要な場合
 -- -- trace: 純粋関数内(既存の第一引数を表示、第二引数を返却)
@@ -126,26 +126,6 @@ compileProgram fnSigs fnDecls stmts expr = do
   exprInstrs <- lift (compileExprTyped fnSigs env finalType expr)
   -- pTraceShowM ("env", env)
   pure (fns, finalType, stmtInstrs ++ exprInstrs)
-
--- -- -- ご参考（バインド使用版）
--- compileProgram fnSigs fnDecls stmts expr =
---   mapM (compileFnDecl fnSigs) fnDecls
---     >>= ( \fns ->
---             -- 暗黙main本体: 外側の関数を持たない（ReturnCtx = Nothing、returnはコンパイルエラー）
---             compileStmtsFrom fnSigs [Map.empty] 0 Nothing Nothing stmts
---               >>= ( \(env, _cursor, stmtInstrs) ->
---                       lift (inferType fnSigs env expr)
---                         >>= ( \finalType ->
---                                 lift (compileExprTyped fnSigs env finalType expr)
---                                   >>= ( \exprInstrs ->
---                                           -- pTraceShowM ("env", env) >>
---                                           ( pure
---                                               (fns, finalType, stmtInstrs ++ exprInstrs)
---                                           )
---                                       )
---                             )
---                   )
---         )
 
 -- if の分岐ラベル採番用のカウンタを持ち回るモナド。
 -- Env/cursor はブロックやif分岐を抜けるたびに「呼び出し前の値へ巻き戻す」必要がある一方、
@@ -643,9 +623,10 @@ paramLocalScope resolved fnName params =
 -- プログラム全体（全fn本体＋暗黙main）を1回走査し、現在のResolvedSlotsに対する証拠を集める
 programEvidence :: Map String FnDecl -> ResolvedSlots -> [FnDecl] -> [Stmt] -> Expr -> Either String Evidence
 programEvidence fnDeclMap resolved fnDecls stmts tailExpr = do
-  fnEv <- concat <$> mapM (fnDeclEvidence fnDeclMap resolved) fnDecls -- 関数からLocalEnvを取得
+  fnEv <- concat <$> mapM (fnDeclEvidence fnDeclMap resolved) fnDecls -- 全ての関数から証拠を取得
   (env1, topEv) <- collectEvidenceStmts fnDeclMap resolved Nothing [Map.empty] stmts -- 暗黙mainの文からLocalEnv、証拠を取得
-  tailEv <- callEvidence fnDeclMap resolved env1 tailExpr
+  tailEv <- callEvidence fnDeclMap resolved env1 tailExpr -- 暗黙mainの末尾式から証拠を取得
+  pTraceShowM ("fnEv", fnEv, "env1", env1, "topEv", topEv, "tailEv", tailEv)
   pure (fnEv ++ topEv ++ tailEv)
 
 -- １つの関数に対して仮引数、本文、末尾式から証拠を集める
