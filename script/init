@@ -1,16 +1,53 @@
 -- Parser, Compiler, CodeGen は常にソースからロードする（非公開資産を参照可能にするため）
 -- 複数ターゲットを:lすると、GHCiはコンテキストを自動設定しない（単一ターゲットなら*Moduleが自動設定される）ため、
 -- 非公開識別子（initialSlotsなど）を無修飾で使うには明示的に*付きでモジュールをコンテキストに追加する必要がある
+-- 
+-- [resolveOne内での関数呼び出し経路]
+-- resolveFnSigs
+-- ├─ validateFnShapes                      … main予約名/重複/引数数上限チェック
+-- ├─ initialSlots                          … 型注釈済み箇所をresolvedへ、省略箇所をpendingへ分離
+-- └─ resolveSlots  ───────────────────────────────────┐（pendingが空になるまで再帰）
+--     ├─ programEvidence                              │
+--     │    ├─ fnDeclEvidence（各FnDeclごとに）         │
+--     │    │    ├─ paramLocalScope                    │
+--     │    │    ├─ collectEvidenceStmts（関数本体）    │
+--     │    │    │    ├─ callEvidence ── resolveExprType
+--     │    │    │    └─ collectEvidenceStmts（再帰: SBlock/SIf/SWhileの中身）
+--     │    │    ├─ callEvidence（末尾式）── resolveExprType
+--     │    │    └─ resolveExprType（末尾式・ReturnSlot用）
+--     │    ├─ collectEvidenceStmts（暗黙mainの文列）
+--     │    │    └─（fnDeclEvidence内と同じ再帰構造）
+--     │    └─ callEvidence（暗黙mainの末尾式）
+--     ├─ resolveOne（pendingの各スロットごとに）
+--     │    └─ unifyMaybeType
+--     └─ resolveSlots（前進があれば再帰呼び出し／無ければcircularエラーで終了）
+
 :l src/Parser.hs src/CodeGen.hs src/Compiler.hs
 :m *Parser *CodeGen *Compiler
 import Data.Int (Int32)
 import Data.Map (Map)
 import qualified Data.Map as Map
+-- <main
 source = "fn add(a, b){a + b}add(5i64, 3)"
-Right (fnDecls, stmts, tailExpr) = tokenize source >>= parse
+program@(Right (fnDecls, stmts, tailExpr)) = tokenize source >>= parse
+--   <compile
+expr = tailExpr
+Right fnSigs = resolveFnSigs fnDecls stmts expr
+--     <resolveFnSigs
 fnDeclMap = Map.fromList [(name, d) | d@(FnDecl name _ _ _) <- fnDecls]
 (initResolved, pending) = initialSlots fnDecls
+Right resolved = resolveSlots fnDeclMap fnDecls stmts tailExpr initResolved pending
+--       <resolveSlots
 Right evidence = programEvidence fnDeclMap initResolved fnDecls stmts tailExpr
 Right results = mapM (resolveOne evidence) pending
-Right resolved = resolveSlots fnDeclMap fnDecls stmts tailExpr initResolved pending
+--         <programEvidence
+resolved = initResolved
+Right fnEv = concat <$> mapM (fnDeclEvidence fnDeclMap resolved) fnDecls -- 関数
+Right (env1, topEv) = collectEvidenceStmts fnDeclMap resolved Nothing [Map.empty] stmts
+Right tailEv = callEvidence fnDeclMap resolved env1 tailExpr
+--         programEvidence>
+--       resolveSlots>
+--     resolveFnSigs>
+--   compile>
+-- main>
 

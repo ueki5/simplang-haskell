@@ -643,17 +643,19 @@ paramLocalScope resolved fnName params =
 -- プログラム全体（全fn本体＋暗黙main）を1回走査し、現在のResolvedSlotsに対する証拠を集める
 programEvidence :: Map String FnDecl -> ResolvedSlots -> [FnDecl] -> [Stmt] -> Expr -> Either String Evidence
 programEvidence fnDeclMap resolved fnDecls stmts tailExpr = do
-  fnEv <- concat <$> mapM fnDeclEvidence fnDecls
-  (env1, topEv) <- collectEvidenceStmts fnDeclMap resolved Nothing [Map.empty] stmts
+  fnEv <- concat <$> mapM (fnDeclEvidence fnDeclMap resolved) fnDecls -- 関数からLocalEnvを取得
+  (env1, topEv) <- collectEvidenceStmts fnDeclMap resolved Nothing [Map.empty] stmts -- 暗黙mainの文からLocalEnv、証拠を取得
   tailEv <- callEvidence fnDeclMap resolved env1 tailExpr
   pure (fnEv ++ topEv ++ tailEv)
- where
-  fnDeclEvidence (FnDecl name params _ (body, tailE)) = do
-    let env0 = [paramLocalScope resolved name params]
-    (env1, bodyEv) <- collectEvidenceStmts fnDeclMap resolved (Just name) env0 body
-    tailCallEv <- callEvidence fnDeclMap resolved env1 tailE
-    tailRet <- resolveExprType fnDeclMap resolved env1 tailE
-    pure (bodyEv ++ tailCallEv ++ [(ReturnSlot name, tailRet)])
+
+-- １つの関数に対して仮引数、本文、末尾式から証拠を集める
+fnDeclEvidence :: Map String FnDecl -> ResolvedSlots -> FnDecl -> Either String [(Slot, Either Slot (Maybe Type))]
+fnDeclEvidence fnDeclMap resolved (FnDecl name params _ (body, tailE)) = do
+  let env0 = [paramLocalScope resolved name params] -- 関数の仮引数からLocalEnvを取得
+  (env1, bodyEv) <- collectEvidenceStmts fnDeclMap resolved (Just name) env0 body -- 関数の本文から(LocalEnv、証拠)を取得
+  tailCallEv <- callEvidence fnDeclMap resolved env1 tailE -- 関数の末尾式内のCallから実引数の証拠を取得
+  tailRet <- resolveExprType fnDeclMap resolved env1 tailE -- 関数の末尾式から戻り値の証拠を取得
+  pure (bodyEv ++ tailCallEv ++ [(ReturnSlot name, tailRet)]) -- 本文、末尾式内の実引数、末尾式の戻り値からの証拠を連結して返却
 
 -- 構造検証: main予約名・重複定義・最大引数数（旧buildFnSigsのチェックをそのまま踏襲する。型の中身は見ない）
 validateFnShapes :: [FnDecl] -> Either String ()
@@ -703,9 +705,9 @@ resolveSlots fnDeclMap fnDecls stmts tailExpr resolved pending = do
           )
     else resolveSlots fnDeclMap fnDecls stmts tailExpr (Map.union (Map.fromList advanced) resolved) stillPending
 
--- evidenceから対象スロット == slotかつ自分自身待ち（Left slot）ではないものだけをcandidatesとして抜き出す（自己再帰の自己参照は無視 — これがfactのような自己再帰やis_even/is_oddの相互再帰を誤って循環と判定しないための仕組み）
+-- Evidenceから対象スロット == slotかつ自分自身待ち（Left slot）ではないものだけをcandidatesとして抜き出す
 -- candidatesの中にLeft blocker（他のスロット待ち）が1つでも残っていれば、slotはまだblocker待ちとしてRight (Left blocker)を返す（＝今ラウンドでは前進しない）
--- 残りが全部Right mtyなら、それらをunifyMaybeTypeで1つに単一化する。証拠が1つも無ければi64にデフォルトする
+-- 残りが全部Right mtyなら、それらをunifyMaybeTypeで1つの型に単一化する。証拠が1つも無ければi64にデフォルトする
 resolveOne :: (Eq a) => [(a, Either a (Maybe Type))] -> a -> Either String (Either a Type)
 resolveOne evidence slot = do
   let candidates = [c | (s, c) <- evidence, s == slot, c /= Left slot]
