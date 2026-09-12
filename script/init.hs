@@ -21,13 +21,23 @@ import qualified Data.Map as Map
 -- add(d, e)
 -- |]::String
 -- :}
--- source = "let a = 5;a" -- 何もない
--- source = "fn add(a:i64, b){a + b} add(2, 4)" -- 仮引数のみ
--- source = "fn add(a, b){a + b + 8i64} add(2, 4)" -- 内部ロジックからの推論はしない
--- source = "fn add(a, b){a + b} add(2i64, 4i64)" -- 末尾式から
--- source = "fn add(a, b){a + b} let c = add(2i64, 4i64);c" -- 暗黙mainのCall文
-source = "fn add(a, b){a + b} let c = add(2i64, 4);c" -- 暗黙mainのCall文から（片側未定）
--- source = "fn add(a, b){a + b} let c:i64 = add(2, 4);c" -- 暗黙mainのCall文から（左辺で定義）
+-- source = "let a = 5;a"
+-- source = "fn add(a:i64, b){a + b} add(2, 4)"
+-- source = "fn add(a, b){a + b + 8i64} add(2, 4)"
+-- source = "fn add(a, b){a + b} add(2i64, 4i64)"
+-- source = "fn add(a, b){a + b} let c = add(2i64, 4i64);c"
+-- source = "fn add(a, b){a + b} let c = add(2i64, 4);c"
+-- source = "fn add(a, b){a + b} let c:i65 = add(2, 4);c"
+-- source = "fn add(a, b){a + b} fn sub(a, b){a - b}  let c = add(2, 4); let d = sub(c, 4);c"
+-- source = "fn add(a, b){a + b} fn sub(a, b){a - b}  let c:i64 = add(2, 4); let d = sub(c, 4i64);c"
+source = "fn add(a, b){a + b} fn sub(a, b){a - b}  let c:i32 = add(2, 4); let d:i32 = sub(c, 4);c"
 -- source = "fn add(a, b:i64){ let c = a + b + 0i64; c } let d = 5i64; let e = d * 2; add(d, e)"
-("source", source)
-tokenize source >>= parse >>= compile
+tokens = tokenize source
+parsed = tokens >>= parse
+compld = parsed >>= compile
+codegen' = \(fns, finalType, instrs) -> Right (codegen fns finalType instrs)
+asmblr = compld >>= codegen'
+eithlen = (\input -> either (\_ -> 0) (length . id) input)::Either String String -> Int
+("アセンブラ文字数", eithlen asmblr) 
+("ソースコード内容", source)
+"途中経過は ((\"tokens\", tokens), (\"parsed\", parsed), (\"compld\", compld), (\"asmblr\", asmblr))"

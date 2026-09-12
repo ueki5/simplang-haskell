@@ -565,11 +565,11 @@ collectEvidenceStmts fnDeclMap resolved curFn = go
 
   step env (SLet name ty expr) = do
     ev <- callEvidence fnDeclMap resolved env expr
-    pTraceShowM ("ev", ev)
+    -- pTraceShowM ("ev", ev)
     pure (setLocal name (Right ty) env, ev)
   step env (SLetInferred name expr) = do
     ev <- callEvidence fnDeclMap resolved env expr
-    pTraceShowM ("ev", ev)
+    -- pTraceShowM ("ev", ev)
     status <- case resolveExprType fnDeclMap resolved env expr of
       Left err -> Left err
       Right (Left slot) -> Right (Left slot)
@@ -578,7 +578,7 @@ collectEvidenceStmts fnDeclMap resolved curFn = go
     pure (setLocal name status env, ev)
   step env (SAssign _ expr) = do
     ev <- callEvidence fnDeclMap resolved env expr
-    pTraceShowM ("ev", ev)
+    -- pTraceShowM ("ev", ev)
     pure (env, ev)
   step env (SBlock inner) = do
     (_, ev) <- collectEvidenceStmts fnDeclMap resolved curFn (Map.empty : env) inner
@@ -589,7 +589,7 @@ collectEvidenceStmts fnDeclMap resolved curFn = go
         <$> mapM
           ( \(cond, body) -> do
               condEv <- callEvidence fnDeclMap resolved env cond
-              pTraceShowM ("condEv", condEv)
+              -- pTraceShowM ("condEv", condEv)
               (_, bodyEv) <- collectEvidenceStmts fnDeclMap resolved curFn (Map.empty : env) body
               pure (condEv ++ bodyEv)
           )
@@ -600,14 +600,14 @@ collectEvidenceStmts fnDeclMap resolved curFn = go
     pure (env, branchEv ++ elseEv)
   step env (SWhile cond body) = do
     condEv <- callEvidence fnDeclMap resolved env cond
-    pTraceShowM ("condEv", condEv)
+    -- pTraceShowM ("condEv", condEv)
     (_, bodyEv) <- collectEvidenceStmts fnDeclMap resolved curFn (Map.empty : env) body
     pure (env, condEv ++ bodyEv)
   step env SBreak = Right (env, [])
   step env SContinue = Right (env, [])
   step env (SReturn expr) = do
     ev <- callEvidence fnDeclMap resolved env expr
-    pTraceShowM ("ev", ev)
+    -- pTraceShowM ("ev", ev)
     case curFn of
       Nothing -> pure (env, ev)
       Just fnName -> do
@@ -684,8 +684,8 @@ resolveSlots _ _ _ _ resolved [] = Right resolved -- 未解決スロットが空
 resolveSlots fnDeclMap fnDecls stmts tailExpr resolved pending = do
   evidence <- programEvidence fnDeclMap resolved fnDecls stmts tailExpr
   results <- mapM (resolveOne evidence) pending
-  -- pTraceShowM ("evidence", evidence)
-  -- pTraceShowM ("results", results)
+  pTraceShowM ("evidence", evidence)
+  pTraceShowM ("results", results)
   let advanced = [(slot, ty) | (slot, Right ty) <- zip pending results]
       stillPending = [slot | (slot, Left _) <- zip pending results]
   if null advanced
@@ -722,6 +722,9 @@ resolveFnSigs fnDecls stmts tailExpr = do
   let fnDeclMap = Map.fromList [(name, d) | d@(FnDecl name _ _ _) <- fnDecls]
       (initResolved, pending) = initialSlots fnDecls -- 全ての関数から解決済みスロット、未解決スロットを取得
   resolved <- resolveSlots fnDeclMap fnDecls stmts tailExpr initResolved pending
+  -- pTraceShowM ("initResolved", initResolved)
+  -- pTraceShowM ("pending", pending)
+  -- pTraceShowM ("resolved", resolved)
   let paramType name (i, (_, mty)) = maybe (resolved Map.! ParamSlot name i) id mty
       retType name mty = maybe (resolved Map.! ReturnSlot name) id mty
   pure
