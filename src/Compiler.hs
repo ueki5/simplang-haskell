@@ -565,9 +565,11 @@ collectEvidenceStmts fnDeclMap resolved curFn = go
 
   step env (SLet name ty expr) = do
     ev <- callEvidence fnDeclMap resolved env expr
+    pTraceShowM ("ev", ev)
     pure (setLocal name (Right ty) env, ev)
   step env (SLetInferred name expr) = do
     ev <- callEvidence fnDeclMap resolved env expr
+    pTraceShowM ("ev", ev)
     status <- case resolveExprType fnDeclMap resolved env expr of
       Left err -> Left err
       Right (Left slot) -> Right (Left slot)
@@ -576,6 +578,7 @@ collectEvidenceStmts fnDeclMap resolved curFn = go
     pure (setLocal name status env, ev)
   step env (SAssign _ expr) = do
     ev <- callEvidence fnDeclMap resolved env expr
+    pTraceShowM ("ev", ev)
     pure (env, ev)
   step env (SBlock inner) = do
     (_, ev) <- collectEvidenceStmts fnDeclMap resolved curFn (Map.empty : env) inner
@@ -586,6 +589,7 @@ collectEvidenceStmts fnDeclMap resolved curFn = go
         <$> mapM
           ( \(cond, body) -> do
               condEv <- callEvidence fnDeclMap resolved env cond
+              pTraceShowM ("condEv", condEv)
               (_, bodyEv) <- collectEvidenceStmts fnDeclMap resolved curFn (Map.empty : env) body
               pure (condEv ++ bodyEv)
           )
@@ -596,12 +600,14 @@ collectEvidenceStmts fnDeclMap resolved curFn = go
     pure (env, branchEv ++ elseEv)
   step env (SWhile cond body) = do
     condEv <- callEvidence fnDeclMap resolved env cond
+    pTraceShowM ("condEv", condEv)
     (_, bodyEv) <- collectEvidenceStmts fnDeclMap resolved curFn (Map.empty : env) body
     pure (env, condEv ++ bodyEv)
   step env SBreak = Right (env, [])
   step env SContinue = Right (env, [])
   step env (SReturn expr) = do
     ev <- callEvidence fnDeclMap resolved env expr
+    pTraceShowM ("ev", ev)
     case curFn of
       Nothing -> pure (env, ev)
       Just fnName -> do
@@ -626,23 +632,23 @@ programEvidence fnDeclMap resolved fnDecls stmts tailExpr = do
   fnEv <- concat <$> mapM (fnDeclEvidence fnDeclMap resolved) fnDecls -- 全ての関数から証拠を取得
   (env1, topEv) <- collectEvidenceStmts fnDeclMap resolved Nothing [Map.empty] stmts -- 暗黙mainの文からLocalEnv、証拠を取得
   tailEv <- callEvidence fnDeclMap resolved env1 tailExpr -- 暗黙mainの末尾式から証拠を取得
-  pTraceShowM ("fnEv", fnEv)
-  pTraceShowM ("env1", env1)
-  pTraceShowM ("tailEv", tailEv)
+  -- pTraceShowM ("fnEv", fnEv)
+  -- pTraceShowM ("env1", env1)
+  -- pTraceShowM ("tailEv", tailEv)
   pure (fnEv ++ topEv ++ tailEv)
 
 -- １つの関数に対して仮引数、本文、末尾式から証拠を集める
 fnDeclEvidence :: Map String FnDecl -> ResolvedSlots -> FnDecl -> Either String [(Slot, Either Slot (Maybe Type))]
 fnDeclEvidence fnDeclMap resolved (FnDecl name params _ (body, tailE)) = do
-  let env0 = [paramLocalScope resolved name params] -- 関数の仮引数からLocalEnvを取得
+  let env0 = [paramLocalScope resolved name params] -- 仮引数,resolvedからLocalEnvを取得
   (env1, bodyEv) <- collectEvidenceStmts fnDeclMap resolved (Just name) env0 body -- 関数の本文から(LocalEnv、証拠)を取得
-  tailCallEv <- callEvidence fnDeclMap resolved env1 tailE -- 関数の末尾式内のCallから実引数の証拠を取得
-  tailRet <- resolveExprType fnDeclMap resolved env1 tailE -- 関数の末尾式から戻り値の証拠を取得
-  pTraceShowM ("env0", env0)
-  pTraceShowM ("env1", env1)
-  pTraceShowM ("bodyEv", bodyEv)
-  pTraceShowM ("tailCallEv", tailCallEv)
-  pTraceShowM ("tailRet", tailRet)
+  tailCallEv <- callEvidence fnDeclMap resolved env1 tailE -- 末尾式内のCallから実引数の証拠を取得
+  tailRet <- resolveExprType fnDeclMap resolved env1 tailE -- 末尾式から戻り値の証拠を取得
+  -- pTraceShowM ("env0", env0)
+  -- pTraceShowM ("env1", env1)
+  -- pTraceShowM ("bodyEv", bodyEv)
+  -- pTraceShowM ("tailCallEv", tailCallEv)
+  -- pTraceShowM ("tailRet", tailRet)
   pure (bodyEv ++ tailCallEv ++ [(ReturnSlot name, tailRet)]) -- 本文、末尾式内の実引数、末尾式の戻り値からの証拠を連結して返却
 
 -- 構造検証: main予約名・重複定義・最大引数数（旧buildFnSigsのチェックをそのまま踏襲する。型の中身は見ない）
@@ -674,12 +680,12 @@ initialSlots fnDecls = (Map.fromList resolved, unresolved)
 -- 未解決スロット同士で行き詰まっている＝循環と判定してエラーとする
 resolveSlots ::
   Map String FnDecl -> [FnDecl] -> [Stmt] -> Expr -> ResolvedSlots -> [Slot] -> Either String ResolvedSlots
-resolveSlots _ _ _ _ resolved [] = Right resolved
+resolveSlots _ _ _ _ resolved [] = Right resolved -- 未解決スロットが空になったら終了
 resolveSlots fnDeclMap fnDecls stmts tailExpr resolved pending = do
   evidence <- programEvidence fnDeclMap resolved fnDecls stmts tailExpr
   results <- mapM (resolveOne evidence) pending
-  pTraceShowM ("evidence", evidence)
-  pTraceShowM ("results", results)
+  -- pTraceShowM ("evidence", evidence)
+  -- pTraceShowM ("results", results)
   let advanced = [(slot, ty) | (slot, Right ty) <- zip pending results]
       stillPending = [slot | (slot, Left _) <- zip pending results]
   if null advanced
@@ -714,7 +720,7 @@ resolveFnSigs :: [FnDecl] -> [Stmt] -> Expr -> Either String FnSigs
 resolveFnSigs fnDecls stmts tailExpr = do
   validateFnShapes fnDecls
   let fnDeclMap = Map.fromList [(name, d) | d@(FnDecl name _ _ _) <- fnDecls]
-      (initResolved, pending) = initialSlots fnDecls
+      (initResolved, pending) = initialSlots fnDecls -- 全ての関数から解決済みスロット、未解決スロットを取得
   resolved <- resolveSlots fnDeclMap fnDecls stmts tailExpr initResolved pending
   let paramType name (i, (_, mty)) = maybe (resolved Map.! ParamSlot name i) id mty
       retType name mty = maybe (resolved Map.! ReturnSlot name) id mty
