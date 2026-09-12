@@ -558,7 +558,7 @@ callEvidence fnDeclMap resolved env = go
 collectEvidenceStmts ::
   Map String FnDecl -> ResolvedSlots -> Maybe String -> LocalEnv -> [Stmt] -> Either String (LocalEnv, Evidence)
 collectEvidenceStmts fnDeclMap resolved curFn = do
-  pTraceShowM "collectEvidenceStmts"
+  pTraceShowM ("collectEvidenceStmts実行", curFn)
   go
  where
   go env [] = Right (env, [])
@@ -633,7 +633,7 @@ paramLocalScope resolved fnName params =
 -- プログラム全体（全fn本体＋暗黙main）を1回走査し、現在のResolvedSlotsに対する証拠を集める
 programEvidence :: Map String FnDecl -> ResolvedSlots -> [FnDecl] -> [Stmt] -> Expr -> Either String Evidence
 programEvidence fnDeclMap resolved fnDecls stmts tailExpr = do
-  pTraceShowM "programEvidence"
+  pTraceShowM ("programEvidence実行", tailExpr)
   fnEv <- concat <$> mapM (fnDeclEvidence fnDeclMap resolved) fnDecls -- 全ての関数から証拠を取得
   (env1, topEv) <- collectEvidenceStmts fnDeclMap resolved Nothing [Map.empty] stmts -- 暗黙mainの文からLocalEnv、証拠を取得
   tailEv <- callEvidence fnDeclMap resolved env1 tailExpr -- 暗黙mainの末尾式から証拠を取得
@@ -645,7 +645,7 @@ programEvidence fnDeclMap resolved fnDecls stmts tailExpr = do
 -- １つの関数に対して仮引数、本文、末尾式から証拠を集める
 fnDeclEvidence :: Map String FnDecl -> ResolvedSlots -> FnDecl -> Either String [(Slot, Either Slot (Maybe Type))]
 fnDeclEvidence fnDeclMap resolved (FnDecl name params _ (body, tailE)) = do
-  pTraceShowM "fnDeclEvidence"
+  pTraceShowM ("fnDeclEvidence実行", name)
   let env0 = [paramLocalScope resolved name params] -- 仮引数をresolvedから検索してLocalEnvを取得
   (env1, bodyEv) <- collectEvidenceStmts fnDeclMap resolved (Just name) env0 body -- 関数の本文から(LocalEnv、証拠)を取得
   tailCallEv <- callEvidence fnDeclMap resolved env1 tailE -- 末尾式内のCallから実引数の証拠を取得
