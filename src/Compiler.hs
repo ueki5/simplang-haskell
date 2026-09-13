@@ -557,9 +557,9 @@ callEvidence fnDeclMap resolved env = go
 -- （スコープのpush/pop、SBlock/SIf/SWhileの再帰）だが、命令列の代わりに証拠を集める点だけが異なる
 collectEvidenceStmts ::
   Map String FnDecl -> ResolvedSlots -> Maybe String -> LocalEnv -> [Stmt] -> Either String (LocalEnv, Evidence)
-collectEvidenceStmts fnDeclMap resolved curFn = do
+collectEvidenceStmts fnDeclMap resolved curFn localenv stmts = do
   pTraceShowM ("collectEvidenceStmts実行", curFn)
-  go
+  go localenv stmts
  where
   go env [] = Right (env, [])
   go env (stmt : rest) = do
@@ -688,15 +688,15 @@ resolveSlots ::
   Map String FnDecl -> [FnDecl] -> [Stmt] -> Expr -> ResolvedSlots -> [Slot] -> Either String ResolvedSlots
 resolveSlots _ _ _ _ resolved [] = Right resolved -- 未解決スロットが空になったら終了
 resolveSlots fnDeclMap fnDecls stmts tailExpr resolved pending = do
-  evidence <- programEvidence fnDeclMap resolved fnDecls stmts tailExpr
-  results <- mapM (resolveOne evidence) pending
+  evidence <- programEvidence fnDeclMap resolved fnDecls stmts tailExpr -- 全プログラム（全関数＋暗黙のmain）から証拠を集める
+  results <- mapM (resolveOne evidence) pending -- 未解決スロットを解決
   pTraceShowM ("evidence", evidence)
   pTraceShowM ("results", results)
   let advanced = [(slot, ty) | (slot, Right ty) <- zip pending results]
       stillPending = [slot | (slot, Left _) <- zip pending results]
-  if null advanced
+  if null advanced -- 解決されたスロットがない場合
     then case [(slot, slot') | (slot, Left slot') <- zip pending results] of
-      [] -> Left "circular type inference: unresolvable signature (add an explicit type annotation to break the cycle)"
+      [] -> error "resolveSlots: unreachable — null advanced but pending is non-empty implies at least one Left"
       ((blockedSlot, blockedOn) : _) ->
         Left
           ( "circular type inference: "
