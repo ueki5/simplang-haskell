@@ -312,7 +312,9 @@ unifyMaybeType (Just t1) (Just t2) = Just <$> unifyType t1 t2
 -- 式中の変数参照・関数呼び出しから型を推論する（整数リテラルのみの部分木は Nothing = 未確定のまま単一化する）。
 -- bool リテラルは曖昧さがないため常に Just TBool。
 inferMaybeType :: FnSigs -> Env -> Expr -> Either String (Maybe Type)
-inferMaybeType fnSigs env = go
+inferMaybeType fnSigs env expr = do
+  pTraceShowM ("inferMaybeType実行", expr)
+  go expr
  where
   go (Lit _) = Right Nothing
   -- サフィックス付きリテラルは Var と同様、常に確定した型を持つ（expectedとは無関係）
@@ -466,7 +468,9 @@ addressOfSlot _ _ _ e = Left ("invalid operand for &: not an lvalue: " ++ show e
 -- inferMaybeTypeのLocalEnv版。Var/CallがまだResolvedSlotsに無いスロットを指していれば
 -- そのスロットへブロックし、それ以外の構造はinferMaybeTypeと完全に同一のロジックで型を求める
 resolveExprType :: Map String FnDecl -> ResolvedSlots -> LocalEnv -> Expr -> SlotResult
-resolveExprType fnDeclMap resolved env = go
+resolveExprType fnDeclMap resolved env expr = do
+  pTraceShowM ("resolveExprType実行", expr)
+  go expr
  where
   go (Lit _) = Right (Right Nothing)
   go (LitTyped _ w) = Right (Right (Just (TyInt w)))
@@ -520,7 +524,9 @@ type Evidence = [(Slot, Either Slot (Maybe Type))]
 -- 式ツリー中のあらゆる位置に現れるCallノードを見つけ、各実引数式についてParamSlotへの証拠を集める
 -- （宣言済みの仮引数の個数を超える位置はスキップする。実際の引数個数不一致はFnSigs確定後に検出される）
 callEvidence :: Map String FnDecl -> ResolvedSlots -> LocalEnv -> Expr -> Either String Evidence
-callEvidence fnDeclMap resolved env = go
+callEvidence fnDeclMap resolved env expr = do
+  pTraceShowM ("callEvidence実行", expr)
+  go expr
  where
   go (Lit _) = Right []
   go (LitTyped _ _) = Right []
@@ -639,6 +645,7 @@ programEvidence fnDeclMap resolved fnDecls stmts tailExpr = do
   tailEv <- callEvidence fnDeclMap resolved env1 tailExpr -- 暗黙mainの末尾式から証拠を取得
   pTraceShowM ("fnEv", fnEv)
   pTraceShowM ("env1", env1)
+  pTraceShowM ("topEv", topEv)
   pTraceShowM ("tailEv", tailEv)
   pure (fnEv ++ topEv ++ tailEv)
 
