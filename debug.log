@@ -1,0 +1,1069 @@
+( "ソースコード内容"
+, "fn foo(a){a} fn bar(b){b} fn baz(){let c = foo(bar(2i64));c} baz()"
+)
+("programEvidence"
+"fnDeclEvidence"
+( "env0"
+,
+    [ fromList
+        [
+            ( "a"
+            , Left
+                ( ParamSlot "foo" 0 )
+            )
+        ]
+    ]
+)
+( "env1"
+,
+    [ fromList
+        [
+            ( "a"
+            , Left
+                ( ParamSlot "foo" 0 )
+            )
+        ]
+    ]
+)
+( "bodyEv"
+, []
+)
+( "tailCallEv"
+, []
+)
+( "tailRet"
+, Left
+    ( ParamSlot "foo" 0 )
+)
+"fnDeclEvidence"
+( "env0"
+,
+    [ fromList
+        [
+            ( "b"
+            , Left
+                ( ParamSlot "bar" 0 )
+            )
+        ]
+    ]
+)
+( "env1"
+,
+    [ fromList
+        [
+            ( "b"
+            , Left
+                ( ParamSlot "bar" 0 )
+            )
+        ]
+    ]
+)
+( "bodyEv"
+, []
+)
+( "tailCallEv"
+, []
+)
+( "tailRet"
+, Left
+    ( ParamSlot "bar" 0 )
+)
+"fnDeclEvidence"
+( "nested"
+, []
+)
+( "paramEv"
+,
+    [
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ]
+)
+( "nested"
+,
+    [
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ]
+)
+( "paramEv"
+,
+    [
+        ( ParamSlot "foo" 0
+        , Left
+            ( ReturnSlot "bar" )
+        )
+    ]
+)
+( "env0"
+,
+    [ fromList [] ]
+)
+( "env1"
+,
+    [ fromList
+        [
+            ( "c"
+            , Left
+                ( ReturnSlot "foo" )
+            )
+        ]
+    ]
+)
+( "bodyEv"
+,
+    [
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "foo" 0
+        , Left
+            ( ReturnSlot "bar" )
+        )
+    ]
+)
+( "tailCallEv"
+, []
+)
+( "tailRet"
+, Left
+    ( ReturnSlot "foo" )
+)
+( "nested"
+, []
+)
+( "paramEv"
+, []
+)
+( "fnEv"
+,
+    [
+        ( ReturnSlot "foo"
+        , Left
+            ( ParamSlot "foo" 0 )
+        )
+    ,
+        ( ReturnSlot "bar"
+        , Left
+            ( ParamSlot "bar" 0 )
+        )
+    ,
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "foo" 0
+        , Left
+            ( ReturnSlot "bar" )
+        )
+    ,
+        ( ReturnSlot "baz"
+        , Left
+            ( ReturnSlot "foo" )
+        )
+    ]
+)
+( "env1"
+,
+    [ fromList [] ]
+)
+( "tailEv"
+, []
+)
+( "evidence"
+,
+    [
+        ( ReturnSlot "foo"
+        , Left
+            ( ParamSlot "foo" 0 )
+        )
+    ,
+        ( ReturnSlot "bar"
+        , Left
+            ( ParamSlot "bar" 0 )
+        )
+    ,
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "foo" 0
+        , Left
+            ( ReturnSlot "bar" )
+        )
+    ,
+        ( ReturnSlot "baz"
+        , Left
+            ( ReturnSlot "foo" )
+        )
+    ]
+)
+( "results"
+,
+    [ Left
+        ( ReturnSlot "bar" )
+    , Left
+        ( ParamSlot "foo" 0 )
+    , Right ( TyInt W64 )
+    , Left
+        ( ParamSlot "bar" 0 )
+    , Left
+        ( ReturnSlot "foo" )
+    ]
+)
+"programEvidence"
+"fnDeclEvidence"
+( "env0"
+,
+    [ fromList
+        [
+            ( "a"
+            , Left
+                ( ParamSlot "foo" 0 )
+            )
+        ]
+    ]
+)
+( "env1"
+,
+    [ fromList
+        [
+            ( "a"
+            , Left
+                ( ParamSlot "foo" 0 )
+            )
+        ]
+    ]
+)
+( "bodyEv"
+, []
+)
+( "tailCallEv"
+, []
+)
+( "tailRet"
+, Left
+    ( ParamSlot "foo" 0 )
+)
+"fnDeclEvidence"
+( "env0"
+,
+    [ fromList
+        [
+            ( "b"
+            , Right ( TyInt W64 )
+            )
+        ]
+    ]
+)
+( "env1"
+,
+    [ fromList
+        [
+            ( "b"
+            , Right ( TyInt W64 )
+            )
+        ]
+    ]
+)
+( "bodyEv"
+, []
+)
+( "tailCallEv"
+, []
+)
+( "tailRet"
+, Right
+    ( Just ( TyInt W64 ) )
+)
+"fnDeclEvidence"
+( "nested"
+, []
+)
+( "paramEv"
+,
+    [
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ]
+)
+( "nested"
+,
+    [
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ]
+)
+( "paramEv"
+,
+    [
+        ( ParamSlot "foo" 0
+        , Left
+            ( ReturnSlot "bar" )
+        )
+    ]
+)
+( "env0"
+,
+    [ fromList [] ]
+)
+( "env1"
+,
+    [ fromList
+        [
+            ( "c"
+            , Left
+                ( ReturnSlot "foo" )
+            )
+        ]
+    ]
+)
+( "bodyEv"
+,
+    [
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "foo" 0
+        , Left
+            ( ReturnSlot "bar" )
+        )
+    ]
+)
+( "tailCallEv"
+, []
+)
+( "tailRet"
+, Left
+    ( ReturnSlot "foo" )
+)
+( "nested"
+, []
+)
+( "paramEv"
+, []
+)
+( "fnEv"
+,
+    [
+        ( ReturnSlot "foo"
+        , Left
+            ( ParamSlot "foo" 0 )
+        )
+    ,
+        ( ReturnSlot "bar"
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "foo" 0
+        , Left
+            ( ReturnSlot "bar" )
+        )
+    ,
+        ( ReturnSlot "baz"
+        , Left
+            ( ReturnSlot "foo" )
+        )
+    ]
+)
+( "env1"
+,
+    [ fromList [] ]
+)
+( "tailEv"
+, []
+)
+( "evidence"
+,
+    [
+        ( ReturnSlot "foo"
+        , Left
+            ( ParamSlot "foo" 0 )
+        )
+    ,
+        ( ReturnSlot "bar"
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "foo" 0
+        , Left
+            ( ReturnSlot "bar" )
+        )
+    ,
+        ( ReturnSlot "baz"
+        , Left
+            ( ReturnSlot "foo" )
+        )
+    ]
+)
+( "results"
+,
+    [ Left
+        ( ReturnSlot "bar" )
+    , Left
+        ( ParamSlot "foo" 0 )
+    , Right ( TyInt W64 )
+    , Left
+        ( ReturnSlot "foo" )
+    ]
+)
+"programEvidence"
+"fnDeclEvidence"
+( "env0"
+,
+    [ fromList
+        [
+            ( "a"
+            , Left
+                ( ParamSlot "foo" 0 )
+            )
+        ]
+    ]
+)
+( "env1"
+,
+    [ fromList
+        [
+            ( "a"
+            , Left
+                ( ParamSlot "foo" 0 )
+            )
+        ]
+    ]
+)
+( "bodyEv"
+, []
+)
+( "tailCallEv"
+, []
+)
+( "tailRet"
+, Left
+    ( ParamSlot "foo" 0 )
+)
+"fnDeclEvidence"
+( "env0"
+,
+    [ fromList
+        [
+            ( "b"
+            , Right ( TyInt W64 )
+            )
+        ]
+    ]
+)
+( "env1"
+,
+    [ fromList
+        [
+            ( "b"
+            , Right ( TyInt W64 )
+            )
+        ]
+    ]
+)
+( "bodyEv"
+, []
+)
+( "tailCallEv"
+, []
+)
+( "tailRet"
+, Right
+    ( Just ( TyInt W64 ) )
+)
+"fnDeclEvidence"
+( "nested"
+, []
+)
+( "paramEv"
+,
+    [
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ]
+)
+( "nested"
+,
+    [
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ]
+)
+( "paramEv"
+,
+    [
+        ( ParamSlot "foo" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ]
+)
+( "env0"
+,
+    [ fromList [] ]
+)
+( "env1"
+,
+    [ fromList
+        [
+            ( "c"
+            , Left
+                ( ReturnSlot "foo" )
+            )
+        ]
+    ]
+)
+( "bodyEv"
+,
+    [
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "foo" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ]
+)
+( "tailCallEv"
+, []
+)
+( "tailRet"
+, Left
+    ( ReturnSlot "foo" )
+)
+( "nested"
+, []
+)
+( "paramEv"
+, []
+)
+( "fnEv"
+,
+    [
+        ( ReturnSlot "foo"
+        , Left
+            ( ParamSlot "foo" 0 )
+        )
+    ,
+        ( ReturnSlot "bar"
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "foo" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ReturnSlot "baz"
+        , Left
+            ( ReturnSlot "foo" )
+        )
+    ]
+)
+( "env1"
+,
+    [ fromList [] ]
+)
+( "tailEv"
+, []
+)
+( "evidence"
+,
+    [
+        ( ReturnSlot "foo"
+        , Left
+            ( ParamSlot "foo" 0 )
+        )
+    ,
+        ( ReturnSlot "bar"
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "foo" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ReturnSlot "baz"
+        , Left
+            ( ReturnSlot "foo" )
+        )
+    ]
+)
+( "results"
+,
+    [ Right ( TyInt W64 )
+    , Left
+        ( ParamSlot "foo" 0 )
+    , Left
+        ( ReturnSlot "foo" )
+    ]
+)
+"programEvidence"
+"fnDeclEvidence"
+( "env0"
+,
+    [ fromList
+        [
+            ( "a"
+            , Right ( TyInt W64 )
+            )
+        ]
+    ]
+)
+( "env1"
+,
+    [ fromList
+        [
+            ( "a"
+            , Right ( TyInt W64 )
+            )
+        ]
+    ]
+)
+( "bodyEv"
+, []
+)
+( "tailCallEv"
+, []
+)
+( "tailRet"
+, Right
+    ( Just ( TyInt W64 ) )
+)
+"fnDeclEvidence"
+( "env0"
+,
+    [ fromList
+        [
+            ( "b"
+            , Right ( TyInt W64 )
+            )
+        ]
+    ]
+)
+( "env1"
+,
+    [ fromList
+        [
+            ( "b"
+            , Right ( TyInt W64 )
+            )
+        ]
+    ]
+)
+( "bodyEv"
+, []
+)
+( "tailCallEv"
+, []
+)
+( "tailRet"
+, Right
+    ( Just ( TyInt W64 ) )
+)
+"fnDeclEvidence"
+( "nested"
+, []
+)
+( "paramEv"
+,
+    [
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ]
+)
+( "nested"
+,
+    [
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ]
+)
+( "paramEv"
+,
+    [
+        ( ParamSlot "foo" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ]
+)
+( "env0"
+,
+    [ fromList [] ]
+)
+( "env1"
+,
+    [ fromList
+        [
+            ( "c"
+            , Left
+                ( ReturnSlot "foo" )
+            )
+        ]
+    ]
+)
+( "bodyEv"
+,
+    [
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "foo" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ]
+)
+( "tailCallEv"
+, []
+)
+( "tailRet"
+, Left
+    ( ReturnSlot "foo" )
+)
+( "nested"
+, []
+)
+( "paramEv"
+, []
+)
+( "fnEv"
+,
+    [
+        ( ReturnSlot "foo"
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ReturnSlot "bar"
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "foo" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ReturnSlot "baz"
+        , Left
+            ( ReturnSlot "foo" )
+        )
+    ]
+)
+( "env1"
+,
+    [ fromList [] ]
+)
+( "tailEv"
+, []
+)
+( "evidence"
+,
+    [
+        ( ReturnSlot "foo"
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ReturnSlot "bar"
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "foo" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ReturnSlot "baz"
+        , Left
+            ( ReturnSlot "foo" )
+        )
+    ]
+)
+( "results"
+,
+    [ Right ( TyInt W64 )
+    , Left
+        ( ReturnSlot "foo" )
+    ]
+)
+"programEvidence"
+"fnDeclEvidence"
+( "env0"
+,
+    [ fromList
+        [
+            ( "a"
+            , Right ( TyInt W64 )
+            )
+        ]
+    ]
+)
+( "env1"
+,
+    [ fromList
+        [
+            ( "a"
+            , Right ( TyInt W64 )
+            )
+        ]
+    ]
+)
+( "bodyEv"
+, []
+)
+( "tailCallEv"
+, []
+)
+( "tailRet"
+, Right
+    ( Just ( TyInt W64 ) )
+)
+"fnDeclEvidence"
+( "env0"
+,
+    [ fromList
+        [
+            ( "b"
+            , Right ( TyInt W64 )
+            )
+        ]
+    ]
+)
+( "env1"
+,
+    [ fromList
+        [
+            ( "b"
+            , Right ( TyInt W64 )
+            )
+        ]
+    ]
+)
+( "bodyEv"
+, []
+)
+( "tailCallEv"
+, []
+)
+( "tailRet"
+, Right
+    ( Just ( TyInt W64 ) )
+)
+"fnDeclEvidence"
+( "nested"
+, []
+)
+( "paramEv"
+,
+    [
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ]
+)
+( "nested"
+,
+    [
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ]
+)
+( "paramEv"
+,
+    [
+        ( ParamSlot "foo" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ]
+)
+( "env0"
+,
+    [ fromList [] ]
+)
+( "env1"
+,
+    [ fromList
+        [
+            ( "c"
+            , Right ( TyInt W64 )
+            )
+        ]
+    ]
+)
+( "bodyEv"
+,
+    [
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "foo" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ]
+)
+( "tailCallEv"
+, []
+)
+( "tailRet"
+, Right
+    ( Just ( TyInt W64 ) )
+)
+( "nested"
+, []
+)
+( "paramEv"
+, []
+)
+( "fnEv"
+,
+    [
+        ( ReturnSlot "foo"
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ReturnSlot "bar"
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "foo" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ReturnSlot "baz"
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ]
+)
+( "env1"
+,
+    [ fromList [] ]
+)
+( "tailEv"
+, []
+)
+( "evidence"
+,
+    [
+        ( ReturnSlot "foo"
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ReturnSlot "bar"
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "bar" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ParamSlot "foo" 0
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ,
+        ( ReturnSlot "baz"
+        , Right
+            ( Just ( TyInt W64 ) )
+        )
+    ]
+)
+( "results"
+,
+    [ Right ( TyInt W64 ) ]
+)
+ "アセンブラ文字数"
+, 1257
+)
+( "ソースコード内容"
+, "fn foo(a){a} fn bar(b){b} fn baz(){let c = foo(bar(2i64));c} baz()"
+)
+"途中経過： (("tokens", tokens), ("parsed", parsed), ("compld", compld), ("asmblr", asmblr))"
+"パース結果詳細：Right (fnDecls, stmts, expr) = parsed"
+ghci>
+
