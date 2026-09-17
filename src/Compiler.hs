@@ -627,14 +627,15 @@ collectEvidenceStmts fnDeclMap resolved curFn localenv stmts = do
 -- 仮引数をLocalEnvの初期スコープへ変換する（型注釈済みならその型、省略済みならこれまでの解決状況を反映する）
 paramLocalScope :: ResolvedSlots -> String -> [(String, Maybe Type)] -> Map String (Either Slot Type)
 paramLocalScope resolved fnName params =
-  Map.fromList
-    [ (name, status)
-    | (i, (name, mty)) <- zip [0 ..] params
-    , let slot = ParamSlot fnName i
-          status = case mty of
-            Just ty -> Right ty
-            Nothing -> maybe (Left slot) Right (Map.lookup slot resolved)
-    ]
+  pTraceShow ("paramLocalScope実行", fnName) $
+    Map.fromList
+      [ (name, status)
+      | (i, (name, mty)) <- zip [0 ..] params
+      , let slot = ParamSlot fnName i
+            status = case mty of
+              Just ty -> Right ty
+              Nothing -> maybe (Left slot) Right (Map.lookup slot resolved)
+      ]
 
 -- プログラム全体（全fn本体＋暗黙main）を1回走査し、現在のResolvedSlotsに対する証拠を集める
 programEvidence :: Map String FnDecl -> ResolvedSlots -> [FnDecl] -> [Stmt] -> Expr -> Either String Evidence
