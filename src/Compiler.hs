@@ -736,9 +736,9 @@ resolveFnSigs fnDecls stmts tailExpr = do
   let fnDeclMap = Map.fromList [(name, d) | d@(FnDecl name _ _ _) <- fnDecls]
       (initResolved, pending) = initialSlots fnDecls -- 全ての関数から解決済みスロット、未解決スロットを取得
   resolved <- resolveSlots fnDeclMap fnDecls stmts tailExpr initResolved pending
-  -- pTraceShowM ("initResolved", initResolved)
-  -- pTraceShowM ("pending", pending)
-  -- pTraceShowM ("resolved", resolved)
+  pTraceShowM ("initResolved", initResolved)
+  pTraceShowM ("pending", pending)
+  pTraceShowM ("resolved", resolved)
   let paramType name (i, (_, mty)) = maybe (resolved Map.! ParamSlot name i) id mty
       retType name mty = maybe (resolved Map.! ReturnSlot name) id mty
   pure
