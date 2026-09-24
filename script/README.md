@@ -164,6 +164,13 @@ Module 'Compiler' is not interpreted` と拒否される。実行ファイルを
    ghci> :continue
    ```
 
+   スコープに入っている変数名を事前に把握していない場合は、`:show bindings` で
+   その時点の全ローカル束縛（名前と型）を一覧表示できる。
+
+   ```
+   ghci> :show bindings
+   ```
+
    `Compiler.compile` 以外にも、`Parser.tokenize` や `CodeGen.codegen` など
    `:l` した各モジュールの任意の関数にブレークポイントを張れる。
 
