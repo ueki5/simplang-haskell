@@ -9,7 +9,7 @@ import qualified Data.Map as Map
 import Parser (Expr (..), FnDecl (..), Program, Stmt (..), Type (..), Width (..))
 
 -- -- Debug Printサンプル（pTraceShow: 純粋関数内, pTraceShowM: モナド内）
-import Debug.Pretty.Simple (pTraceShow, pTraceShowM)
+-- import Debug.Pretty.Simple (pTraceShow, pTraceShowM)
 
 -- -- プリティ印刷が不要な場合
 -- -- trace: 純粋関数内(既存の第一引数を表示、第二引数を返却)
@@ -313,7 +313,7 @@ unifyMaybeType (Just t1) (Just t2) = Just <$> unifyType t1 t2
 -- bool リテラルは曖昧さがないため常に Just TBool。
 inferMaybeType :: FnSigs -> Env -> Expr -> Either String (Maybe Type)
 inferMaybeType fnSigs env expr = do
-  pTraceShowM ("inferMaybeType実行", expr)
+  -- pTraceShowM ("inferMaybeType実行", expr)
   go expr
  where
   go (Lit _) = Right Nothing
@@ -469,7 +469,7 @@ addressOfSlot _ _ _ e = Left ("invalid operand for &: not an lvalue: " ++ show e
 -- そのスロットへブロックし、それ以外の構造はinferMaybeTypeと完全に同一のロジックで型を求める
 resolveExprType :: Map String FnDecl -> ResolvedSlots -> LocalEnv -> Expr -> SlotResult
 resolveExprType fnDeclMap resolved env expr = do
-  pTraceShowM ("resolveExprType実行", expr)
+  -- pTraceShowM ("resolveExprType実行", expr)
   go expr
  where
   go (Lit _) = Right (Right Nothing)
@@ -525,7 +525,7 @@ type Evidence = [(Slot, Either Slot (Maybe Type))]
 -- （宣言済みの仮引数の個数を超える位置はスキップする。実際の引数個数不一致はFnSigs確定後に検出される）
 callEvidence :: Map String FnDecl -> ResolvedSlots -> LocalEnv -> Expr -> Either String Evidence
 callEvidence fnDeclMap resolved env expr = do
-  pTraceShowM ("callEvidence実行", expr)
+  -- pTraceShowM ("callEvidence実行", expr)
   go expr
  where
   go (Lit _) = Right []
@@ -550,12 +550,12 @@ callEvidence fnDeclMap resolved env expr = do
   go (Deref e) = go e
   go (Call name args) = do
     nested <- concat <$> mapM go args -- 再帰的に型情報を取得（ネストした型情報）
-    pTraceShowM ("nested", nested)
+    -- pTraceShowM ("nested", nested)
     paramEv <- -- 既知の型情報(fnDeclMap,resolved,env)から取得
       mapM
         (\(i, arg) -> (,) (ParamSlot name i) <$> resolveExprType fnDeclMap resolved env arg)
         (zip [0 ..] args)
-    pTraceShowM ("paramEv", paramEv)
+    -- pTraceShowM ("paramEv", paramEv)
     pure (nested ++ paramEv) -- 再帰的に取得 ＋＋ 既知の情報から取得
   combine a b = (++) <$> go a <*> go b
 
@@ -564,7 +564,7 @@ callEvidence fnDeclMap resolved env expr = do
 collectEvidenceStmts ::
   Map String FnDecl -> ResolvedSlots -> Maybe String -> LocalEnv -> [Stmt] -> Either String (LocalEnv, Evidence)
 collectEvidenceStmts fnDeclMap resolved curFn localenv stmts = do
-  pTraceShowM ("collectEvidenceStmts実行", curFn)
+  -- pTraceShowM ("collectEvidenceStmts実行", curFn)
   go localenv stmts
  where
   go env [] = Right (env, [])
@@ -627,42 +627,42 @@ collectEvidenceStmts fnDeclMap resolved curFn localenv stmts = do
 -- 仮引数をLocalEnvの初期スコープへ変換する（型注釈済みならその型、省略済みならこれまでの解決状況を反映する）
 paramLocalScope :: ResolvedSlots -> String -> [(String, Maybe Type)] -> Map String (Either Slot Type)
 paramLocalScope resolved fnName params =
-  pTraceShow ("paramLocalScope実行", fnName) $
-    Map.fromList
-      [ (name, status)
-      | (i, (name, mty)) <- zip [0 ..] params
-      , let slot = ParamSlot fnName i
-            status = case mty of
-              Just ty -> Right ty
-              Nothing -> maybe (Left slot) Right (Map.lookup slot resolved)
-      ]
+  -- pTraceShow ("paramLocalScope実行", fnName) $
+  Map.fromList
+    [ (name, status)
+    | (i, (name, mty)) <- zip [0 ..] params
+    , let slot = ParamSlot fnName i
+          status = case mty of
+            Just ty -> Right ty
+            Nothing -> maybe (Left slot) Right (Map.lookup slot resolved)
+    ]
 
 -- プログラム全体（全fn本体＋暗黙main）を1回走査し、現在のResolvedSlotsに対する証拠を集める
 programEvidence :: Map String FnDecl -> ResolvedSlots -> [FnDecl] -> [Stmt] -> Expr -> Either String Evidence
 programEvidence fnDeclMap resolved fnDecls stmts tailExpr = do
-  pTraceShowM ("programEvidence実行", tailExpr)
+  -- pTraceShowM ("programEvidence実行", tailExpr)
   fnEv <- concat <$> mapM (fnDeclEvidence fnDeclMap resolved) fnDecls -- 全ての関数から証拠を取得
   (env1, topEv) <- collectEvidenceStmts fnDeclMap resolved Nothing [Map.empty] stmts -- 暗黙mainの文からLocalEnv、証拠を取得
   tailEv <- callEvidence fnDeclMap resolved env1 tailExpr -- 暗黙mainの末尾式から証拠を取得
-  pTraceShowM ("fnEv", fnEv)
-  pTraceShowM ("env1", env1)
-  pTraceShowM ("topEv", topEv)
-  pTraceShowM ("tailEv", tailEv)
+  -- pTraceShowM ("fnEv", fnEv)
+  -- pTraceShowM ("env1", env1)
+  -- pTraceShowM ("topEv", topEv)
+  -- pTraceShowM ("tailEv", tailEv)
   pure (fnEv ++ topEv ++ tailEv)
 
 -- １つの関数に対して仮引数、本文、末尾式から証拠を集める
 fnDeclEvidence :: Map String FnDecl -> ResolvedSlots -> FnDecl -> Either String [(Slot, Either Slot (Maybe Type))]
 fnDeclEvidence fnDeclMap resolved (FnDecl name params _ (body, tailE)) = do
-  pTraceShowM ("fnDeclEvidence実行", name)
+  -- pTraceShowM ("fnDeclEvidence実行", name)
   let env0 = [paramLocalScope resolved name params] -- 仮引数をresolvedから検索してLocalEnvを取得
   (env1, bodyEv) <- collectEvidenceStmts fnDeclMap resolved (Just name) env0 body -- 関数の本文から(LocalEnv、証拠)を取得
   tailCallEv <- callEvidence fnDeclMap resolved env1 tailE -- 末尾式内のCallから実引数の証拠を取得
   tailRet <- resolveExprType fnDeclMap resolved env1 tailE -- 末尾式から戻り値の証拠を取得
-  pTraceShowM ("env0", env0)
-  pTraceShowM ("env1", env1)
-  pTraceShowM ("bodyEv", bodyEv)
-  pTraceShowM ("tailCallEv", tailCallEv)
-  pTraceShowM ("tailRet", tailRet)
+  -- pTraceShowM ("env0", env0)
+  -- pTraceShowM ("env1", env1)
+  -- pTraceShowM ("bodyEv", bodyEv)
+  -- pTraceShowM ("tailCallEv", tailCallEv)
+  -- pTraceShowM ("tailRet", tailRet)
   pure (bodyEv ++ tailCallEv ++ [(ReturnSlot name, tailRet)]) -- 本文、末尾式内の実引数、末尾式の戻り値からの証拠を連結して返却
 
 -- 構造検証: main予約名・重複定義・最大引数数（旧buildFnSigsのチェックをそのまま踏襲する。型の中身は見ない）
@@ -698,8 +698,8 @@ resolveSlots _ _ _ _ resolved [] = Right resolved -- 未解決スロットが空
 resolveSlots fnDeclMap fnDecls stmts tailExpr resolved pending = do
   evidence <- programEvidence fnDeclMap resolved fnDecls stmts tailExpr -- 全プログラム（全関数＋暗黙のmain）から証拠を集める
   results <- mapM (resolveOne evidence) pending -- 未解決スロットを解決
-  pTraceShowM ("evidence", evidence)
-  pTraceShowM ("results", results)
+  -- pTraceShowM ("evidence", evidence)
+  -- pTraceShowM ("results", results)
   let advanced = [(slot, ty) | (slot, Right ty) <- zip pending results]
       stillPending = [slot | (slot, Left _) <- zip pending results]
   if null advanced -- 解決されたスロットがない場合
@@ -736,9 +736,9 @@ resolveFnSigs fnDecls stmts tailExpr = do
   let fnDeclMap = Map.fromList [(name, d) | d@(FnDecl name _ _ _) <- fnDecls]
       (initResolved, pending) = initialSlots fnDecls -- 全ての関数から解決済みスロット、未解決スロットを取得
   resolved <- resolveSlots fnDeclMap fnDecls stmts tailExpr initResolved pending
-  pTraceShowM ("initResolved", initResolved)
-  pTraceShowM ("pending", pending)
-  pTraceShowM ("resolved", resolved)
+  -- pTraceShowM ("initResolved", initResolved)
+  -- pTraceShowM ("pending", pending)
+  -- pTraceShowM ("resolved", resolved)
   let paramType name (i, (_, mty)) = maybe (resolved Map.! ParamSlot name i) id mty
       retType name mty = maybe (resolved Map.! ReturnSlot name) id mty
   pure
