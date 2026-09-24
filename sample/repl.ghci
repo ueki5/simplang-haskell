@@ -1,0 +1,14 @@
+-- :set -Wno-unused-imports
+-- :set -Wno-type-defaults
+-- :set -Wno-deprecations
+-- :set -Wno-incomplete-uni-patterns
+:set -Wno-missing-home-modules
+:set -XQuasiQuotes
+:load app/Main.hs
+-- * を付けると、各モジュールの export されていない関数もプロンプトから呼べる
+:module *Main *Parser *CodeGen *Compiler
+import Text.RawString.QQ
+import Data.Int (Int32)
+import Data.Map (Map)
+import qualified Data.Map as Map
+:set args sample/samp001.sl -o output/samp001 -s output/samp001.s
