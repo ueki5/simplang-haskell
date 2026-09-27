@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 mkdir -p output
 cabal install exe:simplang-haskell --overwrite-policy=always
 
