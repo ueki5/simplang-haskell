@@ -13,7 +13,7 @@ common warnings
 library
     import:           warnings
     exposed-modules:  Compiler, CodeGen, Parser
-    build-depends:    base ^>=4.19.2.0,
+    build-depends:    base >=4.19.2.0 && <4.21,
                       containers,
                       transformers,
                       mtl,
@@ -26,7 +26,7 @@ executable simplang-haskell
     import:           warnings
     main-is:          Main.hs
     build-depends:
-        base ^>=4.19.2.0,
+        base >=4.19.2.0 && <4.21,
         simplang-haskell,
         optparse-applicative,
         mtl,
@@ -43,7 +43,7 @@ test-suite simplang-haskell-test
     type:             exitcode-stdio-1.0
     main-is:          Spec.hs
     build-depends:
-        base ^>=4.19.2.0,
+        base >=4.19.2.0 && <4.21,
         simplang-haskell,
         hspec,
         process,
