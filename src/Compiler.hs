@@ -161,60 +161,60 @@ type ReturnCtx = Maybe (Type, String)
 -- 任意のEnv/cursor/loopCtx/returnCtxを起点に[文]から命令を抽出する（ブロック/if分岐/while本体/関数本体の再帰コンパイルに使う）
 compileStmtsFrom :: FnSigs -> Env -> Int -> LoopCtx -> ReturnCtx -> [Stmt] -> CompileM (Env, Int, [Instr])
 compileStmtsFrom fnSigs initEnv initCursor loopCtx returnCtx stmts = foldM step (initEnv, initCursor, []) stmts
- where
-  -- let xxx: 型 = ...
-  step (env, cursor, acc) (SLet name ty expr) = do
-    -- 変数の二重定義をチェック（同一ブロック内の再宣言のみ対象。外側との同名はシャドーイングとして許可）
-    when (declaredLocally name env) $ lift (Left ("variable already declared: " ++ name))
-    -- 式の表現から命令を抽出（宣言された型を期待型として渡す）
-    instrs <- lift (compileExprTyped fnSigs env ty expr)
-    -- 新しく登録する変数のスタック上のアドレスを、型の物理格納幅分だけ詰めて計算
-    let off = cursor - widthBytes (storageWidth ty)
-    -- 変数とアドレスのマップ, 命令＋追加命令＋変数のストア
-    pure (insertVar name (off, ty) env, off, acc ++ instrs ++ [Store (storageWidth ty) off])
-  -- let xxx = ...（型注釈省略。inferTypeで推論し、最後まで未確定ならi64をデフォルトとする）
-  step (env, cursor, acc) (SLetInferred name expr) = do
-    when (declaredLocally name env) $ lift (Left ("variable already declared: " ++ name))
-    ty <- lift (inferType fnSigs env expr)
-    instrs <- lift (compileExprTyped fnSigs env ty expr)
-    let off = cursor - widthBytes (storageWidth ty)
-    pure (insertVar name (off, ty) env, off, acc ++ instrs ++ [Store (storageWidth ty) off])
-  -- xxx = ...
-  step (env, cursor, acc) (SAssign name expr) = do
-    -- 変数の定義をチェック（外側スコープの変数への書き込みも許可）
-    (off, ty) <- lift (maybe (Left ("undeclared variable: " ++ name)) Right (lookupVar name env))
-    -- 式の表現から命令を抽出（既存の変数の型を期待型として渡す）
-    instrs <- lift (compileExprTyped fnSigs env ty expr)
-    -- 変数とアドレスのマップはそのまま, 命令＋追加命令＋変数のストア
-    pure (env, cursor, acc ++ instrs ++ [Store (storageWidth ty) off])
-  -- { ... }
-  step (env, cursor, acc) (SBlock innerStmts) = do
-    -- 先頭に空スコープをpushして再帰コンパイルし、返り値のEnv/cursorは破棄して呼び出し前の値をそのまま継続に使う
-    -- （＝スコープアウトとスタックオフセットの巻き戻しを同時に実現する）。loopCtx/returnCtxはそのまま素通しする
-    -- （ブロックにネストしても外側ループのbreak/continue・外側関数のreturnが引き続き解決できるようにするため）
-    (_, _, instrs) <- compileStmtsFrom fnSigs (Map.empty : env) cursor loopCtx returnCtx innerStmts
-    pure (env, cursor, acc ++ instrs)
-  -- if 式 {...} (else if 式 {...})* (else {...})?
-  step (env, cursor, acc) (SIf branches maybeElse) = do
-    instrs <- compileIf fnSigs env cursor loopCtx returnCtx branches maybeElse
-    pure (env, cursor, acc ++ instrs)
-  -- while 式 {...}
-  step (env, cursor, acc) (SWhile cond body) = do
-    instrs <- compileWhile fnSigs env cursor returnCtx cond body
-    pure (env, cursor, acc ++ instrs)
-  -- break;
-  step (env, cursor, acc) SBreak = do
-    lbl <- lift (maybe (Left "break used outside loop") (Right . snd) loopCtx)
-    pure (env, cursor, acc ++ [Jmp lbl])
-  -- continue;
-  step (env, cursor, acc) SContinue = do
-    lbl <- lift (maybe (Left "continue used outside loop") (Right . fst) loopCtx)
-    pure (env, cursor, acc ++ [Jmp lbl])
-  -- return expr;
-  step (env, cursor, acc) (SReturn expr) = do
-    (retTy, endLabel) <- lift (maybe (Left "return used outside function") Right returnCtx)
-    instrs <- lift (compileExprTyped fnSigs env retTy expr)
-    pure (env, cursor, acc ++ instrs ++ [Jmp endLabel])
+  where
+    -- let xxx: 型 = ...
+    step (env, cursor, acc) (SLet name ty expr) = do
+      -- 変数の二重定義をチェック（同一ブロック内の再宣言のみ対象。外側との同名はシャドーイングとして許可）
+      when (declaredLocally name env) $ lift (Left ("variable already declared: " ++ name))
+      -- 式の表現から命令を抽出（宣言された型を期待型として渡す）
+      instrs <- lift (compileExprTyped fnSigs env ty expr)
+      -- 新しく登録する変数のスタック上のアドレスを、型の物理格納幅分だけ詰めて計算
+      let off = cursor - widthBytes (storageWidth ty)
+      -- 変数とアドレスのマップ, 命令＋追加命令＋変数のストア
+      pure (insertVar name (off, ty) env, off, acc ++ instrs ++ [Store (storageWidth ty) off])
+    -- let xxx = ...（型注釈省略。inferTypeで推論し、最後まで未確定ならi64をデフォルトとする）
+    step (env, cursor, acc) (SLetInferred name expr) = do
+      when (declaredLocally name env) $ lift (Left ("variable already declared: " ++ name))
+      ty <- lift (inferType fnSigs env expr)
+      instrs <- lift (compileExprTyped fnSigs env ty expr)
+      let off = cursor - widthBytes (storageWidth ty)
+      pure (insertVar name (off, ty) env, off, acc ++ instrs ++ [Store (storageWidth ty) off])
+    -- xxx = ...
+    step (env, cursor, acc) (SAssign name expr) = do
+      -- 変数の定義をチェック（外側スコープの変数への書き込みも許可）
+      (off, ty) <- lift (maybe (Left ("undeclared variable: " ++ name)) Right (lookupVar name env))
+      -- 式の表現から命令を抽出（既存の変数の型を期待型として渡す）
+      instrs <- lift (compileExprTyped fnSigs env ty expr)
+      -- 変数とアドレスのマップはそのまま, 命令＋追加命令＋変数のストア
+      pure (env, cursor, acc ++ instrs ++ [Store (storageWidth ty) off])
+    -- { ... }
+    step (env, cursor, acc) (SBlock innerStmts) = do
+      -- 先頭に空スコープをpushして再帰コンパイルし、返り値のEnv/cursorは破棄して呼び出し前の値をそのまま継続に使う
+      -- （＝スコープアウトとスタックオフセットの巻き戻しを同時に実現する）。loopCtx/returnCtxはそのまま素通しする
+      -- （ブロックにネストしても外側ループのbreak/continue・外側関数のreturnが引き続き解決できるようにするため）
+      (_, _, instrs) <- compileStmtsFrom fnSigs (Map.empty : env) cursor loopCtx returnCtx innerStmts
+      pure (env, cursor, acc ++ instrs)
+    -- if 式 {...} (else if 式 {...})* (else {...})?
+    step (env, cursor, acc) (SIf branches maybeElse) = do
+      instrs <- compileIf fnSigs env cursor loopCtx returnCtx branches maybeElse
+      pure (env, cursor, acc ++ instrs)
+    -- while 式 {...}
+    step (env, cursor, acc) (SWhile cond body) = do
+      instrs <- compileWhile fnSigs env cursor returnCtx cond body
+      pure (env, cursor, acc ++ instrs)
+    -- break;
+    step (env, cursor, acc) SBreak = do
+      lbl <- lift (maybe (Left "break used outside loop") (Right . snd) loopCtx)
+      pure (env, cursor, acc ++ [Jmp lbl])
+    -- continue;
+    step (env, cursor, acc) SContinue = do
+      lbl <- lift (maybe (Left "continue used outside loop") (Right . fst) loopCtx)
+      pure (env, cursor, acc ++ [Jmp lbl])
+    -- return expr;
+    step (env, cursor, acc) (SReturn expr) = do
+      (retTy, endLabel) <- lift (maybe (Left "return used outside function") Right returnCtx)
+      instrs <- lift (compileExprTyped fnSigs env retTy expr)
+      pure (env, cursor, acc ++ instrs ++ [Jmp endLabel])
 
 -- if/else-if/else の分岐列を、条件が偽なら次の分岐へジャンプする形の命令列へ展開する。
 -- 各分岐の本体はブロックと同じく独立スコープでコンパイルし、Env/cursorは呼び出し側へ伝播させない
@@ -227,25 +227,25 @@ compileIf fnSigs env cursor loopCtx returnCtx branches maybeElse = do
   endLabel <- freshLabel "if_end"
   body <- go endLabel branches
   pure (body ++ [Label endLabel])
- where
-  go _ [] = case maybeElse of
-    Nothing -> pure []
-    Just elseStmts -> do
-      (_, _, instrs) <- compileStmtsFrom fnSigs (Map.empty : env) cursor loopCtx returnCtx elseStmts
-      pure instrs
-  go endLabel ((cond, body) : rest) = do
-    -- 条件式は式木としては expected とは独立にbool型を要求する（if自体はexprを持たない）
-    condInstrs <- lift (compileExprTyped fnSigs env TBool cond)
-    nextLabel <- freshLabel "if_next"
-    (_, _, bodyInstrs) <- compileStmtsFrom fnSigs (Map.empty : env) cursor loopCtx returnCtx body
-    restInstrs <- go endLabel rest
-    pure
-      ( condInstrs
-          ++ [JmpIfZero nextLabel]
-          ++ bodyInstrs
-          ++ [Jmp endLabel, Label nextLabel]
-          ++ restInstrs
-      )
+  where
+    go _ [] = case maybeElse of
+      Nothing -> pure []
+      Just elseStmts -> do
+        (_, _, instrs) <- compileStmtsFrom fnSigs (Map.empty : env) cursor loopCtx returnCtx elseStmts
+        pure instrs
+    go endLabel ((cond, body) : rest) = do
+      -- 条件式は式木としては expected とは独立にbool型を要求する（if自体はexprを持たない）
+      condInstrs <- lift (compileExprTyped fnSigs env TBool cond)
+      nextLabel <- freshLabel "if_next"
+      (_, _, bodyInstrs) <- compileStmtsFrom fnSigs (Map.empty : env) cursor loopCtx returnCtx body
+      restInstrs <- go endLabel rest
+      pure
+        ( condInstrs
+            ++ [JmpIfZero nextLabel]
+            ++ bodyInstrs
+            ++ [Jmp endLabel, Label nextLabel]
+            ++ restInstrs
+        )
 
 -- while を「先頭で条件を検査し、真なら本体を実行して先頭へ戻る」形の命令列へ展開する。
 -- 本体はブロックと同じく独立スコープでコンパイルし、Env/cursorは呼び出し側へ伝播させない。
@@ -271,11 +271,11 @@ compileWhile fnSigs env cursor returnCtx cond body = do
 -- 戻り値: (宣言順の(名前, オフセット, 型)のリスト, 変換後のEnv用スコープ, 最終cursor)
 allocParams :: [(String, Type)] -> ([(String, Int, Type)], Map String (Int, Type), Int)
 allocParams params = (reverse revAssigned, Map.fromList [(n, (o, t)) | (n, o, t) <- revAssigned], cursor)
- where
-  (revAssigned, cursor) = foldl step ([], 0) params
-  step (acc, c) (name, ty) =
-    let off = c - widthBytes (storageWidth ty)
-     in ((name, off, ty) : acc, off)
+  where
+    (revAssigned, cursor) = foldl step ([], 0) params
+    step (acc, c) (name, ty) =
+      let off = c - widthBytes (storageWidth ty)
+       in ((name, off, ty) : acc, off)
 
 -- 関数本体のコンパイル。パラメータのみを含む独立スコープ（外側の暗黙main・他の関数の変数は
 -- 一切参照できない）から開始し、パラメータはプロローグ直後にレジスタからスタックへスピルする
@@ -315,65 +315,65 @@ inferMaybeType :: FnSigs -> Env -> Expr -> Either String (Maybe Type)
 inferMaybeType fnSigs env expr = do
   -- pTraceShowM ("inferMaybeType実行", expr)
   go expr
- where
-  go (Lit _) = Right Nothing
-  -- サフィックス付きリテラルは Var と同様、常に確定した型を持つ（expectedとは無関係）
-  go (LitTyped _ w) = Right (Just (TyInt w))
-  go (BoolLit _) = Right (Just TBool)
-  go (Var name) =
-    maybe (Left ("undeclared variable: " ++ name)) (Right . Just . snd) (lookupVar name env)
-  go (Neg e) = go e
-  go (Not e) = do
-    t <- go e
-    case t of
-      Just (TyInt w) -> Left ("type mismatch: expected bool, found " ++ typeName (TyInt w))
-      _ -> Right (Just TBool)
-  go (Add a b) = combine a b
-  go (Sub a b) = combine a b
-  go (Mul a b) = combine a b
-  go (Div a b) = combine a b
-  -- Eq/Neq は被演算子同士の型を単一化するが、ノード自体の型は常に TBool
-  -- （算術演算と異なり、被演算子の型と結果の型が一致しない）
-  go (Eq a b) = combine a b >> Right (Just TBool)
-  go (Neq a b) = combine a b >> Right (Just TBool)
-  go (Lt a b) = combine a b >> Right (Just TBool)
-  go (Le a b) = combine a b >> Right (Just TBool)
-  go (Gt a b) = combine a b >> Right (Just TBool)
-  go (Ge a b) = combine a b >> Right (Just TBool)
-  -- to_i64/to_i32 の結果型は被演算子によらず常に確定する（BoolLit と同様、部分木を辿る必要はない）
-  go (ToI64 _) = Right (Just (TyInt W64))
-  go (ToI32 _) = Right (Just (TyInt W32))
-  -- &lvalue の型は lvalue 自身の型を TPtr で包んだもの（addressOf に委譲する）
-  go (AddrOf e) = do
-    (pointeeTy, _) <- addressOf fnSigs env e
-    Right (Just (TPtr pointeeTy))
-  --  *ptr の型は ptr 自身の型からポインタを一枚剥がしたもの
-  go (Deref e) = do
-    t <- go e
-    case t of
-      Just (TPtr inner) -> Right (Just inner)
-      Just other -> Left ("type mismatch: expected pointer, found " ++ typeName other)
-      Nothing -> Left "type mismatch: cannot dereference an untyped literal"
-  -- 呼び出しの型は常にシグネチャの戻り値型で確定する（算術演算と異なり、引数の型を
-  -- 単一化する必要はない。各引数の型検査はcompileExprTyped側で行う）
-  go (Call name args) =
-    case Map.lookup name fnSigs of
-      Nothing -> Left ("undeclared function: " ++ name)
-      Just (paramTys, retTy)
-        | length paramTys /= length args ->
-            Left
-              ( "wrong number of arguments for "
-                  ++ name
-                  ++ ": expected "
-                  ++ show (length paramTys)
-                  ++ ", found "
-                  ++ show (length args)
-              )
-        | otherwise -> Right (Just retTy)
-  combine a b = do
-    ta <- go a
-    tb <- go b
-    unifyMaybeType ta tb
+  where
+    go (Lit _) = Right Nothing
+    -- サフィックス付きリテラルは Var と同様、常に確定した型を持つ（expectedとは無関係）
+    go (LitTyped _ w) = Right (Just (TyInt w))
+    go (BoolLit _) = Right (Just TBool)
+    go (Var name) =
+      maybe (Left ("undeclared variable: " ++ name)) (Right . Just . snd) (lookupVar name env)
+    go (Neg e) = go e
+    go (Not e) = do
+      t <- go e
+      case t of
+        Just (TyInt w) -> Left ("type mismatch: expected bool, found " ++ typeName (TyInt w))
+        _ -> Right (Just TBool)
+    go (Add a b) = combine a b
+    go (Sub a b) = combine a b
+    go (Mul a b) = combine a b
+    go (Div a b) = combine a b
+    -- Eq/Neq は被演算子同士の型を単一化するが、ノード自体の型は常に TBool
+    -- （算術演算と異なり、被演算子の型と結果の型が一致しない）
+    go (Eq a b) = combine a b >> Right (Just TBool)
+    go (Neq a b) = combine a b >> Right (Just TBool)
+    go (Lt a b) = combine a b >> Right (Just TBool)
+    go (Le a b) = combine a b >> Right (Just TBool)
+    go (Gt a b) = combine a b >> Right (Just TBool)
+    go (Ge a b) = combine a b >> Right (Just TBool)
+    -- to_i64/to_i32 の結果型は被演算子によらず常に確定する（BoolLit と同様、部分木を辿る必要はない）
+    go (ToI64 _) = Right (Just (TyInt W64))
+    go (ToI32 _) = Right (Just (TyInt W32))
+    -- &lvalue の型は lvalue 自身の型を TPtr で包んだもの（addressOf に委譲する）
+    go (AddrOf e) = do
+      (pointeeTy, _) <- addressOf fnSigs env e
+      Right (Just (TPtr pointeeTy))
+    --  *ptr の型は ptr 自身の型からポインタを一枚剥がしたもの
+    go (Deref e) = do
+      t <- go e
+      case t of
+        Just (TPtr inner) -> Right (Just inner)
+        Just other -> Left ("type mismatch: expected pointer, found " ++ typeName other)
+        Nothing -> Left "type mismatch: cannot dereference an untyped literal"
+    -- 呼び出しの型は常にシグネチャの戻り値型で確定する（算術演算と異なり、引数の型を
+    -- 単一化する必要はない。各引数の型検査はcompileExprTyped側で行う）
+    go (Call name args) =
+      case Map.lookup name fnSigs of
+        Nothing -> Left ("undeclared function: " ++ name)
+        Just (paramTys, retTy)
+          | length paramTys /= length args ->
+              Left
+                ( "wrong number of arguments for "
+                    ++ name
+                    ++ ": expected "
+                    ++ show (length paramTys)
+                    ++ ", found "
+                    ++ show (length args)
+                )
+          | otherwise -> Right (Just retTy)
+    combine a b = do
+      ta <- go a
+      tb <- go b
+      unifyMaybeType ta tb
 
 -- 最後まで未確定なら i64 をデフォルトとする。
 inferType :: FnSigs -> Env -> Expr -> Either String Type
@@ -471,52 +471,52 @@ resolveExprType :: Map String FnDecl -> ResolvedSlots -> LocalEnv -> Expr -> Slo
 resolveExprType fnDeclMap resolved env expr = do
   -- pTraceShowM ("resolveExprType実行", expr)
   go expr
- where
-  go (Lit _) = Right (Right Nothing)
-  go (LitTyped _ w) = Right (Right (Just (TyInt w)))
-  go (BoolLit _) = Right (Right (Just TBool))
-  go (Var name) = case lookupLocal name env of
-    Nothing -> Left ("undeclared variable: " ++ name)
-    Just (Left slot) -> Right (Left slot)
-    Just (Right ty) -> Right (Right (Just ty))
-  go (Neg e) = go e
-  go (Not e) =
-    go e `chainSlot` \t -> case t of
-      Just (TyInt w) -> Left ("type mismatch: expected bool, found " ++ typeName (TyInt w))
-      _ -> Right (Right (Just TBool))
-  go (Add a b) = combine a b
-  go (Sub a b) = combine a b
-  go (Mul a b) = combine a b
-  go (Div a b) = combine a b
-  go (Eq a b) = combineBool a b
-  go (Neq a b) = combineBool a b
-  go (Lt a b) = combineBool a b
-  go (Le a b) = combineBool a b
-  go (Gt a b) = combineBool a b
-  go (Ge a b) = combineBool a b
-  go (ToI64 _) = Right (Right (Just (TyInt W64)))
-  go (ToI32 _) = Right (Right (Just (TyInt W32)))
-  go (AddrOf e) = case addressOfSlot fnDeclMap resolved env e of
-    Left err -> Left err
-    Right (Left slot) -> Right (Left slot)
-    Right (Right ty) -> Right (Right (Just (TPtr ty)))
-  go (Deref e) =
-    go e `chainSlot` \t -> case t of
-      Just (TPtr inner) -> Right (Right (Just inner))
-      Just other -> Left ("type mismatch: expected pointer, found " ++ typeName other)
-      Nothing -> Left "type mismatch: cannot dereference an untyped literal"
-  go (Call name _) = case Map.lookup name fnDeclMap of
-    Nothing -> Left ("undeclared function: " ++ name)
-    Just _ -> case Map.lookup (ReturnSlot name) resolved of
-      Just ty -> Right (Right (Just ty))
-      Nothing -> Right (Left (ReturnSlot name))
-  combine a b =
-    go a `chainSlot` \ta ->
-      go b `chainSlot` \tb ->
-        case unifyMaybeType ta tb of
-          Left err -> Left err
-          Right u -> Right (Right u)
-  combineBool a b = combine a b `chainSlot` \_ -> Right (Right (Just TBool))
+  where
+    go (Lit _) = Right (Right Nothing)
+    go (LitTyped _ w) = Right (Right (Just (TyInt w)))
+    go (BoolLit _) = Right (Right (Just TBool))
+    go (Var name) = case lookupLocal name env of
+      Nothing -> Left ("undeclared variable: " ++ name)
+      Just (Left slot) -> Right (Left slot)
+      Just (Right ty) -> Right (Right (Just ty))
+    go (Neg e) = go e
+    go (Not e) =
+      go e `chainSlot` \t -> case t of
+        Just (TyInt w) -> Left ("type mismatch: expected bool, found " ++ typeName (TyInt w))
+        _ -> Right (Right (Just TBool))
+    go (Add a b) = combine a b
+    go (Sub a b) = combine a b
+    go (Mul a b) = combine a b
+    go (Div a b) = combine a b
+    go (Eq a b) = combineBool a b
+    go (Neq a b) = combineBool a b
+    go (Lt a b) = combineBool a b
+    go (Le a b) = combineBool a b
+    go (Gt a b) = combineBool a b
+    go (Ge a b) = combineBool a b
+    go (ToI64 _) = Right (Right (Just (TyInt W64)))
+    go (ToI32 _) = Right (Right (Just (TyInt W32)))
+    go (AddrOf e) = case addressOfSlot fnDeclMap resolved env e of
+      Left err -> Left err
+      Right (Left slot) -> Right (Left slot)
+      Right (Right ty) -> Right (Right (Just (TPtr ty)))
+    go (Deref e) =
+      go e `chainSlot` \t -> case t of
+        Just (TPtr inner) -> Right (Right (Just inner))
+        Just other -> Left ("type mismatch: expected pointer, found " ++ typeName other)
+        Nothing -> Left "type mismatch: cannot dereference an untyped literal"
+    go (Call name _) = case Map.lookup name fnDeclMap of
+      Nothing -> Left ("undeclared function: " ++ name)
+      Just _ -> case Map.lookup (ReturnSlot name) resolved of
+        Just ty -> Right (Right (Just ty))
+        Nothing -> Right (Left (ReturnSlot name))
+    combine a b =
+      go a `chainSlot` \ta ->
+        go b `chainSlot` \tb ->
+          case unifyMaybeType ta tb of
+            Left err -> Left err
+            Right u -> Right (Right u)
+    combineBool a b = combine a b `chainSlot` \_ -> Right (Right (Just TBool))
 
 -- (対象スロット, その証拠) のリスト。プログラム全体を1回走査してまとめて集める
 type Evidence = [(Slot, Either Slot (Maybe Type))]
@@ -527,102 +527,102 @@ callEvidence :: Map String FnDecl -> ResolvedSlots -> LocalEnv -> Expr -> Either
 callEvidence fnDeclMap resolved env expr = do
   -- pTraceShowM ("callEvidence実行", expr)
   go expr
- where
-  go (Lit _) = Right []
-  go (LitTyped _ _) = Right []
-  go (BoolLit _) = Right []
-  go (Var _) = Right []
-  go (Neg e) = go e
-  go (Not e) = go e
-  go (Add a b) = combine a b
-  go (Sub a b) = combine a b
-  go (Mul a b) = combine a b
-  go (Div a b) = combine a b
-  go (Eq a b) = combine a b
-  go (Neq a b) = combine a b
-  go (Lt a b) = combine a b
-  go (Le a b) = combine a b
-  go (Gt a b) = combine a b
-  go (Ge a b) = combine a b
-  go (ToI64 e) = go e
-  go (ToI32 e) = go e
-  go (AddrOf e) = go e
-  go (Deref e) = go e
-  go (Call name args) = do
-    nested <- concat <$> mapM go args -- 再帰的に型情報を取得（ネストした型情報）
-    -- pTraceShowM ("nested", nested)
-    paramEv <- -- 既知の型情報(fnDeclMap,resolved,env)から取得
-      mapM
-        (\(i, arg) -> (,) (ParamSlot name i) <$> resolveExprType fnDeclMap resolved env arg)
-        (zip [0 ..] args)
-    -- pTraceShowM ("paramEv", paramEv)
-    pure (nested ++ paramEv) -- 再帰的に取得 ＋＋ 既知の情報から取得
-  combine a b = (++) <$> go a <*> go b
+  where
+    go (Lit _) = Right []
+    go (LitTyped _ _) = Right []
+    go (BoolLit _) = Right []
+    go (Var _) = Right []
+    go (Neg e) = go e
+    go (Not e) = go e
+    go (Add a b) = combine a b
+    go (Sub a b) = combine a b
+    go (Mul a b) = combine a b
+    go (Div a b) = combine a b
+    go (Eq a b) = combine a b
+    go (Neq a b) = combine a b
+    go (Lt a b) = combine a b
+    go (Le a b) = combine a b
+    go (Gt a b) = combine a b
+    go (Ge a b) = combine a b
+    go (ToI64 e) = go e
+    go (ToI32 e) = go e
+    go (AddrOf e) = go e
+    go (Deref e) = go e
+    go (Call name args) = do
+      nested <- concat <$> mapM go args -- 再帰的に型情報を取得（ネストした型情報）
+      -- pTraceShowM ("nested", nested)
+      paramEv <- -- 既知の型情報(fnDeclMap,resolved,env)から取得
+        mapM
+          (\(i, arg) -> (,) (ParamSlot name i) <$> resolveExprType fnDeclMap resolved env arg)
+          (zip [0 ..] args)
+      -- pTraceShowM ("paramEv", paramEv)
+      pure (nested ++ paramEv) -- 再帰的に取得 ＋＋ 既知の情報から取得
+    combine a b = (++) <$> go a <*> go b
 
--- 関数本体（または暗黙main）内の文列を辿り、(対象スロット, 証拠) を集める。compileStmtsFrom と同じ形
+-- 関数（または暗黙main）の本文を辿り、(対象スロット, 証拠) を集める。compileStmtsFrom と同じ形
 -- （スコープのpush/pop、SBlock/SIf/SWhileの再帰）だが、命令列の代わりに証拠を集める点だけが異なる
 collectEvidenceStmts ::
   Map String FnDecl -> ResolvedSlots -> Maybe String -> LocalEnv -> [Stmt] -> Either String (LocalEnv, Evidence)
 collectEvidenceStmts fnDeclMap resolved curFn localenv stmts = do
   -- pTraceShowM ("collectEvidenceStmts実行", curFn)
   go localenv stmts
- where
-  go env [] = Right (env, [])
-  go env (stmt : rest) = do
-    (env', ev1) <- step env stmt
-    (env'', ev2) <- go env' rest
-    pure (env'', ev1 ++ ev2)
+  where
+    go env [] = Right (env, [])
+    go env (stmt : rest) = do
+      (env', ev1) <- step env stmt
+      (env'', ev2) <- go env' rest
+      pure (env'', ev1 ++ ev2)
 
-  step env (SLet name ty expr) = do
-    ev <- callEvidence fnDeclMap resolved env expr
-    -- pTraceShowM ("ev", ev)
-    pure (setLocal name (Right ty) env, ev)
-  step env (SLetInferred name expr) = do
-    ev <- callEvidence fnDeclMap resolved env expr
-    -- pTraceShowM ("ev", ev)
-    status <- case resolveExprType fnDeclMap resolved env expr of
-      Left err -> Left err
-      Right (Left slot) -> Right (Left slot)
-      Right (Right (Just ty)) -> Right (Right ty)
-      Right (Right Nothing) -> Right (Right (TyInt W64))
-    pure (setLocal name status env, ev)
-  step env (SAssign _ expr) = do
-    ev <- callEvidence fnDeclMap resolved env expr
-    -- pTraceShowM ("ev", ev)
-    pure (env, ev)
-  step env (SBlock inner) = do
-    (_, ev) <- collectEvidenceStmts fnDeclMap resolved curFn (Map.empty : env) inner
-    pure (env, ev)
-  step env (SIf branches maybeElse) = do
-    branchEv <-
-      concat
-        <$> mapM
-          ( \(cond, body) -> do
-              condEv <- callEvidence fnDeclMap resolved env cond
-              -- pTraceShowM ("condEv", condEv)
-              (_, bodyEv) <- collectEvidenceStmts fnDeclMap resolved curFn (Map.empty : env) body
-              pure (condEv ++ bodyEv)
-          )
-          branches
-    elseEv <- case maybeElse of
-      Nothing -> Right []
-      Just elseStmts -> snd <$> collectEvidenceStmts fnDeclMap resolved curFn (Map.empty : env) elseStmts
-    pure (env, branchEv ++ elseEv)
-  step env (SWhile cond body) = do
-    condEv <- callEvidence fnDeclMap resolved env cond
-    -- pTraceShowM ("condEv", condEv)
-    (_, bodyEv) <- collectEvidenceStmts fnDeclMap resolved curFn (Map.empty : env) body
-    pure (env, condEv ++ bodyEv)
-  step env SBreak = Right (env, [])
-  step env SContinue = Right (env, [])
-  step env (SReturn expr) = do
-    ev <- callEvidence fnDeclMap resolved env expr
-    -- pTraceShowM ("ev", ev)
-    case curFn of
-      Nothing -> pure (env, ev)
-      Just fnName -> do
-        r <- resolveExprType fnDeclMap resolved env expr
-        pure (env, ev ++ [(ReturnSlot fnName, r)])
+    step env (SLet name ty expr) = do
+      ev <- callEvidence fnDeclMap resolved env expr
+      -- pTraceShowM ("ev", ev)
+      pure (setLocal name (Right ty) env, ev)
+    step env (SLetInferred name expr) = do
+      ev <- callEvidence fnDeclMap resolved env expr
+      -- pTraceShowM ("ev", ev)
+      status <- case resolveExprType fnDeclMap resolved env expr of
+        Left err -> Left err
+        Right (Left slot) -> Right (Left slot)
+        Right (Right (Just ty)) -> Right (Right ty)
+        Right (Right Nothing) -> Right (Right (TyInt W64))
+      pure (setLocal name status env, ev)
+    step env (SAssign _ expr) = do
+      ev <- callEvidence fnDeclMap resolved env expr
+      -- pTraceShowM ("ev", ev)
+      pure (env, ev)
+    step env (SBlock inner) = do
+      (_, ev) <- collectEvidenceStmts fnDeclMap resolved curFn (Map.empty : env) inner
+      pure (env, ev)
+    step env (SIf branches maybeElse) = do
+      branchEv <-
+        concat
+          <$> mapM
+            ( \(cond, body) -> do
+                condEv <- callEvidence fnDeclMap resolved env cond
+                -- pTraceShowM ("condEv", condEv)
+                (_, bodyEv) <- collectEvidenceStmts fnDeclMap resolved curFn (Map.empty : env) body
+                pure (condEv ++ bodyEv)
+            )
+            branches
+      elseEv <- case maybeElse of
+        Nothing -> Right []
+        Just elseStmts -> snd <$> collectEvidenceStmts fnDeclMap resolved curFn (Map.empty : env) elseStmts
+      pure (env, branchEv ++ elseEv)
+    step env (SWhile cond body) = do
+      condEv <- callEvidence fnDeclMap resolved env cond
+      -- pTraceShowM ("condEv", condEv)
+      (_, bodyEv) <- collectEvidenceStmts fnDeclMap resolved curFn (Map.empty : env) body
+      pure (env, condEv ++ bodyEv)
+    step env SBreak = Right (env, [])
+    step env SContinue = Right (env, [])
+    step env (SReturn expr) = do
+      ev <- callEvidence fnDeclMap resolved env expr
+      -- pTraceShowM ("ev", ev)
+      case curFn of
+        Nothing -> pure (env, ev)
+        Just fnName -> do
+          r <- resolveExprType fnDeclMap resolved env expr
+          pure (env, ev ++ [(ReturnSlot fnName, r)])
 
 -- 仮引数をLocalEnvの初期スコープへ変換する（型注釈済みならその型、省略済みならこれまでの解決状況を反映する）
 paramLocalScope :: ResolvedSlots -> String -> [(String, Maybe Type)] -> Map String (Either Slot Type)
@@ -630,8 +630,8 @@ paramLocalScope resolved fnName params =
   -- pTraceShow ("paramLocalScope実行", fnName) $
   Map.fromList
     [ (name, status)
-    | (i, (name, mty)) <- zip [0 ..] params
-    , let slot = ParamSlot fnName i
+    | (i, (name, mty)) <- zip [0 ..] params,
+      let slot = ParamSlot fnName i
           status = case mty of
             Just ty -> Right ty
             Nothing -> maybe (Left slot) Right (Map.lookup slot resolved)
@@ -668,25 +668,25 @@ fnDeclEvidence fnDeclMap resolved (FnDecl name params _ (body, tailE)) = do
 -- 構造検証: main予約名・重複定義・最大引数数（旧buildFnSigsのチェックをそのまま踏襲する。型の中身は見ない）
 validateFnShapes :: [FnDecl] -> Either String ()
 validateFnShapes fnDecls = () <$ foldM addSig Map.empty fnDecls
- where
-  addSig :: Map String () -> FnDecl -> Either String (Map String ())
-  addSig seen (FnDecl name params _ _)
-    | name == "main" = Left "function name 'main' is reserved"
-    | Map.member name seen = Left ("function already declared: " ++ name)
-    | length params > maxParams = Left ("too many parameters (max " ++ show maxParams ++ "): " ++ name)
-    | otherwise = Right (Map.insert name () seen)
+  where
+    addSig :: Map String () -> FnDecl -> Either String (Map String ())
+    addSig seen (FnDecl name params _ _)
+      | name == "main" = Left "function name 'main' is reserved"
+      | Map.member name seen = Left ("function already declared: " ++ name)
+      | length params > maxParams = Left ("too many parameters (max " ++ show maxParams ++ "): " ++ name)
+      | otherwise = Right (Map.insert name () seen)
 
 -- 各fnの型注釈が省略された箇所をSlotとして列挙し、注釈済みの箇所は即座にResolvedSlotsへ投入する
 initialSlots :: [FnDecl] -> (ResolvedSlots, [Slot])
 initialSlots fnDecls = (Map.fromList resolved, unresolved)
- where
-  entries =
-    [ (slot, mty)
-    | FnDecl name params mret _ <- fnDecls
-    , (slot, mty) <- zip (map (ParamSlot name) [0 ..]) (map snd params) ++ [(ReturnSlot name, mret)]
-    ]
-  resolved = [(slot, ty) | (slot, Just ty) <- entries]
-  unresolved = [slot | (slot, Nothing) <- entries]
+  where
+    entries =
+      [ (slot, mty)
+      | FnDecl name params mret _ <- fnDecls,
+        (slot, mty) <- zip (map (ParamSlot name) [0 ..]) (map snd params) ++ [(ReturnSlot name, mret)]
+      ]
+    resolved = [(slot, ty) | (slot, Just ty) <- entries]
+    unresolved = [slot | (slot, Nothing) <- entries]
 
 -- 未解決スロット集合が空になるまで、全プログラムを繰り返し走査して解決を進める。
 -- 1個のスロットについて、自分自身待ちの証拠は無視する（通常の自己再帰が誤って循環と
@@ -948,37 +948,37 @@ compileExprTyped fnSigs env expected (Deref e) = do
 -- テストでのみ使用
 run :: [Instr] -> Either String Int
 run instrs = go instrs [] Map.empty
- where
-  go [] [v] _ = Right v
-  go [] _ _ = Left "invalid stack state after execution"
-  go (Push n : rest) stack vars = go rest (n : stack) vars
-  go (IAdd w : rest) (b : a : stack) vars = go rest (trunc w (a + b) : stack) vars
-  go (ISub w : rest) (b : a : stack) vars = go rest (trunc w (a - b) : stack) vars
-  go (IMul w : rest) (b : a : stack) vars = go rest (trunc w (a * b) : stack) vars
-  go (IDiv w : rest) (b : a : stack) vars
-    | b == 0 = Left "division by zero"
-    | otherwise = go rest (trunc w (a `quot` b) : stack) vars
-  go (INeg w : rest) (a : stack) vars = go rest (trunc w (negate a) : stack) vars
-  go (Load w off : rest) stack vars =
-    case Map.lookup off vars of
-      Just v -> go rest (trunc w v : stack) vars
-      Nothing -> Left "uninitialized variable"
-  go (Store w off : rest) (v : stack) vars = go rest stack (Map.insert off (trunc w v) vars)
-  go (ICmpEq : rest) (b : a : stack) vars = go rest ((if a == b then 1 else 0) : stack) vars
-  go (ICmpNe : rest) (b : a : stack) vars = go rest ((if a /= b then 1 else 0) : stack) vars
-  go (ICmpLt : rest) (b : a : stack) vars = go rest ((if a < b then 1 else 0) : stack) vars
-  go (ICmpLe : rest) (b : a : stack) vars = go rest ((if a <= b then 1 else 0) : stack) vars
-  go (ICmpGt : rest) (b : a : stack) vars = go rest ((if a > b then 1 else 0) : stack) vars
-  go (ICmpGe : rest) (b : a : stack) vars = go rest ((if a >= b then 1 else 0) : stack) vars
-  go (INot : rest) (a : stack) vars = go rest ((if a == 0 then 1 else 0) : stack) vars
-  go (ISext32 : rest) (a : stack) vars = go rest (trunc W32 a : stack) vars
-  -- vars はオフセットをキーとする抽象メモリなので、"アドレス"はオフセット値そのもの（%rbp=0とみなす）として表現する
-  go (LoadAddr off : rest) stack vars = go rest (off : stack) vars
-  go (LoadInd w : rest) (addr : stack) vars =
-    case Map.lookup addr vars of
-      Just v -> go rest (trunc w v : stack) vars
-      Nothing -> Left "uninitialized variable"
-  go _ _ _ = Left "stack underflow"
+  where
+    go [] [v] _ = Right v
+    go [] _ _ = Left "invalid stack state after execution"
+    go (Push n : rest) stack vars = go rest (n : stack) vars
+    go (IAdd w : rest) (b : a : stack) vars = go rest (trunc w (a + b) : stack) vars
+    go (ISub w : rest) (b : a : stack) vars = go rest (trunc w (a - b) : stack) vars
+    go (IMul w : rest) (b : a : stack) vars = go rest (trunc w (a * b) : stack) vars
+    go (IDiv w : rest) (b : a : stack) vars
+      | b == 0 = Left "division by zero"
+      | otherwise = go rest (trunc w (a `quot` b) : stack) vars
+    go (INeg w : rest) (a : stack) vars = go rest (trunc w (negate a) : stack) vars
+    go (Load w off : rest) stack vars =
+      case Map.lookup off vars of
+        Just v -> go rest (trunc w v : stack) vars
+        Nothing -> Left "uninitialized variable"
+    go (Store w off : rest) (v : stack) vars = go rest stack (Map.insert off (trunc w v) vars)
+    go (ICmpEq : rest) (b : a : stack) vars = go rest ((if a == b then 1 else 0) : stack) vars
+    go (ICmpNe : rest) (b : a : stack) vars = go rest ((if a /= b then 1 else 0) : stack) vars
+    go (ICmpLt : rest) (b : a : stack) vars = go rest ((if a < b then 1 else 0) : stack) vars
+    go (ICmpLe : rest) (b : a : stack) vars = go rest ((if a <= b then 1 else 0) : stack) vars
+    go (ICmpGt : rest) (b : a : stack) vars = go rest ((if a > b then 1 else 0) : stack) vars
+    go (ICmpGe : rest) (b : a : stack) vars = go rest ((if a >= b then 1 else 0) : stack) vars
+    go (INot : rest) (a : stack) vars = go rest ((if a == 0 then 1 else 0) : stack) vars
+    go (ISext32 : rest) (a : stack) vars = go rest (trunc W32 a : stack) vars
+    -- vars はオフセットをキーとする抽象メモリなので、"アドレス"はオフセット値そのもの（%rbp=0とみなす）として表現する
+    go (LoadAddr off : rest) stack vars = go rest (off : stack) vars
+    go (LoadInd w : rest) (addr : stack) vars =
+      case Map.lookup addr vars of
+        Just v -> go rest (trunc w v : stack) vars
+        Nothing -> Left "uninitialized variable"
+    go _ _ _ = Left "stack underflow"
 
 -- 実アセンブリの movl/movslq 等が行う切り詰め・符号拡張を再現する
 trunc :: Width -> Int -> Int
