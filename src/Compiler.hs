@@ -559,7 +559,7 @@ callEvidence fnDeclMap resolved env expr = do
       pure (nested ++ paramEv) -- 再帰的に取得 ＋＋ 既知の情報から取得
     combine a b = (++) <$> go a <*> go b
 
--- 関数（または暗黙main）の本文を辿り、(対象スロット, 証拠) を集める。compileStmtsFrom と同じ形
+-- 関数本体（または暗黙main）の本文を辿り、(対象スロット, 証拠) を集める。compileStmtsFrom と同じ形
 -- （スコープのpush/pop、SBlock/SIf/SWhileの再帰）だが、命令列の代わりに証拠を集める点だけが異なる
 collectEvidenceStmts ::
   Map String FnDecl -> ResolvedSlots -> Maybe String -> LocalEnv -> [Stmt] -> Either String (LocalEnv, Evidence)
