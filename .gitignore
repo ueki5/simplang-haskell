@@ -8,4 +8,5 @@ output/
 .ghc.environment.*
 .dist-newstyle-dap
 scratch/
+.vscode/
 
