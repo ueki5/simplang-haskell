@@ -654,18 +654,18 @@ programEvidence fnDeclMap resolved fnDecls stmts tailExpr = do
 fnDeclEvidence :: Map String FnDecl -> ResolvedSlots -> FnDecl -> Either String [(Slot, Either Slot (Maybe Type))]
 fnDeclEvidence fnDeclMap resolved (FnDecl name params _ (body, tailE)) = do
   -- pTraceShowM ("fnDeclEvidence実行", name)
-  let env0 = [paramLocalScope resolved name params] -- 仮引数をresolvedから検索してLocalEnvを取得
-  (env1, bodyEv) <- collectEvidenceStmts fnDeclMap resolved (Just name) env0 body -- 関数の本文から(LocalEnv、証拠)を取得
-  tailCallEv <- callEvidence fnDeclMap resolved env1 tailE -- 末尾式内のCallから実引数の証拠を取得
-  tailRet <- resolveExprType fnDeclMap resolved env1 tailE -- 末尾式から戻り値の証拠を取得
+  let env0 = [paramLocalScope resolved name params] -- 仮引数からLocalEnvを作成
+  (env1, bodyEv) <- collectEvidenceStmts fnDeclMap resolved (Just name) env0 body -- 関数の本文から(LocalEnv、証拠)を収集
+  tailCallEv <- callEvidence fnDeclMap resolved env1 tailE -- 末尾式内のCallから実引数(ParamSlot)の証拠を取得
+  tailRet <- resolveExprType fnDeclMap resolved env1 tailE -- 末尾式から戻り値(ReturnSlot)の証拠を取得
   -- pTraceShowM ("env0", env0)
   -- pTraceShowM ("env1", env1)
   -- pTraceShowM ("bodyEv", bodyEv)
   -- pTraceShowM ("tailCallEv", tailCallEv)
   -- pTraceShowM ("tailRet", tailRet)
   pure (bodyEv ++ tailCallEv ++ [(ReturnSlot name, tailRet)]) -- 本文、末尾式内の実引数、末尾式の戻り値からの証拠を連結して返却
+  -- 構造検証: main予約名・重複定義・最大引数数（旧buildFnSigsのチェックをそのまま踏襲する。型の中身は見ない）
 
--- 構造検証: main予約名・重複定義・最大引数数（旧buildFnSigsのチェックをそのまま踏襲する。型の中身は見ない）
 validateFnShapes :: [FnDecl] -> Either String ()
 validateFnShapes fnDecls = () <$ foldM addSig Map.empty fnDecls
   where
