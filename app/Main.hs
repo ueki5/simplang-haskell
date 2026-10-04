@@ -4,14 +4,14 @@ import CodeGen (codegen)
 import Compiler (compile)
 import Options.Applicative
 import Parser (parse, tokenize)
-import System.Directory (copyFile, getTemporaryDirectory, removeFile)
+import System.Directory (createDirectoryIfMissing)
 import System.Exit (exitFailure)
-import System.IO (hClose, hPutStr, openTempFile)
+import System.FilePath (takeBaseName, (</>))
 import System.Process (callProcess)
 
 data Options = Options
   { sourceFile :: FilePath,
-    outputFile :: FilePath,
+    outputFile :: Maybe FilePath,
     asmFile :: Maybe FilePath
   }
 
@@ -19,8 +19,8 @@ optionsParser :: Parser Options
 optionsParser =
   Options
     <$> argument str (metavar "FILE" <> help "Source file to compile")
-    <*> option str (long "output" <> short 'o' <> value "out" <> metavar "NAME" <> help "Output file name (default: out)")
-    <*> optional (option str (short 'S' <> metavar "FILE" <> help "Save assembly source to FILE"))
+    <*> optional (option str (long "output" <> short 'o' <> metavar "FILE" <> help "Output file name (default: FILE without extension)"))
+    <*> optional (option str (long "assembly" <> short 'S' <> metavar "FILE" <> help "Save assembly source to FILE"))
 
 main :: IO ()
 main = do
@@ -29,19 +29,18 @@ main = do
       info
         (optionsParser <**> helper)
         ( fullDesc
-            <> progDesc "Compile an arithmetic expression to a native binary"
-            <> header "hs006 - x86-64 native code generator"
+            <> progDesc "A simple programming language compiler written in Haskell"
+            <> header "simplang-haskell - x86-64 native code generator"
         )
   source <- readFile (sourceFile opts)
+  let outDir = "output"
+      baseName = takeBaseName (sourceFile opts)
+      outPath = maybe (outDir </> baseName) id (outputFile opts)
+      asmPath = maybe (outDir </> (baseName ++ ".s")) id (asmFile opts)
   case tokenize source >>= parse >>= compile of
     Left err -> putStrLn ("Error: " ++ err) >> exitFailure
     Right (fns, finalType, instrs) -> do
       let asm = codegen fns finalType instrs
-      tmpDir <- getTemporaryDirectory
-      (tmpPath, tmpHandle) <- openTempFile tmpDir "hs006.s"
-      hPutStr tmpHandle asm
-      hClose tmpHandle
-      asmPath <- case asmFile opts of
-        Just path -> copyFile tmpPath path >> removeFile tmpPath >> return path
-        Nothing -> return tmpPath
-      callProcess "gcc" [asmPath, "-g", "-o", outputFile opts]
+      _ <- createDirectoryIfMissing True outDir
+      writeFile asmPath asm
+      callProcess "gcc" [asmPath, "-g", "-o", outPath]
