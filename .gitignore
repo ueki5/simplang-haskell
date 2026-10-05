@@ -6,3 +6,7 @@ output/
 *.dyn_hi
 *.dyn_o
 .ghc.environment.*
+.dist-newstyle-dap
+scratch/
+.vscode/
+
