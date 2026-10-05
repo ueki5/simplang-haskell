@@ -337,29 +337,34 @@ main = hspec $ do
     let parseSrc src = tokenize src >>= parse
     it "引数無しのfn定義" $
       parseSrc "fn f() -> i64 {\n1\n}\n2"
-        `shouldBe` Right ([FnDecl "f" [] (TyInt W64) ([], Lit 1)], [], Lit 2)
+        `shouldBe` Right ([FnDecl "f" [] (Just (TyInt W64)) ([], Lit 1)], [], Lit 2)
     it "引数1個のfn定義" $
       parseSrc "fn f(a: i64) -> i64 {\na\n}\n2"
-        `shouldBe` Right ([FnDecl "f" [("a", TyInt W64)] (TyInt W64) ([], Var "a")], [], Lit 2)
+        `shouldBe` Right ([FnDecl "f" [("a", Just (TyInt W64))] (Just (TyInt W64)) ([], Var "a")], [], Lit 2)
     it "引数複数個のfn定義（型が混在してもパースできる。型検査は別）" $
       parseSrc "fn f(a: i64, b: i32, c: bool) -> i64 {\na\n}\n2"
         `shouldBe` Right
-          ( [FnDecl "f" [("a", TyInt W64), ("b", TyInt W32), ("c", TBool)] (TyInt W64) ([], Var "a")]
+          ( [ FnDecl
+                "f"
+                [("a", Just (TyInt W64)), ("b", Just (TyInt W32)), ("c", Just TBool)]
+                (Just (TyInt W64))
+                ([], Var "a")
+            ]
           , []
           , Lit 2
           )
     it "fn本体は文の列＋末尾式を持てる" $
       parseSrc "fn f() -> i64 {\nlet x: i64 = 1;\nx\n}\n2"
         `shouldBe` Right
-          ( [FnDecl "f" [] (TyInt W64) ([SLet "x" (TyInt W64) (Lit 1)], Var "x")]
+          ( [FnDecl "f" [] (Just (TyInt W64)) ([SLet "x" (TyInt W64) (Lit 1)], Var "x")]
           , []
           , Lit 2
           )
     it "fn定義は複数並べられる" $
       parseSrc "fn f() -> i64 {\n1\n}\nfn g() -> i64 {\n2\n}\n3"
         `shouldBe` Right
-          ( [ FnDecl "f" [] (TyInt W64) ([], Lit 1)
-            , FnDecl "g" [] (TyInt W64) ([], Lit 2)
+          ( [ FnDecl "f" [] (Just (TyInt W64)) ([], Lit 1)
+            , FnDecl "g" [] (Just (TyInt W64)) ([], Lit 2)
             ]
           , []
           , Lit 3
@@ -367,14 +372,47 @@ main = hspec $ do
     it "fn定義は暗黙main本体の文と自由に混在できる" $
       parseSrc "let a: i64 = 1;\nfn f() -> i64 {\n1\n}\nlet b: i64 = 2;\na + b"
         `shouldBe` Right
-          ( [FnDecl "f" [] (TyInt W64) ([], Lit 1)]
+          ( [FnDecl "f" [] (Just (TyInt W64)) ([], Lit 1)]
           , [SLet "a" (TyInt W64) (Lit 1), SLet "b" (TyInt W64) (Lit 2)]
           , Add (Var "a") (Var "b")
           )
     it "fn本体に末尾式が無ければエラー（ユニット型は採用しないため）" $
       parseSrc "fn f() -> i64 {\nlet x: i64 = 1;\n}\n2" `shouldSatisfy` isLeft
-    it "戻り値の型（->）が無ければエラー" $
-      parseSrc "fn f() {\n1\n}\n2" `shouldSatisfy` isLeft
+    it "パラメータの型注釈を省略したfn定義（コロンが無ければNothingとしてパースする）" $
+      parseSrc "fn add(a, b) -> i64 {\na + b\n}\n0"
+        `shouldBe` Right
+          ( [FnDecl "add" [("a", Nothing), ("b", Nothing)] (Just (TyInt W64)) ([], Add (Var "a") (Var "b"))]
+          , []
+          , Lit 0
+          )
+    it "戻り値の型注釈を省略したfn定義（'->'が無ければNothingとしてパースする）" $
+      parseSrc "fn add(a: i64, b: i64) {\na + b\n}\n0"
+        `shouldBe` Right
+          ( [ FnDecl
+                "add"
+                [("a", Just (TyInt W64)), ("b", Just (TyInt W64))]
+                Nothing
+                ([], Add (Var "a") (Var "b"))
+            ]
+          , []
+          , Lit 0
+          )
+    it "パラメータ・戻り値の型注釈を両方省略したfn定義" $
+      parseSrc "fn add(a, b) {\na + b\n}\n0"
+        `shouldBe` Right
+          ([FnDecl "add" [("a", Nothing), ("b", Nothing)] Nothing ([], Add (Var "a") (Var "b"))], [], Lit 0)
+    it "パラメータごとに型注釈の省略・非省略が混在してもパースできる" $
+      parseSrc "fn add(a: i64, b) -> i64 {\na + b\n}\n0"
+        `shouldBe` Right
+          ( [ FnDecl
+                "add"
+                [("a", Just (TyInt W64)), ("b", Nothing)]
+                (Just (TyInt W64))
+                ([], Add (Var "a") (Var "b"))
+            ]
+          , []
+          , Lit 0
+          )
     it "引数無しの呼び出し式" $
       parseSrc "f()" `shouldBe` Right ([], [], Call "f" [])
     it "引数1個の呼び出し式" $
@@ -388,7 +426,7 @@ main = hspec $ do
     it "return文（値付き）" $
       parseSrc "fn f() -> i64 {\nreturn 1;\n2\n}\n3"
         `shouldBe` Right
-          ( [FnDecl "f" [] (TyInt W64) ([SReturn (Lit 1)], Lit 2)]
+          ( [FnDecl "f" [] (Just (TyInt W64)) ([SReturn (Lit 1)], Lit 2)]
           , []
           , Lit 3
           )
@@ -712,6 +750,24 @@ main = hspec $ do
       compileSource
         "fn is_even(n: i64) -> bool {\nif n == 0 {\nreturn true;\n}\nis_odd(n - 1)\n}\nfn is_odd(n: i64) -> bool {\nif n == 0 {\nreturn false;\n}\nis_even(n - 1)\n}\nis_even(4)"
         `shouldSatisfy` isRight
+    it "呼び出されない関数の省略パラメータはi64にデフォルトされ成功する" $
+      compileSource "fn f(a) -> i64 {\na\n}\n1" `shouldSatisfy` isRight
+    it "複数の呼び出し箇所が同じ型で一致すれば省略パラメータの型は成功裏に推論される" $
+      compileSource "fn add(a, b) -> i32 {\na + b\n}\nlet x = add(1i32, 2i32);\nadd(3i32, 4i32)"
+        `shouldSatisfy` isRight
+    it "複数の呼び出し箇所で矛盾する型を渡すと省略パラメータの推論はエラーになる" $
+      compileSource "fn add(a, b) -> i64 {\na + b\n}\nlet x = add(1i32, 2i32);\nadd(3i64, 4i64)"
+        `shouldBe` Left "type mismatch: i32 and i64"
+    it "外部から呼び出しの手がかりが全く無い純粋な自己再帰は循環にならずi64にデフォルトされ成功する" $
+      compileSource "fn spin(n) {\nspin(n)\n}\n1" `shouldSatisfy` isRight
+    it "相互再帰する2関数の両方でパラメータ型を省略し、かつ外部からの型情報が全く無いと循環依存でエラーになる" $
+      compileSource "fn a(x) -> i64 {\nb(x)\n}\nfn b(y) -> i64 {\na(y)\n}\n42" `shouldSatisfy` isLeft
+    it "相互再帰する2関数の両方で戻り値型を省略し、かつ外部からの型情報が全く無いと循環依存でエラーになる" $
+      compileSource "fn a(x: i64) {\nb(x)\n}\nfn b(y: i64) {\na(y)\n}\n42" `shouldSatisfy` isLeft
+    it "恒等関数（パラメータ・戻り値とも省略）は呼び出し箇所の実引数の型から推論される" $
+      compileSource "fn id(x) {\nx\n}\nid(5i64)" `shouldSatisfy` isRight
+    it "ポインタを渡す呼び出し箇所からパラメータ型（ポインタ型）が推論される" $
+      compileSource "fn deref_it(p) {\n*p\n}\nlet x: i64 = 42i64;\nderef_it(&x)" `shouldSatisfy` isRight
 
   describe "run（VM）" $ do
     it "Load/Storeで変数の値を保持する" $
@@ -1059,6 +1115,20 @@ main = hspec $ do
       result <- compileSourceAndRun
         "let a: i64 = 1;\nfn double(x: i64) -> i64 {\nx * 2\n}\nlet b: i64 = double(a);\nfn triple(x: i64) -> i64 {\nx * 3\n}\ntriple(b)"
       result `shouldBe` "6"
+    it "パラメータ・戻り値の型注釈を両方省略した関数を呼び出し箇所の実引数から推論して実行する" $ do
+      result <- compileSourceAndRun "fn add(a, b) {\na + b\n}\nadd(3i64, 4i64)"
+      result `shouldBe` "7"
+    it "戻り値の型注釈のみ省略した自己再帰（階乗）を実行する（returnの無型リテラルからi64が推論される）" $ do
+      result <- compileSourceAndRun
+        "fn fact(n: i64) {\nif n <= 1 {\nreturn 1;\n}\nn * fact(n - 1)\n}\nfact(10)"
+      result `shouldBe` "3628800"
+    it "パラメータ・戻り値の型注釈を両方省略した自己再帰（階乗）を実行する" $ do
+      result <- compileSourceAndRun
+        "fn fact(n) {\nif n <= 1 {\nreturn 1;\n}\nn * fact(n - 1)\n}\nfact(10i64)"
+      result `shouldBe` "3628800"
+    it "恒等関数（パラメータ・戻り値とも省略）を実行する" $ do
+      result <- compileSourceAndRun "fn id(x) {\nx\n}\nid(5i64)"
+      result `shouldBe` "5"
 
   describe "compile + codegen + gcc（ポインタ型の結合テスト）" $ do
     it "&で取得したアドレスを*で読み戻す（仕様例）" $ do
