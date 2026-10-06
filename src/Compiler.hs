@@ -960,8 +960,14 @@ compileExprTyped fnSigs env expected (AddrOf e) = do
     else Left ("type mismatch: expected " ++ typeName expected ++ ", found " ++ typeName (TPtr pointeeTy))
 -- [let ]xxx = *ptr;（expectedをそのまま子へ TPtr expected として伝播する。ToI64/ToI32と異なり一様伝播を崩さない）
 compileExprTyped fnSigs env expected (Deref e) = do
-  ei <- compileExprTyped fnSigs env (TPtr expected) e
-  Right (ei ++ [LoadInd (storageWidth expected)])
+  -- inferMaybeType の Deref 節が「ポインタでない」「型なしリテラル」を既にエラーにするため、
+  -- 成功時は必ず Just（指す先の型）になる
+  innerTy <-
+    inferMaybeType fnSigs env (Deref e)
+      >>= maybe (Left "internal error: Deref inferred as Nothing") Right
+  ei <- compileExprTyped fnSigs env (TPtr innerTy) e
+  conv <- coerce innerTy expected
+  Right (ei ++ [LoadInd (storageWidth innerTy)] ++ conv)
 
 -- Virtual machine
 
