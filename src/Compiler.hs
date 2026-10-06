@@ -316,7 +316,8 @@ compileFnDecl fnSigs (FnDecl name params _ (stmts, tailExpr)) = do
 unifyType :: Type -> Type -> Either String Type
 unifyType t1 t2
   | t1 == t2 = Right t1
-  | otherwise = Left ("type mismatch: " ++ typeName t1 ++ " and " ++ typeName t2)
+unifyType (TyInt _) (TyInt _) = Right (TyInt W64)
+unifyType t1 t2 = Left ("type mismatch: " ++ typeName t1 ++ " and " ++ typeName t2)
 
 unifyMaybeType :: Maybe Type -> Maybe Type -> Either String (Maybe Type)
 unifyMaybeType Nothing Nothing = Right Nothing
@@ -475,6 +476,14 @@ addressOfSlot fnDeclMap resolved env (Deref e) = do
     Right (Just other) -> Left ("type mismatch: expected pointer, found " ++ typeName other)
     Right Nothing -> Left "type mismatch: cannot take address of a dereferenced untyped literal"
 addressOfSlot _ _ _ e = Left ("invalid operand for &: not an lvalue: " ++ show e)
+
+-- スタック先頭の actual 型の値を expected 型へ変換する命令列（整数の幅違いのみ暗黙変換する）
+coerce :: Type -> Type -> Either String [Instr]
+coerce actual expected
+  | actual == expected = Right []
+coerce (TyInt _) (TyInt _) = Right [ISext32]
+coerce actual expected =
+  Left ("type mismatch: expected " ++ typeName expected ++ ", found " ++ typeName actual)
 
 -- inferMaybeTypeのLocalEnv版。Var/CallがまだResolvedSlotsに無いスロットを指していれば
 -- そのスロットへブロックし、それ以外の構造はinferMaybeTypeと完全に同一のロジックで型を求める
@@ -759,6 +768,19 @@ resolveFnSigs fnDecls stmts tailExpr = do
         ]
     )
 
+-- Add/Sub/Mul/Div 共通（expected が TBool/TPtr の場合の既存エラー節はそのまま先に置く）
+compileArith :: FnSigs -> Env -> Type -> Expr -> Expr -> Expr -> (Width -> Instr) -> Either String [Instr]
+compileArith fnSigs env expected node l r mkInstr = do
+  -- node自身の推論型＝左右の被演算子の合流型。リテラルのみ（Nothing）なら expected を採用する
+  opTy <- maybe expected id <$> inferMaybeType fnSigs env node
+  case opTy of
+    TyInt w -> do
+      li <- compileExprTyped fnSigs env opTy l
+      ri <- compileExprTyped fnSigs env opTy r
+      conv <- coerce opTy expected
+      Right (li ++ ri ++ [mkInstr w] ++ conv)
+    other -> Left ("type mismatch: expected " ++ typeName expected ++ ", found " ++ typeName other)
+
 -- 期待する型（expected）を一様に伝播させながら命令を抽出する。
 -- Var の実際の型が expected と食い違えば型不一致エラーとする。
 -- 算術演算・整数リテラルは TyInt 専用、Not/BoolLit/Eq/Neq は TBool 専用であり、
@@ -769,10 +791,8 @@ compileExprTyped _ _ TBool (Lit _) = Left "type mismatch: expected bool, found i
 compileExprTyped _ _ expected@(TPtr _) (Lit _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found integer literal")
 compileExprTyped _ _ (TyInt _) (Lit n) = Right [Push n]
--- [let ]xxx = 1234i64; / 1234i32;（サフィックスで型が確定済み。Varと同様、expectedと食い違えばエラー）
-compileExprTyped _ _ expected (LitTyped n w)
-  | expected == TyInt w = Right [Push n]
-  | otherwise = Left ("type mismatch: expected " ++ typeName expected ++ ", found " ++ typeName (TyInt w))
+-- [let ]xxx = 1234i64; / 1234i32;（サフィックスで型が確定済み。coerceで暗黙の型変換）
+compileExprTyped _ _ expected (LitTyped n w) = (++) [Push n] <$> coerce (TyInt w) expected
 -- [let ]xxx = true; / false;（bool以外のコンテキストでは不可）
 compileExprTyped _ _ TBool (BoolLit b) = Right [Push (if b then 1 else 0)]
 compileExprTyped _ _ expected@(TyInt _) (BoolLit _) =
@@ -783,42 +803,31 @@ compileExprTyped _ _ expected@(TPtr _) (BoolLit _) =
 compileExprTyped _ env expected (Var name) =
   case lookupVar name env of
     Nothing -> Left ("undeclared variable: " ++ name)
-    Just (off, ty)
-      | ty /= expected ->
-          Left ("type mismatch: expected " ++ typeName expected ++ ", found " ++ typeName ty)
-      | otherwise -> Right [Load (storageWidth ty) off]
+    Just (off, ty) -> (++) [Load (storageWidth ty) off] <$> coerce ty expected
 -- [let ]xxx = expr + expr;
 compileExprTyped _ _ TBool (Add _ _) = Left "type mismatch: expected bool, found arithmetic expression"
 compileExprTyped _ _ expected@(TPtr _) (Add _ _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found arithmetic expression")
-compileExprTyped fnSigs env expected@(TyInt w) (Add l r) = do
-  li <- compileExprTyped fnSigs env expected l
-  ri <- compileExprTyped fnSigs env expected r
-  Right (li ++ ri ++ [IAdd w])
+compileExprTyped fnSigs env expected@(TyInt _) node@(Add l r) = do
+  compileArith fnSigs env expected node l r IAdd
 -- [let ]xxx = expr - expr;
 compileExprTyped _ _ TBool (Sub _ _) = Left "type mismatch: expected bool, found arithmetic expression"
 compileExprTyped _ _ expected@(TPtr _) (Sub _ _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found arithmetic expression")
-compileExprTyped fnSigs env expected@(TyInt w) (Sub l r) = do
-  li <- compileExprTyped fnSigs env expected l
-  ri <- compileExprTyped fnSigs env expected r
-  Right (li ++ ri ++ [ISub w])
+compileExprTyped fnSigs env expected@(TyInt _) node@(Sub l r) = do
+  compileArith fnSigs env expected node l r ISub
 -- [let ]xxx = expr * expr;
 compileExprTyped _ _ TBool (Mul _ _) = Left "type mismatch: expected bool, found arithmetic expression"
 compileExprTyped _ _ expected@(TPtr _) (Mul _ _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found arithmetic expression")
-compileExprTyped fnSigs env expected@(TyInt w) (Mul l r) = do
-  li <- compileExprTyped fnSigs env expected l
-  ri <- compileExprTyped fnSigs env expected r
-  Right (li ++ ri ++ [IMul w])
+compileExprTyped fnSigs env expected@(TyInt _) node@(Mul l r) = do
+  compileArith fnSigs env expected node l r IMul
 -- [let ]xxx = expr / expr;
 compileExprTyped _ _ TBool (Div _ _) = Left "type mismatch: expected bool, found arithmetic expression"
 compileExprTyped _ _ expected@(TPtr _) (Div _ _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found arithmetic expression")
-compileExprTyped fnSigs env expected@(TyInt w) (Div l r) = do
-  li <- compileExprTyped fnSigs env expected l
-  ri <- compileExprTyped fnSigs env expected r
-  Right (li ++ ri ++ [IDiv w])
+compileExprTyped fnSigs env expected@(TyInt _) node@(Div l r) = do
+  compileArith fnSigs env expected node l r IDiv
 -- [let ]xxx = -expr;
 compileExprTyped _ _ TBool (Neg _) = Left "type mismatch: expected bool, found arithmetic expression"
 compileExprTyped _ _ expected@(TPtr _) (Neg _) =
@@ -906,17 +915,19 @@ compileExprTyped fnSigs env TBool (Ge l r) = do
       li <- compileExprTyped fnSigs env opTy l
       ri <- compileExprTyped fnSigs env opTy r
       Right (li ++ ri ++ [ICmpGe])
--- [let ]xxx = to_i64(expr);（結果は常にi64。被演算子はexpectedとは独立に常にi32を要求する）
-compileExprTyped _ _ TBool (ToI64 _) = Left "type mismatch: expected bool, found i64"
-compileExprTyped _ _ expected@(TyInt W32) (ToI64 _) =
-  Left ("type mismatch: expected " ++ typeName expected ++ ", found i64")
-compileExprTyped _ _ expected@(TPtr _) (ToI64 _) =
-  Left ("type mismatch: expected " ++ typeName expected ++ ", found i64")
-compileExprTyped fnSigs env (TyInt W64) (ToI64 e) = do
-  ei <- compileExprTyped fnSigs env (TyInt W32) e
-  Right (ei ++ [ISext32])
+-- [let ]xxx = to_i64(expr);（結果は常にi64。被演算子は自身の推論型で処理）
+compileExprTyped fnSigs env expected (ToI64 e) = do
+  srcTy <- maybe (TyInt W32) id <$> inferMaybeType fnSigs env e
+  case srcTy of
+    TyInt _ -> do
+      ei <- compileExprTyped fnSigs env srcTy e
+      toI64 <- coerce srcTy (TyInt W64)
+      conv <- coerce (TyInt W64) expected
+      Right (ei ++ toI64 ++ conv)
+    other -> Left ("type mismatch: expected i32 or i64, found " ++ typeName other)
 -- [let ]xxx = to_i32(expr);（結果は常にi32。被演算子はexpectedとは独立に常にi64を要求する）
-compileExprTyped _ _ TBool (ToI32 _) = Left "type mismatch: expected bool, found i32"
+compileExprTyped _ _ TBool (ToI32 _) =
+  Left "type mismatch: expected bool, found i32"
 compileExprTyped _ _ expected@(TyInt W64) (ToI32 _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found i32")
 compileExprTyped _ _ expected@(TPtr _) (ToI32 _) =
@@ -929,8 +940,6 @@ compileExprTyped fnSigs env expected (Call name args) =
   case Map.lookup name fnSigs of
     Nothing -> Left ("undeclared function: " ++ name)
     Just (paramTys, retTy)
-      | retTy /= expected ->
-          Left ("type mismatch: expected " ++ typeName expected ++ ", found " ++ typeName retTy)
       | length paramTys /= length args ->
           Left
             ( "wrong number of arguments for "
@@ -942,7 +951,7 @@ compileExprTyped fnSigs env expected (Call name args) =
             )
       | otherwise -> do
           argInstrs <- zipWithM (compileExprTyped fnSigs env) paramTys args
-          Right (concat argInstrs ++ [ICall name (length args)])
+          (++) (concat argInstrs ++ [ICall name (length args)]) <$> coerce retTy expected
 -- [let ]xxx = &lvalue;（lvalueの実効アドレスを計算する。expectedはlvalue自身の型をTPtrで包んだものでなければならない）
 compileExprTyped fnSigs env expected (AddrOf e) = do
   (pointeeTy, instrs) <- addressOf fnSigs env e
