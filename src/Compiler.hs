@@ -485,6 +485,23 @@ coerce (TyInt _) (TyInt _) = Right [ISext32]
 coerce actual expected =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found " ++ typeName actual)
 
+-- to_i64/to_i32 の共通処理。子を自身の推論型でコンパイルして幅 w へ変換し、その結果を expected へ変換する。
+-- 子がリテラルだけ（Nothing）の場合は w と逆の幅とみなす（to_i64(5000000000) のラップや
+-- ToI32 (Lit 64) → Push 64, ISext32 という従来の命令列を維持するため）
+compileToWidth :: FnSigs -> Env -> Type -> Width -> Expr -> Either String [Instr]
+compileToWidth fnSigs env expected w e = do
+  srcTy <- maybe (TyInt (otherWidth w)) id <$> inferMaybeType fnSigs env e
+  case srcTy of
+    TyInt _ -> do
+      ei <- compileExprTyped fnSigs env srcTy e
+      toW <- coerce srcTy (TyInt w)
+      conv <- coerce (TyInt w) expected
+      Right (ei ++ toW ++ conv)
+    other -> Left ("type mismatch: expected i32 or i64, found " ++ typeName other)
+  where
+    otherWidth W32 = W64
+    otherWidth W64 = W32
+
 -- inferMaybeTypeのLocalEnv版。Var/CallがまだResolvedSlotsに無いスロットを指していれば
 -- そのスロットへブロックし、それ以外の構造はinferMaybeTypeと完全に同一のロジックで型を求める
 resolveExprType :: Map String FnDecl -> ResolvedSlots -> LocalEnv -> Expr -> SlotResult
@@ -915,26 +932,11 @@ compileExprTyped fnSigs env TBool (Ge l r) = do
       li <- compileExprTyped fnSigs env opTy l
       ri <- compileExprTyped fnSigs env opTy r
       Right (li ++ ri ++ [ICmpGe])
--- [let ]xxx = to_i64(expr);（結果は常にi64。被演算子は自身の推論型で処理）
-compileExprTyped fnSigs env expected (ToI64 e) = do
-  srcTy <- maybe (TyInt W32) id <$> inferMaybeType fnSigs env e
-  case srcTy of
-    TyInt _ -> do
-      ei <- compileExprTyped fnSigs env srcTy e
-      toI64 <- coerce srcTy (TyInt W64)
-      conv <- coerce (TyInt W64) expected
-      Right (ei ++ toI64 ++ conv)
-    other -> Left ("type mismatch: expected i32 or i64, found " ++ typeName other)
--- [let ]xxx = to_i32(expr);（結果は常にi32。被演算子はexpectedとは独立に常にi64を要求する）
-compileExprTyped _ _ TBool (ToI32 _) =
-  Left "type mismatch: expected bool, found i32"
-compileExprTyped _ _ expected@(TyInt W64) (ToI32 _) =
-  Left ("type mismatch: expected " ++ typeName expected ++ ", found i32")
-compileExprTyped _ _ expected@(TPtr _) (ToI32 _) =
-  Left ("type mismatch: expected " ++ typeName expected ++ ", found i32")
-compileExprTyped fnSigs env (TyInt W32) (ToI32 e) = do
-  ei <- compileExprTyped fnSigs env (TyInt W64) e
-  Right (ei ++ [ISext32])
+
+-- [let ]xxx = to_i64(expr);（右辺は常にi64。被演算子は自身の推論型で処理）
+compileExprTyped fnSigs env expected (ToI64 e) = compileToWidth fnSigs env expected W64 e
+-- [let ]xxx = to_i32(expr);（右辺は常にi32。被演算子は自身の推論型で処理）
+compileExprTyped fnSigs env expected (ToI32 e) = compileToWidth fnSigs env expected W32 e
 -- [let ]xxx = f(expr, ...);（引数は宣言順にシグネチャの型で厳密検査し、暗黙変換は行わない）
 compileExprTyped fnSigs env expected (Call name args) =
   case Map.lookup name fnSigs of
