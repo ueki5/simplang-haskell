@@ -200,39 +200,39 @@ compileExprTyped fnSigs env expected (Deref e) = do
 
 ### 7.2 期待値の書き換えが必要な既存テスト（`test/Spec.hs`）
 
-オフセットは、テストソース中の`x: i32`を`-4`、`y: i64`を`-12`に割り付けた配置で記す。行番号はstep016着手時点のもの。
+オフセットは、テストソース中の`x: i32`を`-4`、`y: i64`を`-12`に割り付けた配置で記す。行番号はstep016着手時点（`test/Spec.hs`整形後）のもの。
 
 | 行 | ソース（抜粋） | 現行の期待値 | step016後の期待値 |
 |---|---|---|---|
-| 543 | `let z: i64 = x + y;` | `expected i64, found i32` | 成功。`… Load W32 (-4), ISext32, Load W64 (-12), IAdd W64, Store W64 (-20), Load W64 (-20)` |
-| 546 | `y = x + 1;` | `expected i64, found i32` | 成功。`… Load W32 (-4), Push 1, IAdd W32, ISext32, Store W64 (-12), Load W64 (-12)`（i32で演算してから拡大） |
-| 549 | 末尾式`x + y` | `i32 and i64` | 成功。型は`TyInt W64`、`… Load W32 (-4), ISext32, Load W64 (-12), IAdd W64` |
-| 552 | `let z: i32 = y;` | `expected i32, found i64` | 成功。`… Load W64 (-12), ISext32, Store W32 (-16), Load W32 (-16)` |
-| 565 | `let x: i32 = 9999i64;` | `expected i32, found i64` | `Right ([], TyInt W32, [Push 9999, ISext32, Store W32 (-4), Load W32 (-4)])` |
-| 568 | `let x: i64 = 9999i32;` | `expected i64, found i32` | `Right ([], TyInt W64, [Push 9999, ISext32, Store W64 (-8), Load W64 (-8)])` |
-| 579 | `9999i32 + 5i64` | `i32 and i64` | `Right ([], TyInt W64, [Push 9999, ISext32, Push 5, IAdd W64])` |
-| 591 | 末尾式`x == y` | `i32 and i64` | 成功。型は`TBool`、`… Load W32 (-4), ISext32, Load W64 (-12), ICmpEq` |
-| 594 | `let z: bool = x == y;` | `i32 and i64` | 成功（591と同じ比較の後に`Store W32 (-16)`） |
-| 600 | 末尾式`x < y` | `i32 and i64` | 成功（591と同形で`ICmpLt`） |
-| 615 | `to_i64(x)`（x: i64） | `expected i32, found i64` | 成功・恒等。`Right ([], TyInt W64, [Push 1, Store W64 (-8), Load W64 (-8)])` |
-| 618 | `to_i32(x)`（x: i32） | `expected i64, found i32` | 成功・恒等。`Right ([], TyInt W32, [Push 1, Store W32 (-4), Load W32 (-4)])` |
-| 621 | `to_i64(x)`（x: bool） | `expected i32, found bool` | エラーのまま。メッセージは`expected i32 or i64, found bool` |
-| 624 | `to_i32(x)`（x: bool） | `expected i64, found bool` | エラーのまま。メッセージは`expected i32 or i64, found bool` |
-| 627 | `let y: i32 = to_i64(x);`（x: i32） | `expected i32, found i64` | 成功。`… Load W32 (-4), ISext32, ISext32, Store W32 (-8), Load W32 (-8)` |
-| 630 | `let y: i64 = to_i32(x);`（x: i64） | `expected i64, found i32` | 成功。`… Load W64 (-8), ISext32, ISext32, Store W64 (-16), Load W64 (-16)` |
-| 642 | `let b: i64 = *a;`（a: i64） | `expected &i64, found i64` | エラーのまま。メッセージは`expected pointer, found i64` |
-| 691 | `let y = x + 1i64;`（x: i32） | `i32 and i64` | 成功。yはi64に推論され、`… Load W32 (-4), ISext32, Push 1, IAdd W64, Store W64 (-12), Load W64 (-12)` |
-| 733 | `f(x)`（仮引数i64、x: i32） | `expected i64, found i32` | 成功。暗黙main側は`… Load W32 (-4), ISext32, ICall "f" 1`。テスト名「暗黙変換は行わない」を改める |
-| 736 | `let x: i32 = f();`（戻り値i64） | `expected i32, found i64` | 成功。`ICall "f" 0, ISext32, Store W32 (-4), Load W32 (-4)` |
-| 759 | `add(1i32, 2i32)`と`add(3i64, 4i64)` | `i32 and i64` | 成功（省略された仮引数はi64に合流して推論される）。テスト名を改める |
-| 911（Integration） | `let x: i64 = 9999i32;\nx` | コンパイルエラー | 実行結果`"9999"`を検証するテストへ書き換える |
+| 612 | `let z: i64 = x + y;` | `expected i64, found i32` | 成功。`… Load W32 (-4), ISext32, Load W64 (-12), IAdd W64, Store W64 (-20), Load W64 (-20)` |
+| 615 | `y = x + 1;` | `expected i64, found i32` | 成功。`… Load W32 (-4), Push 1, IAdd W32, ISext32, Store W64 (-12), Load W64 (-12)`（i32で演算してから拡大） |
+| 618 | 末尾式`x + y` | `i32 and i64` | 成功。型は`TyInt W64`、`… Load W32 (-4), ISext32, Load W64 (-12), IAdd W64` |
+| 621 | `let z: i32 = y;` | `expected i32, found i64` | 成功。`… Load W64 (-12), ISext32, Store W32 (-16), Load W32 (-16)` |
+| 634 | `let x: i32 = 9999i64;` | `expected i32, found i64` | `Right ([], TyInt W32, [Push 9999, ISext32, Store W32 (-4), Load W32 (-4)])` |
+| 637 | `let x: i64 = 9999i32;` | `expected i64, found i32` | `Right ([], TyInt W64, [Push 9999, ISext32, Store W64 (-8), Load W64 (-8)])` |
+| 648 | `9999i32 + 5i64` | `i32 and i64` | `Right ([], TyInt W64, [Push 9999, ISext32, Push 5, IAdd W64])` |
+| 660 | 末尾式`x == y` | `i32 and i64` | 成功。型は`TBool`、`… Load W32 (-4), ISext32, Load W64 (-12), ICmpEq` |
+| 663 | `let z: bool = x == y;` | `i32 and i64` | 成功（660と同じ比較の後に`Store W32 (-16)`） |
+| 669 | 末尾式`x < y` | `i32 and i64` | 成功（660と同形で`ICmpLt`） |
+| 684 | `to_i64(x)`（x: i64） | `expected i32, found i64` | 成功・恒等。`Right ([], TyInt W64, [Push 1, Store W64 (-8), Load W64 (-8)])` |
+| 687 | `to_i32(x)`（x: i32） | `expected i64, found i32` | 成功・恒等。`Right ([], TyInt W32, [Push 1, Store W32 (-4), Load W32 (-4)])` |
+| 690 | `to_i64(x)`（x: bool） | `expected i32, found bool` | エラーのまま。メッセージは`expected i32 or i64, found bool` |
+| 693 | `to_i32(x)`（x: bool） | `expected i64, found bool` | エラーのまま。メッセージは`expected i32 or i64, found bool` |
+| 696 | `let y: i32 = to_i64(x);`（x: i32） | `expected i32, found i64` | 成功。`… Load W32 (-4), ISext32, ISext32, Store W32 (-8), Load W32 (-8)` |
+| 699 | `let y: i64 = to_i32(x);`（x: i64） | `expected i64, found i32` | 成功。`… Load W64 (-8), ISext32, ISext32, Store W64 (-16), Load W64 (-16)` |
+| 711 | `let b: i64 = *a;`（a: i64） | `expected &i64, found i64` | エラーのまま。メッセージは`expected pointer, found i64` |
+| 760 | `let y = x + 1i64;`（x: i32） | `i32 and i64` | 成功。yはi64に推論され、`… Load W32 (-4), ISext32, Push 1, IAdd W64, Store W64 (-12), Load W64 (-12)` |
+| 802 | `f(x)`（仮引数i64、x: i32） | `expected i64, found i32` | 成功。暗黙main側は`… Load W32 (-4), ISext32, ICall "f" 1`。テスト名「暗黙変換は行わない」を改める |
+| 805 | `let x: i32 = f();`（戻り値i64） | `expected i32, found i64` | 成功。`ICall "f" 0, ISext32, Store W32 (-4), Load W32 (-4)` |
+| 828 | `add(1i32, 2i32)`と`add(3i64, 4i64)` | `i32 and i64` | 成功（省略された仮引数はi64に合流して推論される）。テスト名を改める |
+| 980（Integration） | `let x: i64 = 9999i32;\nx` | コンパイルエラー | 実行結果`"9999"`を検証するテストへ書き換える |
 
 ### 7.3 変化しないことを確認する既存テスト（回帰確認として維持）
 
-- **bool・ポインタ関連のエラー**: 556・559（bool↔整数リテラル）、571（`let x: bool = 9999i64`。`coerce`でも同じメッセージ）、580（`true + 1`）、583〜589（否定・比較結果の文脈）、603〜613（bool同士の大小比較）、633（`to_i64(x) == true`）、639・651（`&`の結果の誤用、ポインタの加算）、688（`let x = 5 + true`）、if/whileの条件式のエラー。いずれもメッセージを含めて不変
-- **命令列が完全一致するテスト**: 574（`9999i32 + 5`は`opTy`がi32になり変換無し）、664〜684（`let`の型注釈省略、`*p`のDeref、`f()`の戻り値）、raw ASTの`ToI32 (Lit 64)`（子はリテラルのみなのでi64とみなされ、従来と同じ`Push 64, ISext32`）
-- **Integrationの`to_i64`/`to_i32`**（964〜974）: 値保存・縮小のラップアラウンド・括弧なし構文・ラウンドトリップ。命令列が従来と同一になるため結果も不変
-- **fnシグネチャ推論**: 自己再帰・循環検出（762〜766）、恒等関数・ポインタ引数からの推論
+- **bool・ポインタ関連のエラー**: 625・628（bool↔整数リテラル）、640（`let x: bool = 9999i64`。`coerce`でも同じメッセージ）、649（`true + 1`）、652〜658（否定・比較結果の文脈）、672〜682（bool同士の大小比較）、702（`to_i64(x) == true`）、708・720（`&`の結果の誤用、ポインタの加算）、757（`let x = 5 + true`）、if/whileの条件式のエラー。いずれもメッセージを含めて不変
+- **命令列が完全一致するテスト**: 643（`9999i32 + 5`は`opTy`がi32になり変換無し）、733〜753（`let`の型注釈省略、`*p`のDeref、`f()`の戻り値）、raw ASTの`ToI32 (Lit 64)`（子はリテラルのみなのでi64とみなされ、従来と同じ`Push 64, ISext32`）
+- **Integrationの`to_i64`/`to_i32`**（1033〜1043）: 値保存・縮小のラップアラウンド・括弧なし構文・ラウンドトリップ。命令列が従来と同一になるため結果も不変
+- **fnシグネチャ推論**: 自己再帰・循環検出（831〜835）、恒等関数・ポインタ引数からの推論
 
 ### 7.4 追加するテスト
 
