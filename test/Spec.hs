@@ -1263,7 +1263,7 @@ main = hspec $ do
 
 compileAndRun :: Expr -> IO String
 compileAndRun expr =
-  withSystemTempDirectory "hs006" $ \tmpDir -> do
+  withSystemTempDirectory "simplang-haskell" $ \tmpDir -> do
     let asmPath = tmpDir </> "out.s"
         binPath = tmpDir </> "out"
     case compile ([], [], expr) of
