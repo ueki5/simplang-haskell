@@ -210,7 +210,7 @@ compileExprTyped fnSigs env expected (Deref e) = do
 | 621 | `let z: i32 = y;` | `expected i32, found i64` | 成功。`… Load W64 (-12), ISext32, Store W32 (-16), Load W32 (-16)` |
 | 634 | `let x: i32 = 9999i64;` | `expected i32, found i64` | `Right ([], TyInt W32, [Push 9999, ISext32, Store W32 (-4), Load W32 (-4)])` |
 | 637 | `let x: i64 = 9999i32;` | `expected i64, found i32` | `Right ([], TyInt W64, [Push 9999, ISext32, Store W64 (-8), Load W64 (-8)])` |
-| 648 | `9999i32 + 5i64` | `i32 and i64` | `Right ([], TyInt W64, [Push 9999, ISext32, Push 5, IAdd W64])` |
+| 645 | `9999i32 + 5i64` | `i32 and i64` | `Right ([], TyInt W64, [Push 9999, ISext32, Push 5, IAdd W64])` |
 | 660 | 末尾式`x == y` | `i32 and i64` | 成功。型は`TBool`、`… Load W32 (-4), ISext32, Load W64 (-12), ICmpEq` |
 | 663 | `let z: bool = x == y;` | `i32 and i64` | 成功（660と同じ比較の後に`Store W32 (-16)`） |
 | 669 | 末尾式`x < y` | `i32 and i64` | 成功（660と同形で`ICmpLt`） |

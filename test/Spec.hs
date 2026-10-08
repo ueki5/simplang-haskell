@@ -608,18 +608,18 @@ main = hspec $ do
         `shouldBe` Left "variable already declared: x"
     it "型注釈がi32/i64/bool以外はエラー" $
       compileSource "let x: i16 = 1;\nx" `shouldBe` Left "unsupported type: i16"
-    it "let初期化式でi32変数とi64変数を混在させるとエラー" $
+    it "!ueki5! let初期化式でi32変数とi64変数を混在させる（暗黙の変換）" $
       compileSource "let x: i32 = 1;\nlet y: i64 = 2;\nlet z: i64 = x + y;\nz"
-        `shouldBe` Left "type mismatch: expected i64, found i32"
-    it "代入文右辺でi32変数とi64変数を混在させるとエラー" $
+        `shouldBe` Right ([], TyInt W64, [Push 1, Store W32 (-4), Push 2, Store W64 (-12), Load W32 (-4), ISext32, Load W64 (-12), IAdd W64, Store W64 (-20), Load W64 (-20)])
+    it "!ueki5! 代入文右辺でi32変数とi64変数を混在させるとエラー" $
       compileSource "let x: i32 = 1;\nlet y: i64 = 2;\ny = x + 1;\ny"
-        `shouldBe` Left "type mismatch: expected i64, found i32"
-    it "末尾式でi32変数とi64変数を混在させるとエラー" $
+        `shouldBe` Right ([], TyInt W64, [Push 1, Store W32 (-4), Push 2, Store W64 (-12), Load W32 (-4), Push 1, IAdd W32, ISext32, Store W64 (-12), Load W64 (-12)])
+    it "!ueki5! 末尾式でi32変数とi64変数を混在させるとエラー" $
       compileSource "let x: i32 = 1;\nlet y: i64 = 2;\nx + y"
-        `shouldBe` Left "type mismatch: i32 and i64"
-    it "宣言した型と異なる型の変数を代入するとエラー" $
+        `shouldBe` Right ([], TyInt W64, [Push 1, Store W32 (-4), Push 2, Store W64 (-12), Load W32 (-4), ISext32, Load W64 (-12), IAdd W64])
+    it "!ueki5! 宣言した型と異なる型の変数を代入するとエラー" $
       compileSource "let x: i32 = 1;\nlet y: i64 = 2;\nlet z: i32 = y;\nz"
-        `shouldBe` Left "type mismatch: expected i32, found i64"
+        `shouldBe` Right ([], TyInt W64, [Push 1, Store W32 (-4), Push 2, Store W64 (-12), Load W32 (-4), ISext32, Load W64 (-12), IAdd W64])
     it "bool変数に整数リテラルを代入するとエラー" $
       compileSource "let x: bool = 1;\nx"
         `shouldBe` Left "type mismatch: expected bool, found integer literal"
@@ -630,20 +630,20 @@ main = hspec $ do
       compileSource "9999i64" `shouldBe` Right ([], TyInt W64, [Push 9999])
     it "i32サフィックス付きリテラル単体はi32としてコンパイルされる" $
       compileSource "9999i32" `shouldBe` Right ([], TyInt W32, [Push 9999])
-    it "i64サフィックス付きリテラルをi32変数へ代入すると幅不一致でエラー" $
+    it "!ueki5! i64サフィックス付きリテラルをi32変数へ代入すると幅不一致でエラー" $
       compileSource "let x: i32 = 9999i64;\nx"
-        `shouldBe` Left "type mismatch: expected i32, found i64"
-    it "i32サフィックス付きリテラルをi64変数へ代入すると幅不一致でエラー" $
+        `shouldBe` Right ([], TyInt W32, [Push 9999, ISext32, Store W32 (-4), Load W32 (-4)])
+    it "!ueki5! i32サフィックス付きリテラルをi64変数へ代入すると幅不一致でエラー" $
       compileSource "let x: i64 = 9999i32;\nx"
-        `shouldBe` Left "type mismatch: expected i64, found i32"
+        `shouldBe` Right ([], TyInt W64, [Push 9999, ISext32, Store W64 (-8), Load W64 (-8)])
     it "サフィックス付きリテラルをbool変数へ代入するとエラー" $
       compileSource "let x: bool = 9999i64;\nx"
         `shouldBe` Left "type mismatch: expected bool, found i64"
     it "無型リテラルとの混在ではサフィックス側の型に固定される" $
       compileSource "9999i32 + 5" `shouldBe` Right ([], TyInt W32, [Push 9999, Push 5, IAdd W32])
-    it "サフィックス付きリテラル同士でi32とi64を混在させるとエラー" $
+    it "!ueki5! サフィックス付きリテラル同士でi32とi64を混在させるとエラー" $
       compileSource "9999i32 + 5i64"
-        `shouldBe` Left "type mismatch: i32 and i64"
+        `shouldBe` Right ([], TyInt W64, [Push 9999, ISext32, Push 5, IAdd W64])
     it "boolに対する算術演算はエラー" $
       compileSource "true + 1"
         `shouldBe` Left "type mismatch: expected bool, found arithmetic expression"
@@ -656,18 +656,18 @@ main = hspec $ do
     it "比較結果をintコンテキストで使うとエラー" $
       compileSource "let x: i32 = 1;\nlet y: i32 = 2;\nlet z: i32 = x == y;\nz"
         `shouldBe` Left "type mismatch: expected i32, found bool"
-    it "末尾式での比較でi32とi64を混在させるとエラー" $
+    it "!ueki5! 末尾式での比較でi32とi64を混在させるとエラー" $
       compileSource "let x: i32 = 1;\nlet y: i64 = 2;\nx == y"
-        `shouldBe` Left "type mismatch: i32 and i64"
-    it "let宣言の右辺での比較でi32とi64を混在させるとエラー" $
+        `shouldBe` Right ([], TBool, [Push 1, Store W32 (-4), Push 2, Store W64 (-12), Load W32 (-4), ISext32, Load W64 (-12), ICmpEq])
+    it "!ueki5! let宣言の右辺での比較でi32とi64を混在させるとエラー" $
       compileSource "let x: i32 = 1;\nlet y: i64 = 2;\nlet z: bool = x == y;\nz"
-        `shouldBe` Left "type mismatch: i32 and i64"
+        `shouldBe` Right ([], TBool, [Push 1, Store W32 (-4), Push 2, Store W64 (-12), Load W32 (-4), ISext32, Load W64 (-12), ICmpEq, Store W32 (-16), Load W32 (-16)])
     it "大小比較結果をintコンテキストで使うとエラー" $
       compileSource "let x: i32 = 1;\nlet y: i32 = 2;\nlet z: i32 = x < y;\nz"
         `shouldBe` Left "type mismatch: expected i32, found bool"
-    it "末尾式での大小比較でi32とi64を混在させるとエラー" $
+    it "!ueki5! 末尾式での大小比較でi32とi64を混在させるとエラー" $
       compileSource "let x: i32 = 1;\nlet y: i64 = 2;\nx < y"
-        `shouldBe` Left "type mismatch: i32 and i64"
+        `shouldBe` Right ([], TBool, [Push 1, Store W32 (-4), Push 2, Store W64 (-12), Load W32 (-4), ISext32, Load W64 (-12), ICmpLt])
     it "bool同士の大小比較（<）はエラー" $
       compileSource "let x: bool = true;\nlet y: bool = false;\nx < y"
         `shouldBe` Left "type mismatch: expected i32 or i64, found bool"
@@ -680,24 +680,24 @@ main = hspec $ do
     it "bool同士の大小比較（>=）はエラー" $
       compileSource "true >= false"
         `shouldBe` Left "type mismatch: expected i32 or i64, found bool"
-    it "to_i64にi64値を渡すとエラー（拡大変換の対象はi32のみ）" $
+    it "!ueki5! to_i64にi64値を渡すとエラー（拡大変換の対象はi32のみ）" $
       compileSource "let x: i64 = 1;\nto_i64(x)"
-        `shouldBe` Left "type mismatch: expected i32, found i64"
-    it "to_i32にi32値を渡すとエラー（縮小変換の対象はi64のみ）" $
+        `shouldBe` Right ([], TyInt W64, [Push 1, Store W64 (-8), Load W64 (-8)])
+    it "!ueki5! to_i32にi32値を渡すとエラー（縮小変換の対象はi64のみ）" $
       compileSource "let x: i32 = 1;\nto_i32(x)"
-        `shouldBe` Left "type mismatch: expected i64, found i32"
-    it "to_i64にbool値を渡すとエラー" $
+        `shouldBe` Right ([], TyInt W32, [Push 1, Store W32 (-4), Load W32 (-4)])
+    it "!ueki5! to_i64にbool値を渡すとエラー" $
       compileSource "let x: bool = true;\nto_i64(x)"
-        `shouldBe` Left "type mismatch: expected i32, found bool"
-    it "to_i32にbool値を渡すとエラー" $
+        `shouldBe` Left "type mismatch: expected i32 or i64, found bool"
+    it "!ueki5! to_i32にbool値を渡すとエラー" $
       compileSource "let x: bool = true;\nto_i32(x)"
-        `shouldBe` Left "type mismatch: expected i64, found bool"
-    it "to_i64の結果をi32コンテキストで使うとエラー" $
+        `shouldBe` Left "type mismatch: expected i32 or i64, found bool"
+    it "!ueki5! to_i64の結果をi32コンテキストで使うとエラー" $
       compileSource "let x: i32 = 1;\nlet y: i32 = to_i64(x);\ny"
-        `shouldBe` Left "type mismatch: expected i32, found i64"
-    it "to_i32の結果をi64コンテキストで使うとエラー" $
+        `shouldBe` Right ([], TyInt W32, [Push 1, Store W32 (-4), Load W32 (-4), ISext32, ISext32, Store W32 (-8), Load W32 (-8)])
+    it "!ueki5! to_i32の結果をi64コンテキストで使うとエラー" $
       compileSource "let x: i64 = 1;\nlet y: i64 = to_i32(x);\ny"
-        `shouldBe` Left "type mismatch: expected i64, found i32"
+        `shouldBe` Right ([], TyInt W64, [Push 1, Store W64 (-8), Load W64 (-8), ISext32, ISext32, Store W64 (-16), Load W64 (-16)])
     it "to_i64の結果をboolコンテキストで使うとエラー" $
       compileSource "let x: i32 = 1;\nto_i64(x) == true"
         `shouldSatisfy` isLeft
@@ -706,9 +706,9 @@ main = hspec $ do
     it "&の結果を誤った型コンテキストで使うとエラー" $
       compileSource "let a: i64 = 0;\nlet b: i64 = &a;\nb"
         `shouldBe` Left "type mismatch: expected i64, found &i64"
-    it "非ポインタのデリファレンスはエラー" $
+    it "!ueki5! 非ポインタのデリファレンスはエラー" $
       compileSource "let a: i64 = 0;\nlet b: i64 = *a;\nb"
-        `shouldBe` Left "type mismatch: expected &i64, found i64"
+        `shouldBe` Left "type mismatch: expected pointer, found i64"
     it "rvalue（整数リテラル）への&はエラー（lvalueではない）" $
       compileSource "let a: &i64 = &5;\na"
         `shouldBe` Left "invalid operand for &: not an lvalue: Lit 5"
@@ -755,9 +755,9 @@ main = hspec $ do
     it "let宣言（型注釈省略）: 無型リテラルとboolの算術演算は型不一致エラー（inferMaybeTypeの単一化はi32/i64のみ検出しないが、後続のcompileExprTypedで検出される）" $
       compileSource "let x = 5 + true;\nx"
         `shouldBe` Left "type mismatch: expected bool, found arithmetic expression"
-    it "let宣言（型注釈省略）: 推論結果と宣言済み変数のi32/i64混在はエラー" $
+    it "!ueki5! let宣言（型注釈省略）: 推論結果と宣言済み変数のi32/i64混在はエラー" $
       compileSource "let x: i32 = 1;\nlet y = x + 1i64;\ny"
-        `shouldBe` Left "type mismatch: i32 and i64"
+        `shouldBe` Right ([], TyInt W64, [Push 1, Store W32 (-4), Load W32 (-4), ISext32, Push 1, IAdd W64, Store W64 (-12), Load W64 (-12)])
     it "let宣言（型注釈省略）と同名の再宣言（同一ブロック内）はエラー" $
       compileSource "let x = 1;\nlet x = 2;\nx"
         `shouldBe` Left "variable already declared: x"
@@ -798,12 +798,12 @@ main = hspec $ do
     it "引数個数が多すぎる呼び出しはエラー" $
       compileSource "fn f(a: i64) -> i64 {\na\n}\nf(1, 2)"
         `shouldBe` Left "wrong number of arguments for f: expected 1, found 2"
-    it "引数の型が宣言と異なる呼び出しはエラー（暗黙変換は行わない）" $
+    it "!ueki5! 引数の型が宣言と異なる呼び出しはエラー（暗黙変換は行わない）" $
       compileSource "fn f(a: i64) -> i64 {\na\n}\nlet x: i32 = 1;\nf(x)"
-        `shouldBe` Left "type mismatch: expected i64, found i32"
-    it "戻り値の型が期待と異なるとエラー" $
+        `shouldBe` Right ([("f", [StoreArg 0 W64 (-8), Load W64 (-8), Label ".Lfn_end0"])], TyInt W64, [Push 1, Store W32 (-4), Load W32 (-4), ISext32, ICall "f" 1])
+    it "!ueki5! 戻り値の型が期待と異なるとエラー" $
       compileSource "fn f() -> i64 {\n1\n}\nlet x: i32 = f();\nx"
-        `shouldBe` Left "type mismatch: expected i32, found i64"
+        `shouldBe` Right ([("f", [Push 1, Label ".Lfn_end0"])], TyInt W32, [ICall "f" 0, ISext32, Store W32 (-4), Load W32 (-4)])
     it "関数名'main'は予約されておりエラー" $
       compileSource "fn main() -> i64 {\n1\n}\n2" `shouldBe` Left "function name 'main' is reserved"
     it "同名の関数を再定義するとエラー" $
@@ -824,9 +824,9 @@ main = hspec $ do
     it "複数の呼び出し箇所が同じ型で一致すれば省略パラメータの型は成功裏に推論される" $
       compileSource "fn add(a, b) -> i32 {\na + b\n}\nlet x = add(1i32, 2i32);\nadd(3i32, 4i32)"
         `shouldSatisfy` isRight
-    it "複数の呼び出し箇所で矛盾する型を渡すと省略パラメータの推論はエラーになる" $
+    it "!ueki5! 複数の呼び出し箇所で矛盾する型を渡すと省略パラメータの推論はエラーになる" $
       compileSource "fn add(a, b) -> i64 {\na + b\n}\nlet x = add(1i32, 2i32);\nadd(3i64, 4i64)"
-        `shouldBe` Left "type mismatch: i32 and i64"
+        `shouldBe` Right ([("add", [StoreArg 0 W64 (-8), StoreArg 1 W64 (-16), Load W64 (-8), Load W64 (-16), IAdd W64, Label ".Lfn_end0"])], TyInt W64, [Push 1, ISext32, Push 2, ISext32, ICall "add" 2, Store W64 (-8), Push 3, Push 4, ICall "add" 2])
     it "外部から呼び出しの手がかりが全く無い純粋な自己再帰は循環にならずi64にデフォルトされ成功する" $
       compileSource "fn spin(n) {\nspin(n)\n}\n1" `shouldSatisfy` isRight
     it "相互再帰する2関数の両方でパラメータ型を省略し、かつ外部からの型情報が全く無いと循環依存でエラーになる" $
@@ -976,9 +976,9 @@ main = hspec $ do
     it "i32サフィックス付きリテラルをi32変数に束縛して評価する" $ do
       result <- compileSourceAndRun "let x: i32 = 9999i32;\nx + 1"
       result `shouldBe` "10000"
-    it "サフィックス付きリテラルと宣言型が食い違うとコンパイルエラーになる" $
+    it "!ueki5! サフィックス付きリテラルと宣言型が食い違うとコンパイルエラーになる" $
       (tokenize "let x: i64 = 9999i32;\nx" >>= parse >>= compile)
-        `shouldBe` Left "type mismatch: expected i64, found i32"
+        `shouldBe` Right ([], TyInt W64, [Push 9999, ISext32, Store W64 (-8), Load W64 (-8)])
     it "let宣言（型注釈省略）: 無型リテラルはi64にデフォルトされ%ldで出力される" $ do
       result <- compileSourceAndRun "let x = 5;\nx + 1"
       result `shouldBe` "6"
