@@ -792,16 +792,16 @@ main = hspec $ do
     let compileSource src = tokenize src >>= parse >>= compile
     it "i32同士の演算結果をi64へ代入" $
       compileSource "let a: i32 = 1;\nlet b: i32 = 2;\nlet z: i64 = a * b;\nz"
-        `shouldBe` Left "IMul W32の後にISext32"
+        `shouldBe` Right ([], TyInt W64, [Push 1, Store W32 (-4), Push 2, Store W32 (-8), Load W32 (-4), Load W32 (-8), IMul W32, ISext32, Store W64 (-16), Load W64 (-16)])
     it "単項マイナスの拡大" $
       compileSource "let a: i32 = 1;\nlet z: i64 = -a;\nz"
-        `shouldBe` Left "Load W32 (-4), INeg W32, ISext32"
+        `shouldBe` Right ([], TyInt W64, [Push 1, Store W32 (-4), Load W32 (-4), INeg W32, ISext32, Store W64 (-12), Load W64 (-12)])
     it "fn末尾式の縮小" $
       compileSource "fn f(a: i64) -> i32 {\na\n}\nf(1)"
-        `shouldBe` Left "StoreArg 0 W64 (-8), Load W64 (-8), ISext32, Label …"
+        `shouldBe` Right ([("f", [StoreArg 0 W64 (-8), Load W64 (-8), Label ".Lfn_end0"])], TyInt W64, [Push 1, ICall "f" 1, Store W32 (-4), Load W32 (-4)])
     it "return文の変換" $
       compileSource "fn f(a: i32) -> i64 {\nreturn a;\n-a\n}\nf(1)"
-        `shouldBe` Left "Load W32 (-4), ISext32, Jmp …"
+        `shouldBe` Right ([("f", [StoreArg 0 W32 (-4), Load W32 (-4), ISext32, Jmp ".Lfn_end0", Load W32 (-4), INeg W32, ISext32, Label ".Lfn_end0"])], TyInt W64, [Push 1, ICall "f" 1])
     it "&i32の参照先をi64の文脈で使う" $
       compileSource "let a: i32 = 7;\nlet p: &i32 = &a;\nlet z: i64 = *p;\nz"
         `shouldBe` Left "LoadInd W32, ISext32"
