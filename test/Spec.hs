@@ -619,7 +619,7 @@ main = hspec $ do
         `shouldBe` Right ([], TyInt W64, [Push 1, Store W32 (-4), Push 2, Store W64 (-12), Load W32 (-4), ISext32, Load W64 (-12), IAdd W64])
     it "!ueki5! 宣言した型と異なる型の変数を代入するとエラー" $
       compileSource "let x: i32 = 1;\nlet y: i64 = 2;\nlet z: i32 = y;\nz"
-        `shouldBe` Right ([], TyInt W64, [Push 1, Store W32 (-4), Push 2, Store W64 (-12), Load W32 (-4), ISext32, Load W64 (-12), IAdd W64])
+        `shouldBe` Right ([], TyInt W32, [Push 1, Store W32 (-4), Push 2, Store W64 (-12), Load W64 (-12), ISext32, Store W32 (-16), Load W32 (-16)])
     it "bool変数に整数リテラルを代入するとエラー" $
       compileSource "let x: bool = 1;\nx"
         `shouldBe` Left "type mismatch: expected bool, found integer literal"
