@@ -788,6 +788,36 @@ main = hspec $ do
     it "break文をwhileの外側のブロックで使うとエラー（ループを抜けた後は無効）" $
       compileSource "while true {\nbreak;\n}\n{\nbreak;\n}\n1" `shouldBe` Left "break used outside loop"
 
+  describe "意味論（compile、暗黙の型変換）" $ do
+    let compileSource src = tokenize src >>= parse >>= compile
+    it "i32同士の演算結果をi64へ代入" $
+      compileSource "let a: i32 = 1;\nlet b: i32 = 2;\nlet z: i64 = a * b;\nz"
+        `shouldBe` Left "IMul W32の後にISext32"
+    it "単項マイナスの拡大" $
+      compileSource "let a: i32 = 1;\nlet z: i64 = -a;\nz"
+        `shouldBe` Left "Load W32 (-4), INeg W32, ISext32"
+    it "fn末尾式の縮小" $
+      compileSource "fn f(a: i64) -> i32 {\na\n}\nf(1)"
+        `shouldBe` Left "StoreArg 0 W64 (-8), Load W64 (-8), ISext32, Label …"
+    it "return文の変換" $
+      compileSource "fn f(a: i32) -> i64 {\nreturn a;\n-a\n}\nf(1)"
+        `shouldBe` Left "Load W32 (-4), ISext32, Jmp …"
+    it "&i32の参照先をi64の文脈で使う" $
+      compileSource "let a: i32 = 7;\nlet p: &i32 = &a;\nlet z: i64 = *p;\nz"
+        `shouldBe` Left "LoadInd W32, ISext32"
+    it "ポインタ型は変換されない" $
+      compileSource "let a: i32 = 1;\nlet p: &i64 = &a;\np"
+        `shouldBe` Left "type mismatch: expected &i64, found &i32"
+    it "異なるポインタ型の比較はエラー" $
+      compileSource "let a:i32 = 1;\nlet b:i64 = 1;\n&a == &b"
+        `shouldBe` Left "type mismatch: &i32 and &i64"
+    it "boolは変換されない" $
+      compileSource "let x: i64 = true;\nx"
+        `shouldBe` Left "type mismatch: expected i64, found bool"
+    it "恒等関数の推論" $
+      compileSource "fn id(x) {\nx\n}\nlet a = id(1i32);\nid(2i64)"
+        `shouldBe` Left "成功（仮引数・戻り値ともi64）"
+
   describe "意味論エラー（fn定義・呼び出し）" $ do
     let compileSource src = tokenize src >>= parse >>= compile
     it "未定義関数の呼び出しはエラー" $
@@ -1246,6 +1276,26 @@ main = hspec $ do
     it "末尾式がポインタ型のとき%p形式（0xで始まる）で出力する" $ do
       result <- compileSourceAndRun "let a:i64 = 0;\nlet b:&i64 = &a;\nb"
       take 2 result `shouldBe` "0x"
+
+  describe "compile + codegen + gcc（暗黙の型変換の結合テスト）" $ do
+    it "縮小のラップアラウンド" $ do
+      result <- compileSourceAndRun "let x: i64 = 4294967301;\nlet y: i32 = x;\ny"
+      result `shouldBe` "5"
+    it "拡大の符号保存" $ do
+      result <- compileSourceAndRun "let x: i32 = -5;\nlet y: i64 = x;\ny"
+      result `shouldBe` "-5"
+    it "i32演算のオーバーフロー後の拡大" $ do
+      result <- compileSourceAndRun "let a: i32 = 2147483647;\nlet z: i64 = a + 1;\nz"
+      result `shouldBe` "-2147483648"
+    it "混在演算の昇格（オーバーフローしない）" $ do
+      result <- compileSourceAndRun "let a: i32 = 2147483647;\nlet b: i64 = 1;\na + b"
+      result `shouldBe` "2147483648"
+    it "関数の実引数の拡大と戻り値の縮小" $ do
+      result <- compileSourceAndRun "fn f(a: i64) -> i32 {\na + 1\n}\nlet x: i32 = 41;\nf(x)"
+      result `shouldBe` "42"
+    it "&i32の参照先をi64の演算で使う" $ do
+      result <- compileSourceAndRun "let a: i32 = 7;\nlet p: &i32 = &a;\nlet b: i64 = 3;\n*p + b"
+      result `shouldBe` "10"
 
   describe "ゼロ除算の実行時エラー" $ do
     it "変数なしのゼロ除算はエラーメッセージを出力して非ゼロ終了する" $ do
