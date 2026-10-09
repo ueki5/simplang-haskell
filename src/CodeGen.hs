@@ -244,11 +244,19 @@ genInstr (IMul W32) =
   , "    cltq"
   , "    pushq %rax"
   ]
+-- 除数が-1のときは被除数の符号反転・除数1に置き換える。最小値/-1 で idiv が例外（#DE）を起こすのを避け、
+-- 他の演算と同じく最小値へラップアラウンドさせる（negl/negq は最小値を自分自身へラップする）
 genInstr (IDiv W64) =
   [ "    popq  %rcx"
   , "    cmpq  $0, %rcx"
   , "    je    .Ldiv_zero_error"
   , "    popq  %rax"
+  , "    movq  %rax, %rdx"
+  , "    negq  %rdx"
+  , "    cmpq  $-1, %rcx"
+  , "    cmoveq %rdx, %rax"
+  , "    movq  $1, %rdx"
+  , "    cmoveq %rdx, %rcx"
   , "    cqto"
   , "    idivq %rcx"
   , "    pushq %rax"
@@ -258,6 +266,12 @@ genInstr (IDiv W32) =
   , "    cmpq  $0, %rcx"
   , "    je    .Ldiv_zero_error"
   , "    popq  %rax"
+  , "    movl  %eax, %edx"
+  , "    negl  %edx"
+  , "    cmpl  $-1, %ecx"
+  , "    cmovel %edx, %eax"
+  , "    movl  $1, %edx"
+  , "    cmovel %edx, %ecx"
   , "    cltd"
   , "    idivl %ecx"
   , "    cltq"
