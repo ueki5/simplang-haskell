@@ -851,9 +851,14 @@ compileExprTyped fnSigs env expected@(TyInt _) node@(Div l r) = do
 compileExprTyped _ _ TBool (Neg _) = Left "type mismatch: expected bool, found arithmetic expression"
 compileExprTyped _ _ expected@(TPtr _) (Neg _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found arithmetic expression")
-compileExprTyped fnSigs env expected@(TyInt w) (Neg e) = do
-  ei <- compileExprTyped fnSigs env expected e
-  Right (ei ++ [INeg w])
+compileExprTyped fnSigs env expected@(TyInt _) node@(Neg e) = do
+  opTy <- maybe expected id <$> inferMaybeType fnSigs env node
+  case opTy of
+    TyInt w -> do
+      ei <- compileExprTyped fnSigs env opTy e
+      conv <- coerce opTy expected
+      Right (ei ++ [INeg w] ++ conv)
+    other -> Left ("type mismatch: expected " ++ typeName expected ++ ", found " ++ typeName other)
 -- [let ]xxx = !expr;
 compileExprTyped _ _ expected@(TyInt _) (Not _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")

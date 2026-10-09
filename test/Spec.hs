@@ -804,7 +804,7 @@ main = hspec $ do
         `shouldBe` Right ([("f", [StoreArg 0 W32 (-4), Load W32 (-4), ISext32, Jmp ".Lfn_end0", Load W32 (-4), INeg W32, ISext32, Label ".Lfn_end0"])], TyInt W64, [Push 1, ICall "f" 1])
     it "&i32の参照先をi64の文脈で使う" $
       compileSource "let a: i32 = 7;\nlet p: &i32 = &a;\nlet z: i64 = *p;\nz"
-        `shouldBe` Left "LoadInd W32, ISext32"
+        `shouldBe` Right ([], TyInt W64, [Push 7, ISext32, Store W32 (-4), LoadAddr (-4), Store W64 (-12), LoadInd W32, Store W64 (-20), Load W64 (-20)])
     it "ポインタ型は変換されない" $
       compileSource "let a: i32 = 1;\nlet p: &i64 = &a;\np"
         `shouldBe` Left "type mismatch: expected &i64, found &i32"
@@ -816,7 +816,7 @@ main = hspec $ do
         `shouldBe` Left "type mismatch: expected i64, found bool"
     it "恒等関数の推論" $
       compileSource "fn id(x) {\nx\n}\nlet a = id(1i32);\nid(2i64)"
-        `shouldBe` Left "成功（仮引数・戻り値ともi64）"
+        `shouldBe` Right ([("id", [StoreArg 0 W32 (-4), Load W32 (-4), Label ".Lfn_end0"])], TyInt W32, [Push 1, ISext32, ICall "id" 1, Store W32 (-4), Push 2, ISext32, ICall "id" 1])
 
   describe "意味論エラー（fn定義・呼び出し）" $ do
     let compileSource src = tokenize src >>= parse >>= compile
