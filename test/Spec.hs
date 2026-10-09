@@ -531,6 +531,10 @@ main = hspec $ do
       codegen [] (TyInt W32) [INeg W32] `shouldContain` "negl"
     it "IDivにゼロ除算チェックを含む" $
       codegen [] (TyInt W64) [IDiv W64] `shouldContain` ".Ldiv_zero_error"
+    it "IDiv W64は除数-1の場合に被除数を符号反転する（cmoveq）" $
+      codegen [] (TyInt W64) [IDiv W64] `shouldContain` "cmoveq"
+    it "IDiv W32は除数-1の場合に被除数を符号反転する（cmovel）" $
+      codegen [] (TyInt W32) [IDiv W32] `shouldContain` "cmovel"
     it "エピローグにprintf呼び出しを含む" $
       codegen [] (TyInt W64) [] `shouldContain` "call  printf"
     it "最終値がi64なら%ldフォーマットを使う" $
@@ -798,13 +802,13 @@ main = hspec $ do
         `shouldBe` Right ([], TyInt W64, [Push 1, Store W32 (-4), Load W32 (-4), INeg W32, ISext32, Store W64 (-12), Load W64 (-12)])
     it "fn末尾式の縮小" $
       compileSource "fn f(a: i64) -> i32 {\na\n}\nf(1)"
-        `shouldBe` Right ([("f", [StoreArg 0 W64 (-8), Load W64 (-8), Label ".Lfn_end0"])], TyInt W64, [Push 1, ICall "f" 1, Store W32 (-4), Load W32 (-4)])
+        `shouldBe` Right ([("f", [StoreArg 0 W64 (-8), Load W64 (-8), ISext32, Label ".Lfn_end0"])], TyInt W32, [Push 1, ICall "f" 1])
     it "return文の変換" $
       compileSource "fn f(a: i32) -> i64 {\nreturn a;\n-a\n}\nf(1)"
         `shouldBe` Right ([("f", [StoreArg 0 W32 (-4), Load W32 (-4), ISext32, Jmp ".Lfn_end0", Load W32 (-4), INeg W32, ISext32, Label ".Lfn_end0"])], TyInt W64, [Push 1, ICall "f" 1])
     it "&i32の参照先をi64の文脈で使う" $
       compileSource "let a: i32 = 7;\nlet p: &i32 = &a;\nlet z: i64 = *p;\nz"
-        `shouldBe` Right ([], TyInt W64, [Push 7, ISext32, Store W32 (-4), LoadAddr (-4), Store W64 (-12), LoadInd W32, Store W64 (-20), Load W64 (-20)])
+        `shouldBe` Right ([], TyInt W64, [Push 7, Store W32 (-4), LoadAddr (-4), Store W64 (-12), Load W64 (-12), LoadInd W32, ISext32, Store W64 (-20), Load W64 (-20)])
     it "ポインタ型は変換されない" $
       compileSource "let a: i32 = 1;\nlet p: &i64 = &a;\np"
         `shouldBe` Left "type mismatch: expected &i64, found &i32"
@@ -816,7 +820,7 @@ main = hspec $ do
         `shouldBe` Left "type mismatch: expected i64, found bool"
     it "恒等関数の推論" $
       compileSource "fn id(x) {\nx\n}\nlet a = id(1i32);\nid(2i64)"
-        `shouldBe` Right ([("id", [StoreArg 0 W32 (-4), Load W32 (-4), Label ".Lfn_end0"])], TyInt W32, [Push 1, ISext32, ICall "id" 1, Store W32 (-4), Push 2, ISext32, ICall "id" 1])
+        `shouldBe` Right ([("id", [StoreArg 0 W64 (-8), Load W64 (-8), Label ".Lfn_end0"])], TyInt W64, [Push 1, ISext32, ICall "id" 1, Store W64 (-8), Push 2, ICall "id" 1])
 
   describe "意味論エラー（fn定義・呼び出し）" $ do
     let compileSource src = tokenize src >>= parse >>= compile
@@ -873,6 +877,10 @@ main = hspec $ do
       run [Push 1, Store W64 (-8), Load W64 (-8), Push 2, IAdd W64] `shouldBe` Right 3
     it "IAdd W32はi32範囲でラップアラウンドする" $
       run [Push 2147483647, Push 1, IAdd W32] `shouldBe` Right (-2147483648)
+    it "IDiv W32で最小値を-1で割るとi32範囲でラップアラウンドする" $
+      run [Push (-2147483648), Push (-1), IDiv W32] `shouldBe` Right (-2147483648)
+    it "IDiv W64で最小値を-1で割るとi64範囲でラップアラウンドする" $
+      run [Push minBound, Push (-1), IDiv W64] `shouldBe` Right minBound
     it "Store W32はi32範囲に切り詰める" $
       run [Push 4294967296, Store W32 (-4), Load W32 (-4)] `shouldBe` Right 0
     it "ICmpEqは等しい値で1を返す" $
@@ -988,6 +996,15 @@ main = hspec $ do
     it "i32の境界値（INT32_MIN）を正しく扱う（movabsq修正の確認）" $ do
       result <- compileSourceAndRun "let x: i32 = -2147483648;\nx"
       result `shouldBe` "-2147483648"
+    it "i32の最小値を-1で割るとラップアラウンドする（idivlの例外を起こさない）" $ do
+      result <- compileSourceAndRun "let x: i32 = -2147483648;\nlet m: i32 = -1;\nx / m"
+      result `shouldBe` "-2147483648"
+    it "i64の最小値を-1で割るとラップアラウンドする（idivqの例外を起こさない）" $ do
+      result <- compileSourceAndRun "let x: i64 = -9223372036854775808;\nlet m: i64 = -1;\nx / m"
+      result `shouldBe` "-9223372036854775808"
+    it "-1での割り算は符号反転と同じ結果になる" $ do
+      result <- compileSourceAndRun "let x: i32 = 7;\nlet m: i32 = -1;\nx / m"
+      result `shouldBe` "-7"
     it "i32とi64が交互に宣言されてもタイトパッキングで正しく動作する（式自体は単一型を維持）" $ do
       result <- compileSourceAndRun "let a: i32 = 1;\nlet b: i64 = 2;\nlet c: i32 = 3;\na + c"
       result `shouldBe` "4"

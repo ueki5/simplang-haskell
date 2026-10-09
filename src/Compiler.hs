@@ -992,6 +992,7 @@ run instrs = go instrs [] Map.empty
     go (IMul w : rest) (b : a : stack) vars = go rest (trunc w (a * b) : stack) vars
     go (IDiv w : rest) (b : a : stack) vars
       | b == 0 = Left "division by zero"
+      | b == -1 = go rest (trunc w (negate a) : stack) vars
       | otherwise = go rest (trunc w (a `quot` b) : stack) vars
     go (INeg w : rest) (a : stack) vars = go rest (trunc w (negate a) : stack) vars
     go (Load w off : rest) stack vars =
