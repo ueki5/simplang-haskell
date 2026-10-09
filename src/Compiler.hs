@@ -312,13 +312,14 @@ compileFnDecl fnSigs (FnDecl name params _ (stmts, tailExpr)) = do
   -- pTraceShowM ("env1 of " ++ name, env1)
   pure (name, spillInstrs ++ stmtInstrs ++ tailInstrs ++ [Label endLabel])
 
--- Maybe Type の単一化（Nothing = 整数リテラルなど未確定な部分木）
+-- 2つの型を合流させる。整数同士は幅の広い方（i64）へ昇格し、それ以外は厳密一致を要求する
 unifyType :: Type -> Type -> Either String Type
 unifyType t1 t2
   | t1 == t2 = Right t1
 unifyType (TyInt _) (TyInt _) = Right (TyInt W64)
 unifyType t1 t2 = Left ("type mismatch: " ++ typeName t1 ++ " and " ++ typeName t2)
 
+-- Maybe Type の合流（Nothing = 整数リテラルなど未確定な部分木）
 unifyMaybeType :: Maybe Type -> Maybe Type -> Either String (Maybe Type)
 unifyMaybeType Nothing Nothing = Right Nothing
 unifyMaybeType Nothing (Just t) = Right (Just t)
@@ -798,8 +799,9 @@ compileArith fnSigs env expected node l r mkInstr = do
       Right (li ++ ri ++ [mkInstr w] ++ conv)
     other -> Left ("type mismatch: expected " ++ typeName expected ++ ", found " ++ typeName other)
 
--- 期待する型（expected）を一様に伝播させながら命令を抽出する。
--- Var の実際の型が expected と食い違えば型不一致エラーとする。
+-- 期待する型（expected）に合わせて命令を抽出する。
+-- 確定した型を持つ部分木（Var/LitTyped/Call/Deref・算術演算）は自身の型で命令を生成し、
+-- coerce で expected へ変換する（整数の幅違いのみ暗黙変換し、それ以外の不一致は型不一致エラー）。
 -- 算術演算・整数リテラルは TyInt 専用、Not/BoolLit/Eq/Neq は TBool 専用であり、
 -- expected と食い違えばその場でエラーとする。
 compileExprTyped :: FnSigs -> Env -> Type -> Expr -> Either String [Instr]
@@ -937,7 +939,7 @@ compileExprTyped fnSigs env TBool (Ge l r) = do
 compileExprTyped fnSigs env expected (ToI64 e) = compileToWidth fnSigs env expected W64 e
 -- [let ]xxx = to_i32(expr);（右辺は常にi32。被演算子は自身の推論型で処理）
 compileExprTyped fnSigs env expected (ToI32 e) = compileToWidth fnSigs env expected W32 e
--- [let ]xxx = f(expr, ...);（引数は宣言順にシグネチャの型で厳密検査し、暗黙変換は行わない）
+-- [let ]xxx = f(expr, ...);（引数は宣言順にシグネチャの型を期待型としてコンパイルし（幅違いは暗黙変換）、戻り値は coerce で expected へ変換する）
 compileExprTyped fnSigs env expected (Call name args) =
   case Map.lookup name fnSigs of
     Nothing -> Left ("undeclared function: " ++ name)
@@ -960,7 +962,7 @@ compileExprTyped fnSigs env expected (AddrOf e) = do
   if expected == TPtr pointeeTy
     then Right instrs
     else Left ("type mismatch: expected " ++ typeName expected ++ ", found " ++ typeName (TPtr pointeeTy))
--- [let ]xxx = *ptr;（expectedをそのまま子へ TPtr expected として伝播する。ToI64/ToI32と異なり一様伝播を崩さない）
+-- [let ]xxx = *ptr;（子をポインタの推論型 TPtr inner でコンパイルし、読み出した inner 型の値を coerce で expected へ変換する）
 compileExprTyped fnSigs env expected (Deref e) = do
   -- inferMaybeType の Deref 節が「ポインタでない」「型なしリテラル」を既にエラーにするため、
   -- 成功時は必ず Just（指す先の型）になる
