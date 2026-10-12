@@ -69,6 +69,8 @@ data Instr
   | -- 関数呼び出し: 操作スタックに積まれた引数（左から順、個数はIntで指定）を
     -- 引数レジスタへpopしてcallし、戻り値を%raxからpushして戻す
     ICall String Int
+  | -- 操作スタック先頭を捨てる（式文の値の破棄 用）
+    IPop
   deriving (Show, Eq)
 
 -- Code generator
@@ -115,12 +117,13 @@ widthBytes :: Width -> Int
 widthBytes W32 = 4
 widthBytes W64 = 8
 
--- 型の物理格納幅（bool は i32 用の32bitスロットを流用する。ポインタは指す先の型によらず常に8バイト）。
+-- 型の物理格納幅（bool・() は i32 用の32bitスロットを流用する。ポインタは指す先の型によらず常に8バイト）。
 -- 配列は要素1個分の格納幅を返す（配列全体の占有バイト数は stackBytes を使う）
 storageWidth :: Type -> Width
 storageWidth (TyInt _ w) = w
 storageWidth TUsize = W64
 storageWidth TBool = W32
+storageWidth TUnit = W32
 storageWidth (TPtr _) = W64
 storageWidth (TArray elemTy _) = storageWidth elemTy
 
@@ -137,6 +140,7 @@ typeName (TyInt Unsigned W32) = "u32"
 typeName (TyInt Unsigned W64) = "u64"
 typeName TUsize = "usize"
 typeName TBool = "bool"
+typeName TUnit = "()"
 typeName (TPtr t) = "&" ++ typeName t
 typeName (TArray t n) = "[" ++ typeName t ++ "; " ++ show n ++ "]"
 
@@ -295,6 +299,11 @@ compileStmtsFrom fnSigs initEnv initCursor loopCtx returnCtx stmts = foldM step 
       lift (checkNoLocalRef env expr)
       instrs <- lift (compileExprTyped fnSigs env retTy expr)
       pure (env, cursor, acc ++ instrs ++ [Jmp endLabel])
+    -- expr;（letの型注釈省略と同じ規則で型を決めてコンパイルし、値は捨てる）
+    step (env, cursor, acc) (SExpr expr) = do
+      ty <- lift (inferType fnSigs env expr)
+      instrs <- lift (compileExprTyped fnSigs env ty expr)
+      pure (env, cursor, acc ++ instrs ++ [IPop])
 
 -- let の初期化式をコンパイルし、オフセット off の変数へストアする命令列を返す。
 -- 配列型は要素ごとのストア（compileArrayInit）、それ以外は式を評価して1回ストアする
@@ -423,6 +432,7 @@ inferMaybeType fnSigs env expr = do
     -- サフィックス付きリテラルは Var と同様、常に確定した型を持つ（expectedとは無関係）
     go (LitTyped _ ty) = Right (Just ty)
     go (BoolLit _) = Right (Just TBool)
+    go UnitLit = Right (Just TUnit)
     go (Var name) =
       maybe (Left ("undeclared variable: " ++ name)) (Right . Just . snd) (lookupVar name env)
     go (Neg e) = go e
@@ -597,6 +607,7 @@ resolveExprType fnDeclMap resolved env expr = do
     go (Lit _) = Right (Right Nothing)
     go (LitTyped _ ty) = Right (Right (Just ty))
     go (BoolLit _) = Right (Right (Just TBool))
+    go UnitLit = Right (Right (Just TUnit))
     go (Var name) = case lookupLocal name env of
       Nothing -> Left ("undeclared variable: " ++ name)
       Just (Left slot) -> Right (Left slot)
@@ -666,6 +677,7 @@ callEvidence fnDeclMap resolved env expr = do
     go (Lit _) = Right []
     go (LitTyped _ _) = Right []
     go (BoolLit _) = Right []
+    go UnitLit = Right []
     go (Var _) = Right []
     go (Neg e) = go e
     go (Not e) = go e
@@ -764,6 +776,9 @@ collectEvidenceStmts fnDeclMap resolved curFn localenv stmts = do
         Just fnName -> do
           r <- resolveExprType fnDeclMap resolved env expr
           pure (env, ev ++ [(ReturnSlot fnName, r)])
+    step env (SExpr expr) = do
+      ev <- callEvidence fnDeclMap resolved env expr
+      pure (env, ev)
 
 -- 仮引数をLocalEnvの初期スコープへ変換する（型注釈済みならその型、省略済みならこれまでの解決状況を反映する）
 paramLocalScope :: ResolvedSlots -> String -> [(String, Maybe Type)] -> Map String (Either Slot Type)
@@ -915,6 +930,10 @@ compileExprTyped _ _ expected (LitTyped n ty)
 compileExprTyped _ _ TBool (BoolLit b) = Right [Push (if b then 1 else 0)]
 compileExprTyped _ _ expected (BoolLit _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
+-- [let ]xxx = ();（ユニット値は常に0として積む）
+compileExprTyped _ _ TUnit UnitLit = Right [Push 0]
+compileExprTyped _ _ expected UnitLit =
+  Left ("type mismatch: expected " ++ typeName expected ++ ", found ()")
 -- [let ]xxx = yyy;
 compileExprTyped _ env expected (Var name) =
   case lookupVar name env of
@@ -1026,7 +1045,7 @@ compileArith fnSigs env expected l r opInstrs =
       Right (li ++ ri ++ opInstrs sg w)
 
 -- 比較演算の共通処理（結果は常にbool。被演算子の型は expected とは独立に推論する）。
--- allowBool が False（大小比較）なら bool 同士の比較を不可とする
+-- allowBool が False（大小比較）なら bool 同士・() 同士の比較を不可とする
 compileCompare :: FnSigs -> Env -> Type -> Expr -> Expr -> Bool -> (Type -> Instr) -> Either String [Instr]
 compileCompare fnSigs env expected l r allowBool cmp
   | expected /= TBool = Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
@@ -1034,6 +1053,7 @@ compileCompare fnSigs env expected l r allowBool cmp
       opTy <- operandType fnSigs env l r
       case opTy of
         TBool | not allowBool -> Left "type mismatch: expected i32 or i64, found bool"
+        TUnit | not allowBool -> Left "type mismatch: expected i32 or i64, found ()"
         _ -> do
           li <- compileExprTyped fnSigs env opTy l
           ri <- compileExprTyped fnSigs env opTy r
@@ -1159,6 +1179,7 @@ run instrs = go instrs [] Map.empty
       | toU64 i >= fromIntegral n = Left "index out of bounds"
       | otherwise = go rest stack vars
     go (StoreInd w : rest) (v : addr : stack) vars = go rest stack (Map.insert addr (trunc w v) vars)
+    go (IPop : rest) (_ : stack) vars = go rest stack vars
     go _ _ _ = Left "stack underflow"
 
 -- 実アセンブリの movl/movslq 等が行う切り詰め・符号拡張を再現する

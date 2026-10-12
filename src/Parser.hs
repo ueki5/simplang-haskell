@@ -50,6 +50,8 @@ data Expr
   | -- 'i32'/'i64'/'u32'/'u64'/'usize'サフィックスで型を固定した整数リテラル（例: `9999i64`）。Litと異なりexpectedとは無関係に型が確定する
     LitTyped Int Type
   | BoolLit Bool
+  | -- ユニット値 `()`。fn本体・暗黙mainの末尾式の省略や `return;` もパーサでこれへ脱糖する
+    UnitLit
   | Var String
   | Add Expr Expr
   | Sub Expr Expr
@@ -92,11 +94,13 @@ data Stmt
     SBreak
   | -- 直近の外側ループの条件再評価へ進む
     SContinue
-  | -- 関数の早期リターン（値は必須。ユニット型は採用しないため値なし版は無い）
+  | -- 関数の早期リターン（値を省略した `return;` は `SReturn UnitLit` へ脱糖する）
     SReturn Expr
+  | -- 式文 `expr;`（式を評価して値を捨てる。値の型は問わない）
+    SExpr Expr
   deriving (Show, Eq)
 
--- 文の列 + 必須の末尾式（関数本体・プログラム全体で共通の形）
+-- 文の列 + 末尾式（関数本体・プログラム全体で共通の形。省略された末尾式は UnitLit へ脱糖済み）
 type Body = ([Stmt], Expr)
 
 -- 関数定義: 名前, 仮引数(名前, 型注釈省略可)の列, 戻り値の型(省略可), 本体。
@@ -116,8 +120,9 @@ data Signedness = Signed | Unsigned deriving (Show, Eq)
 -- ソースレベルの論理型。Width は整数のレジスタ幅を表すのに対し、
 -- Type はレジスタ幅を持たない bool・再帰的なポインタ型・配列型も含めたソース上の型を表す。
 -- TUsize は配列の添字用の型で、表現・命令列は u64 と同一だが u64 とは別の型として扱う（Rust準拠）。
--- TArray の要素型は配列以外の型のみ（ネストした配列は扱わない）
-data Type = TyInt Signedness Width | TUsize | TBool | TPtr Type | TArray Type Int deriving (Show, Eq)
+-- TArray の要素型は配列以外の型のみ（ネストした配列は扱わない）。
+-- TUnit はユニット型 `()`（値は `()` のみ。実行時は bool と同じく32bitスロットに常に0を格納する）
+data Type = TyInt Signedness Width | TUsize | TBool | TUnit | TPtr Type | TArray Type Int deriving (Show, Eq)
 
 -- 整数型の (符号の有無, レジスタ幅) への分解（usize は u64 と同じ表現）。整数型でなければ Nothing
 intRepr :: Type -> Maybe (Signedness, Width)
@@ -194,19 +199,21 @@ matchIntSuffix s
 
 -- Parser
 --
--- program    ::= (fn-decl | stmt)* expr
--- fn-decl    ::= 'fn' IDENT '(' (IDENT (':' type)? (',' IDENT (':' type)?)*)? ')' ('->' type)? '{' stmt* expr '}'
--- stmt       ::= let-stmt | assign-stmt | place-assign-stmt | block-stmt | if-stmt | while-stmt | break-stmt | continue-stmt | return-stmt
+-- program    ::= (fn-decl | stmt)* expr?（末尾式を省略した場合は () とする）
+-- fn-decl    ::= 'fn' IDENT '(' (IDENT (':' type)? (',' IDENT (':' type)?)*)? ')' ('->' type)? '{' stmt* expr? '}'
+--              （末尾式を省略した場合は () とする）
+-- stmt       ::= let-stmt | assign-stmt | place-assign-stmt | expr-stmt | block-stmt | if-stmt | while-stmt | break-stmt | continue-stmt | return-stmt
 -- let-stmt    ::= 'let' IDENT ':' type '=' expr ';' | 'let' IDENT '=' expr ';'
 -- assign-stmt ::= IDENT '=' expr ';'
 -- place-assign-stmt ::= expr '=' expr ';'（左辺は場所式。a[i] / p[i] / (*p)[i] / *p など）
+-- expr-stmt  ::= expr ';'
 -- block-stmt ::= '{' stmt* '}'
 -- if-stmt    ::= 'if' expr '{' stmt* '}' ('else' 'if' expr '{' stmt* '}')* ('else' '{' stmt* '}')?
 -- while-stmt    ::= 'while' expr '{' stmt* '}'
 -- break-stmt    ::= 'break' ';'
 -- continue-stmt ::= 'continue' ';'
--- return-stmt   ::= 'return' expr ';'
--- type       ::= '&' type | '[' type ';' INT ']' | 'i32' | 'i64' | 'u32' | 'u64' | 'usize' | 'bool'
+-- return-stmt   ::= 'return' expr? ';'（値を省略した場合は () とする）
+-- type       ::= '&' type | '[' type ';' INT ']' | '(' ')' | 'i32' | 'i64' | 'u32' | 'u64' | 'usize' | 'bool'
 --              ※ 配列の要素型に配列は不可（配列へのポインタ '&' '[' ... は可）
 -- expr       ::= equality
 -- equality   ::= comparison (('==' | '!=') comparison)*
@@ -216,17 +223,20 @@ matchIntSuffix s
 -- cast       ::= factor ('as' type)*（type は整数型（'i32' | 'i64' | 'u32' | 'u64' | 'usize'）のみ）
 -- factor     ::= '-' factor | '!' factor | '&' factor | '*' factor | postfix
 -- postfix    ::= primary ('[' expr ']')*
--- primary    ::= INT | INT ('i64' | 'i32' | 'u64' | 'u32' | 'usize') | 'true' | 'false' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
+-- primary    ::= INT | INT ('i64' | 'i32' | 'u64' | 'u32' | 'usize') | 'true' | 'false' | '(' ')' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
 --              | '(' expr ')' | '[' expr (',' expr)* ']' | '[' expr ';' INT ']'
 --              ※ INT ('i64'|'i32'|'u64'|'u32'|'usize') は字句解析側で空白を挟まず1トークン（TIntSuffixed）に融合される
 
 type ParseResult a = Either String (a, [Token])
 
--- program ::= (fn-decl | stmt)* expr
+-- program ::= (fn-decl | stmt)* expr?
 parse :: [Token] -> Either String Program
 parse tokens = do
   (fnDecls, stmts, rest) <- parseTopLevel tokens
-  (expr, rest') <- parseExpr rest
+  -- 末尾式の省略（入力終端）は () とする
+  (expr, rest') <- case rest of
+    [] -> Right (UnitLit, [])
+    _ -> parseExpr rest
   case rest' of
     [] -> Right (fnDecls, stmts, expr)
     (t : _) -> Left ("unexpected token: " ++ show t)
@@ -260,7 +270,10 @@ parseFnDecl tokens = do
     _ -> Right (Nothing, rest'')
   rest5 <- expectToken TLBrace rest3
   (stmts, rest6) <- parseStmts rest5
-  (tailExpr, rest7) <- parseExpr rest6
+  -- 末尾式の省略（直後が '}'）は () とする
+  (tailExpr, rest7) <- case rest6 of
+    (TRBrace : _) -> Right (UnitLit, rest6)
+    _ -> parseExpr rest6
   case rest7 of
     (TRBrace : rest8) -> Right (FnDecl name params retTy (stmts, tailExpr), rest8)
     _ -> Left "expected closing brace"
@@ -324,7 +337,7 @@ parseStmts (TReturn : rest) = do
   (stmt, rest') <- parseReturnStmt rest
   (stmts, rest'') <- parseStmts rest'
   Right (stmt : stmts, rest'')
--- キーワードで始まらない場合は式を試しに読み、次が '=' なら場所式への代入文とする。
+-- キーワードで始まらない場合は式を試しに読み、次が '=' なら場所式への代入文、';' なら式文とする。
 -- そうでなければ（末尾式 `a[0]` / `*p` など）文は無いものとして元のトークン列のまま戻る
 -- （パースエラーも末尾式として読み直す側で報告される）
 parseStmts tokens =
@@ -333,6 +346,9 @@ parseStmts tokens =
       (stmt, rest') <- parsePlaceAssignStmt lhs rest
       (stmts, rest'') <- parseStmts rest'
       Right (stmt : stmts, rest'')
+    Right (e, TSemicolon : rest) -> do
+      (stmts, rest') <- parseStmts rest
+      Right (SExpr e : stmts, rest')
     _ -> Right ([], tokens)
 
 -- let-stmt    ::= 'let' IDENT ':' type '=' expr ';' | 'let' IDENT '=' expr ';'
@@ -363,8 +379,9 @@ parseType "usize" = Right TUsize
 parseType "bool" = Right TBool
 parseType ty = Left ("unsupported type: " ++ ty)
 
--- type ::= '&' type | '[' type ';' INT ']' | IDENT（IDENTは parseType でベース型に変換する）
+-- type ::= '&' type | '[' type ';' INT ']' | '(' ')' | IDENT（IDENTは parseType でベース型に変換する）
 parseTypeAnnotation :: [Token] -> ParseResult Type
+parseTypeAnnotation (TLParen : TRParen : rest) = Right (TUnit, rest)
 parseTypeAnnotation (TAmp : rest) = do
   (inner, rest') <- parseTypeAnnotation rest
   Right (TPtr inner, rest')
@@ -465,8 +482,9 @@ parseContinueStmt tokens = do
   rest <- expectToken TSemicolon tokens
   Right (SContinue, rest)
 
--- return-stmt ::= 'return' expr ';'（先頭の'return'は呼び出し側で消費済み。値は必須）
+-- return-stmt ::= 'return' expr? ';'（先頭の'return'は呼び出し側で消費済み。値の省略は () とする）
 parseReturnStmt :: [Token] -> ParseResult Stmt
+parseReturnStmt (TSemicolon : rest) = Right (SReturn UnitLit, rest)
 parseReturnStmt tokens = do
   (expr, rest) <- parseExpr tokens
   rest' <- expectToken TSemicolon rest
@@ -615,13 +633,14 @@ parsePostfixRest expr (TLBracket : rest) = do
   parsePostfixRest (Index expr idx) rest'
 parsePostfixRest expr rest = Right (expr, rest)
 
--- primary ::= INT | INT ('i64' | 'i32' | 'u64' | 'u32' | 'usize') | 'true' | 'false' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
+-- primary ::= INT | INT ('i64' | 'i32' | 'u64' | 'u32' | 'usize') | 'true' | 'false' | '(' ')' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
 --           | '(' expr ')' | '[' expr (',' expr)* ']' | '[' expr ';' INT ']'
 parsePrimary :: [Token] -> ParseResult Expr
 parsePrimary (TInt n : rest) = Right (Lit n, rest)
 parsePrimary (TIntSuffixed n ty : rest) = Right (LitTyped n ty, rest)
 parsePrimary (TTrue : rest) = Right (BoolLit True, rest)
 parsePrimary (TFalse : rest) = Right (BoolLit False, rest)
+parsePrimary (TLParen : TRParen : rest) = Right (UnitLit, rest)
 parsePrimary (TIdent name : TLParen : rest) = do
   (args, rest') <- parseArgList rest
   Right (Call name args, rest')

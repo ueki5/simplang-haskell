@@ -128,8 +128,8 @@ main = hspec $ do
         `shouldBe` Right ([], [], Mul (Add (Lit 1) (Lit 2)) (Lit 3))
     it "単項マイナス" $
       parse [TMinus, TInt 5] `shouldBe` Right ([], [], Neg (Lit 5))
-    it "空入力はエラー" $
-      parse [] `shouldBe` Left "unexpected end of input"
+    it "空入力は末尾式 () のプログラム" $
+      parse [] `shouldBe` Right ([], [], UnitLit)
     it "変数参照" $
       parse [TIdent "x"] `shouldBe` Right ([], [], Var "x")
     it "let宣言（i64）" $
@@ -206,11 +206,11 @@ main = hspec $ do
     it "文の終端に;が無ければエラー" $
       parse [TLet, TIdent "x", TColon, TIdent "i64", TAssign, TInt 1, TIdent "x"]
         `shouldSatisfy` isLeft
-    it "末尾式が無い（文だけの）プログラムはエラー" $
+    it "末尾式が無い（文だけの）プログラムは末尾式 () に脱糖する" $
       parse [TLet, TIdent "x", TColon, TIdent "i64", TAssign, TInt 1, TSemicolon]
-        `shouldSatisfy` isLeft
-    it "末尾式の後に;を書くとエラー" $
-      parse [TInt 1, TSemicolon] `shouldSatisfy` isLeft
+        `shouldBe` Right ([], [SLet "x" (TyInt Signed W64) (Lit 1)], UnitLit)
+    it "末尾式の後に;を書くと式文になる" $
+      parse [TInt 1, TSemicolon] `shouldBe` Right ([], [SExpr (Lit 1)], UnitLit)
     it "boolリテラル（true）" $
       parse [TTrue] `shouldBe` Right ([], [], BoolLit True)
     it "boolリテラル（false）" $
@@ -412,8 +412,9 @@ main = hspec $ do
           , [SLet "a" (TyInt Signed W64) (Lit 1), SLet "b" (TyInt Signed W64) (Lit 2)]
           , Add (Var "a") (Var "b")
           )
-    it "fn本体に末尾式が無ければエラー（ユニット型は採用しないため）" $
-      parseSrc "fn f() -> i64 {\nlet x: i64 = 1;\n}\n2" `shouldSatisfy` isLeft
+    it "fn本体の末尾式を省略すると () に脱糖する（型の不一致はcompile側で検出）" $
+      parseSrc "fn f() -> i64 {\nlet x: i64 = 1;\n}\n2"
+        `shouldBe` Right ([FnDecl "f" [] (Just (TyInt Signed W64)) ([SLet "x" (TyInt Signed W64) (Lit 1)], UnitLit)], [], Lit 2)
     it "パラメータの型注釈を省略したfn定義（コロンが無ければNothingとしてパースする）" $
       parseSrc "fn add(a, b) -> i64 {\na + b\n}\n0"
         `shouldBe` Right
@@ -466,8 +467,9 @@ main = hspec $ do
           , []
           , Lit 3
           )
-    it "値の無いreturn文はエラー（ユニット型は採用しないため）" $
-      parseSrc "fn f() -> i64 {\nreturn;\n1\n}\n2" `shouldSatisfy` isLeft
+    it "値の無いreturn文は return () に脱糖する（型の不一致はcompile側で検出）" $
+      parseSrc "fn f() -> i64 {\nreturn;\n1\n}\n2"
+        `shouldBe` Right ([FnDecl "f" [] (Just (TyInt Signed W64)) ([SReturn UnitLit], Lit 1)], [], Lit 2)
     it "return文に;が無ければエラー" $
       parseSrc "fn f() -> i64 {\nreturn 1\n2\n}\n3" `shouldSatisfy` isLeft
 
@@ -1677,6 +1679,108 @@ main = hspec $ do
         compileSourceAndRunExit "fn get(p: &[i64; 2], i: usize) -> i64 { p[i] }\nlet a = [1, 2];\nget(&a, 2usize)"
       out `shouldBe` "index out of bounds"
       code `shouldNotBe` ExitSuccess
+
+  describe "ユニット型・式文（parse）" $ do
+    let parseSrc src = tokenize src >>= parse
+    it "() リテラル" $
+      parseSrc "()" `shouldBe` Right ([], [], UnitLit)
+    it "() 型注釈（&() / [(); N] も可）" $
+      parseSrc "let u: () = ();\nlet p: &() = &u;\nlet a: [(); 2] = [(), ()];\nu"
+        `shouldBe` Right
+          ( []
+          , [ SLet "u" TUnit UnitLit
+            , SLet "p" (TPtr TUnit) (AddrOf (Var "u"))
+            , SLet "a" (TArray TUnit 2) (ArrayLit [UnitLit, UnitLit])
+            ]
+          , Var "u"
+          )
+    it "末尾式を省略したfnは末尾式 () に脱糖する" $
+      parseSrc "fn f() {\nlet x = 1;\n}\n2"
+        `shouldBe` Right ([FnDecl "f" [] Nothing ([SLetInferred "x" (Lit 1)], UnitLit)], [], Lit 2)
+    it "return; は return () に脱糖する" $
+      parseSrc "fn f() -> () {\nreturn;\n}\n2"
+        `shouldBe` Right ([FnDecl "f" [] (Just TUnit) ([SReturn UnitLit], UnitLit)], [], Lit 2)
+    it "式文" $
+      parseSrc "f(1);\n1 + 2;\nx"
+        `shouldBe` Right ([], [SExpr (Call "f" [Lit 1]), SExpr (Add (Lit 1) (Lit 2))], Var "x")
+    it "末尾式を省略したプログラムは末尾式 () に脱糖する" $
+      parseSrc "let x = 1;\nf(x);"
+        `shouldBe` Right ([], [SLetInferred "x" (Lit 1), SExpr (Call "f" [Var "x"])], UnitLit)
+    it "() へのキャストはエラー" $
+      parseSrc "1 as ()" `shouldBe` Left "invalid cast target: only integer types (i32/i64/u32/u64/usize) are allowed"
+
+  describe "ユニット型・式文（compile）" $ do
+    let compileSource src = tokenize src >>= parse >>= compile
+        finalTypeOf src = (\(_, t, _) -> t) <$> compileSource src
+    it "末尾式が () のプログラムの型は ()" $
+      finalTypeOf "let x = 1;" `shouldBe` Right TUnit
+    it "型省略・末尾式なしのfnの戻り値型は () に推論される" $
+      finalTypeOf "fn f() {\nlet x = 1;\n}\nf()" `shouldBe` Right TUnit
+    it "return; のみのfnの戻り値型は () に推論される" $
+      finalTypeOf "fn f(x: i64) {\nif x > 0 {\nreturn;\n}\n}\nf(1)" `shouldBe` Right TUnit
+    it "() を返すfnの呼び出しで初期化した変数の型は ()" $
+      finalTypeOf "fn f() {}\nlet u = f();\nu" `shouldBe` Right TUnit
+    it "末尾式とreturnの両方から推論する" $
+      finalTypeOf "fn f(x: i64) {\nif x > 0 {\nreturn 1i32;\n}\n2\n}\nf(1)" `shouldBe` Right (TyInt Signed W32)
+    it "式文は値を捨てる（IPop）" $
+      (\(_, _, is) -> is) <$> compileSource "1;\n2"
+        `shouldBe` Right [Push 1, IPop, Push 2]
+    it "式文はVMでも値を捨てる" $
+      (((\(_, _, is) -> is) <$> compileSource "let x = 1;\nx + 1;\nx") >>= run)
+        `shouldBe` Right 1
+
+  describe "ユニット型・式文（意味論エラー）" $ do
+    let compileSource src = tokenize src >>= parse >>= compile
+    it "-> i64 なのに末尾式を省略するとエラー" $
+      compileSource "fn f() -> i64 {\nlet x = 1;\n}\nf()"
+        `shouldBe` Left "type mismatch: expected i64, found ()"
+    it "-> i64 なのに return; するとエラー" $
+      compileSource "fn f() -> i64 {\nreturn;\n}\nf()"
+        `shouldBe` Left "type mismatch: expected i64, found ()"
+    it "-> () なのに値を return するとエラー" $
+      compileSource "fn f() -> () {\nreturn 1i64;\n}\nf()"
+        `shouldBe` Left "type mismatch: expected (), found i64"
+    it "型省略で return 値 と末尾式の省略が食い違うとエラー" $
+      compileSource "fn f(x: i64) {\nif x > 0 {\nreturn 1i64;\n}\n}\nf(1)"
+        `shouldBe` Left "type mismatch: i64 and ()"
+    it "() 型の変数に整数を代入するとエラー" $
+      compileSource "let x: () = 5;\nx" `shouldBe` Left "type mismatch: expected (), found integer literal"
+    it "整数型の変数に () を代入するとエラー" $
+      compileSource "let x: i64 = ();\nx" `shouldBe` Left "type mismatch: expected i64, found ()"
+    it "() 同士の算術はエラー" $
+      compileSource "() + ()" `shouldBe` Left "type mismatch: expected (), found arithmetic expression"
+    it "() 同士の大小比較はエラー" $
+      compileSource "() < ()" `shouldBe` Left "type mismatch: expected i32 or i64, found ()"
+    it "if の条件に () はエラー" $
+      compileSource "if () {\n}\n1" `shouldBe` Left "type mismatch: expected bool, found ()"
+    it "return; は関数の外ではエラー" $
+      compileSource "return;\n1" `shouldBe` Left "return used outside function"
+
+  describe "compile + codegen + gcc（ユニット型・式文の結合テスト）" $ do
+    it "() を返すfnを式文で呼び、ポインタ経由で書き込む（return; による早期脱出）" $ do
+      result <-
+        compileSourceAndRun
+          "fn set(p: &i64, v) {\nif v < 0 {\nreturn;\n}\n*p = v;\n}\nlet x: i64 = 1;\nset(&x, 5);\nset(&x, -1);\nx"
+      result `shouldBe` "5"
+    it "-> () を明示したfnから別の () のfnを末尾式で呼ぶ" $ do
+      result <-
+        compileSourceAndRun
+          "fn inc(p: &i64) {\n*p = *p + 1;\n}\nfn twice(p: &i64) -> () {\ninc(p);\ninc(p)\n}\nlet x = 40;\ntwice(&x);\nx"
+      result `shouldBe` "42"
+    it "() 型の変数・ポインタ・比較" $ do
+      result <- compileSourceAndRun "fn noop() {}\nlet u = noop();\nlet w: () = ();\nlet p = &w;\nu == *p"
+      result `shouldBe` "true"
+    it "() 型の仮引数" $ do
+      result <- compileSourceAndRun "fn f(u: (), x: i64) -> i64 {\nx + 1\n}\nf((), 41)"
+      result `shouldBe` "42"
+    it "式文で () 以外の値を捨てる（式中の呼び出しのアライメントを含む）" $ do
+      result <-
+        compileSourceAndRun "fn add(p: &i64, v: i64) -> i64 {\n*p = *p + v;\n*p\n}\nlet x = 0;\nadd(&x, 1);\n1 + add(&x, 2);\nx"
+      result `shouldBe` "3"
+    it "末尾式が () のプログラムは何も出力しない" $ do
+      (code, out) <- compileSourceAndRunExit "let x = 1;\nx = 2;"
+      out `shouldBe` ""
+      code `shouldBe` ExitSuccess
 
 compileAndRun :: Expr -> IO String
 compileAndRun expr =
