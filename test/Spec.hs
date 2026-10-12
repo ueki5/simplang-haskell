@@ -1403,7 +1403,7 @@ main = hspec $ do
     it "添字アクセス（末尾式のa[0]は代入文と区別される）" $
       parseSource "a[0]" `shouldBe` Right ([], [], Index (Var "a") (Lit 0))
     it "要素への代入文" $
-      parseSource "a[i] = 1;\n0" `shouldBe` Right ([], [SAssignIndex "a" (Var "i") (Lit 1)], Lit 0)
+      parseSource "a[i] = 1;\n0" `shouldBe` Right ([], [SAssignPlace (Index (Var "a") (Var "i")) (Lit 1)], Lit 0)
     it "添字は単項演算子より強く結合する" $ do
       parseSource "-a[0]" `shouldBe` Right ([], [], Neg (Index (Var "a") (Lit 0)))
       parseSource "&a[1]" `shouldBe` Right ([], [], AddrOf (Index (Var "a") (Lit 1)))
@@ -1412,8 +1412,6 @@ main = hspec $ do
       parseSource "x as usize" `shouldBe` Right ([], [], Cast (Var "x") TUsize)
     it "ネストした配列はエラー" $
       parseSource "let a: [[i32; 2]; 2] = 0;\n0" `shouldBe` Left "nested arrays are not supported"
-    it "配列へのポインタはエラー" $
-      parseSource "let p: &[i32; 2] = 0;\n0" `shouldBe` Left "pointer to array is not supported"
     it "空の配列リテラルはエラー" $
       parseSource "let a = [];\n0" `shouldBe` Left "empty array literal is not supported"
     it "長さ0の配列型はエラー" $
@@ -1488,16 +1486,14 @@ main = hspec $ do
       compileSource "let a = [1, 2];\nlet b = a;\n0" `shouldBe` Left "array must be initialized with an array literal"
     it "配列全体への代入はエラー" $
       compileSource "let a = [1, 2];\na = [3, 4];\n0" `shouldBe` Left "cannot assign to array a; assign to elements instead"
-    it "配列のアドレス取得はエラー" $
-      compileSource "let a = [1, 2];\n&a" `shouldBe` Left "cannot take address of array a"
     it "配列リテラルをlet初期化以外で使うとエラー" $
       compileSource "[1, 2][0]" `shouldBe` Left "cannot index into a value of type [i64; 2]"
     it "配列でない値への添字はエラー" $
       compileSource "let x = 1;\nx[0]" `shouldBe` Left "cannot index into a value of type i64"
     it "関数の仮引数・戻り値に配列型は使えない（注釈）" $
-      compileSource "fn f(a: [i32; 2]) -> i32 { 0 }\n0" `shouldBe` Left "array type is not allowed in function signature: f"
+      compileSource "fn f(a: [i32; 2]) -> i32 { 0 }\n0" `shouldBe` Left "array type is not allowed in function signature (pass &[T; N] instead): f"
     it "関数の仮引数・戻り値に配列型は使えない（推論）" $
-      compileSource "fn f(a) { 0 }\nlet a = [1, 2];\nf(a)" `shouldBe` Left "array type is not allowed in function signature: f"
+      compileSource "fn f(a) { 0 }\nlet a = [1, 2];\nf(a)" `shouldBe` Left "array type is not allowed in function signature (pass &[T; N] instead): f"
 
   describe "配列（VM・codegen）" $ do
     it "IBoundsCheckは範囲内なら添字を残す" $
@@ -1564,6 +1560,121 @@ main = hspec $ do
       code `shouldNotBe` ExitSuccess
     it "要素への代入でも範囲外を検出する（0 - 1 のラップアラウンド）" $ do
       (code, out) <- compileSourceAndRunExit "let a = [1, 2];\nlet i: usize = 0;\na[i - 1] = 5;\n0"
+      out `shouldBe` "index out of bounds"
+      code `shouldNotBe` ExitSuccess
+
+  describe "配列へのポインタ（parse）" $ do
+    let parseSource src = tokenize src >>= parse
+    it "配列へのポインタ型" $
+      parseSource "let p: &[i32; 3] = &a;\n0"
+        `shouldBe` Right ([], [SLet "p" (TPtr (TArray (TyInt Signed W32) 3)) (AddrOf (Var "a"))], Lit 0)
+    it "配列へのポインタを要素とする配列型" $
+      parseSource "let ps: [&[bool; 2]; 3] = [&a; 3];\n0"
+        `shouldBe` Right ([], [SLet "ps" (TArray (TPtr (TArray TBool 2)) 3) (ArrayRepeat (AddrOf (Var "a")) 3)], Lit 0)
+    it "(*p)[i] = v;" $
+      parseSource "(*p)[i] = 1;\n0"
+        `shouldBe` Right ([], [SAssignPlace (Index (Deref (Var "p")) (Var "i")) (Lit 1)], Lit 0)
+    it "*p = v;" $
+      parseSource "*p = 1;\n0" `shouldBe` Right ([], [SAssignPlace (Deref (Var "p")) (Lit 1)], Lit 0)
+    it "末尾式の (*p)[0] / *p は代入文と誤認されない" $ do
+      parseSource "(*p)[0]" `shouldBe` Right ([], [], Index (Deref (Var "p")) (Lit 0))
+      parseSource "*p" `shouldBe` Right ([], [], Deref (Var "p"))
+    it "末尾式のパースエラーはそのまま報告される" $
+      parseSource "let x = 1;\n(x" `shouldBe` Left "expected closing parenthesis"
+
+  describe "配列へのポインタ（compile）" $ do
+    let compileSource src = tokenize src >>= parse >>= compile
+    it "&a は配列先頭のアドレス" $
+      compileSource "let a = [1, 2];\n&a"
+        `shouldBe` Right ([], TPtr (TArray (TyInt Signed W64) 2), [Push 1, Store W64 (-16), Push 2, Store W64 (-8), LoadAddr (-16)])
+    it "p[i] はポインタの値を先頭アドレスとして自動デリファレンスする" $
+      fmap (\(_, _, is) -> drop 5 is) (compileSource "let a = [1, 2];\nlet p = &a;\np[1]")
+        `shouldBe` Right [Store W64 (-24), Load W64 (-24), Push 1, IBoundsCheck 2, Push 8, IMul W64, IAdd W64, LoadInd W64]
+    it "(*p)[i] は p[i] と同じ命令列" $
+      fmap (\(_, _, is) -> is) (compileSource "let a = [1, 2];\nlet p = &a;\n(*p)[1]")
+        `shouldBe` fmap (\(_, _, is) -> is) (compileSource "let a = [1, 2];\nlet p = &a;\np[1]")
+    it "*p = v はポインタの値へ StoreInd する" $
+      fmap (\(_, _, is) -> is) (compileSource "let x: i32 = 1;\nlet p = &x;\n*p = 2;\nx")
+        `shouldBe` Right
+          [Push 1, Store W32 (-4), LoadAddr (-4), Store W64 (-12), Load W64 (-12), Push 2, StoreInd W32, Load W32 (-4)]
+
+  describe "配列へのポインタ（意味論エラー）" $ do
+    let compileSource src = fmap (const ()) (tokenize src >>= parse >>= compile)
+    it "ローカル変数へのポインタを末尾式で返すとエラー" $
+      compileSource "fn f() -> &i64 { let x: i64 = 1; &x }\n0" `shouldBe` Left "cannot return reference to local variable: x"
+    it "ローカル配列へのポインタを返すとエラー" $
+      compileSource "fn f() -> &[i64; 2] { let a = [1, 2]; &a }\n0" `shouldBe` Left "cannot return reference to local variable: a"
+    it "ローカル配列の要素へのポインタをreturnで返すとエラー" $
+      compileSource "fn f(p: &i64) -> &i64 { let a = [1, 2]; if true { return &a[1]; } p }\n0"
+        `shouldBe` Left "cannot return reference to local variable: a"
+    it "return文でもローカルへのポインタを検出する" $
+      compileSource "fn f(p: &i64) -> &i64 { let x: i64 = 1; if true { return &x; } p }\n0"
+        `shouldBe` Left "cannot return reference to local variable: x"
+    it "仮引数へのポインタを返すとエラー" $
+      compileSource "fn f(x: i64) -> &i64 { &x }\n0" `shouldBe` Left "cannot return reference to local variable: x"
+    it "引数のポインタ経由の &*p / &p[i] / p は返せる" $ do
+      compileSource "fn f(p: &i64) -> &i64 { &*p }\n0" `shouldBe` Right ()
+      compileSource "fn f(p: &[i64; 2]) -> &i64 { &p[1] }\n0" `shouldBe` Right ()
+      compileSource "fn f(p: &[i64; 2]) -> &[i64; 2] { p }\n0" `shouldBe` Right ()
+    it "*p（配列）を値として使うとエラー" $ do
+      compileSource "let a = [1, 2];\nlet p = &a;\n*p" `shouldBe` Left "array cannot be used as a value: dereferenced array pointer"
+      compileSource "let a = [1, 2];\nlet p = &a;\nlet b = *p;\n0" `shouldBe` Left "array must be initialized with an array literal"
+    it "*p（配列）への代入はエラー" $
+      compileSource "let a = [1, 2];\nlet p = &a;\n*p = [3, 4];\n0" `shouldBe` Left "cannot assign to array; assign to elements instead"
+    it "場所式でない左辺への代入はエラー" $
+      compileSource "5 = 1;\n0" `shouldBe` Left "invalid left-hand side of assignment"
+    it "長さが異なる配列へのポインタは渡せない" $
+      compileSource "fn f(p: &[i64; 3]) -> i64 { p[0] }\nlet a = [1, 2, 3, 4];\nf(&a)"
+        `shouldBe` Left "type mismatch: expected &[i64; 3], found &[i64; 4]"
+    it "要素型が異なる配列へのポインタは渡せない" $
+      compileSource "fn f(p: &[i64; 2]) -> i64 { p[0] }\nlet a = [1i32, 2i32];\nf(&a)"
+        `shouldBe` Left "type mismatch: expected &[i64; 2], found &[i32; 2]"
+    it "配列へのポインタ経由のリテラル添字もコンパイル時に範囲検査する" $
+      compileSource "fn f(p: &[i64; 2]) -> i64 { p[2] }\n0" `shouldBe` Left "index out of bounds: the length is 2 but the index is 2"
+    it "配列でないポインタへの添字はエラー" $
+      compileSource "let x: i64 = 1;\nlet p = &x;\np[0]" `shouldBe` Left "cannot index into a value of type &i64"
+
+  describe "compile + codegen + gcc（配列へのポインタの結合テスト）" $ do
+    it "出力引数で呼び出し元の配列を書き換える（p[i] / (*p)[i]）" $ do
+      result <-
+        compileSourceAndRun
+          "fn fill(p: &[i32; 3], v: i32) -> i32 {\np[0] = v;\np[1] = v + 1;\n(*p)[2] = v + 2;\n0\n}\nlet a = [0i32; 3];\nlet d = fill(&a, 5);\na[0] + a[1] + a[2]"
+      result `shouldBe` "18"
+    it "ポインタ経由で合計を求める（仮引数の型推論）" $ do
+      result <-
+        compileSourceAndRun
+          "fn sum(p) {\nlet s = 0;\nlet i: usize = 0;\nwhile i < 4 {\ns = s + p[i];\ni = i + 1;\n}\ns\n}\nlet a = [1, 2, 3, 4];\nsum(&a)"
+      result `shouldBe` "10"
+    it "引数で受け取ったポインタを返し、呼び出し側で添字アクセスする" $ do
+      result <-
+        compileSourceAndRun
+          "fn pick(a: &[i32; 3], b: &[i32; 3], first: bool) -> &[i32; 3] {\nif first {\nreturn a;\n}\nb\n}\nlet x = [1i32; 3];\nlet y = [9i32; 3];\nlet r = pick(&x, &y, false);\nx[0] + r[2] + pick(&x, &y, true)[1]"
+      result `shouldBe` "11"
+    it "u32配列へのポインタ（ゼロ拡張の維持）" $ do
+      result <-
+        compileSourceAndRun
+          "fn dec(p: &[u32; 2]) -> u32 {\np[1] = p[0] - 1u32;\np[1]\n}\nlet a = [0u32, 0u32];\ndec(&a)"
+      result `shouldBe` "4294967295"
+    it "bool配列へのポインタ" $ do
+      result <- compileSourceAndRun "fn same(b: &[bool; 2]) -> bool { b[0] == b[1] }\nlet t = [true, false];\nt[1] = true;\nsame(&t)"
+      result `shouldBe` "true"
+    it "配列へのポインタを要素とする配列" $ do
+      result <-
+        compileSourceAndRun "let a = [1, 2];\nlet b = [3, 4];\nlet ps = [&a, &b];\nps[1][0] = 30;\nb[0] + ps[0][1]"
+      result `shouldBe` "32"
+    it "要素へのポインタを返し、*p = v で書き込む" $ do
+      result <-
+        compileSourceAndRun "fn at(p: &[i64; 3], i: usize) -> &i64 { &p[i] }\nlet a = [1, 2, 3];\nlet q = at(&a, 2);\n*q = 40;\na[2] + *at(&a, 0)"
+      result `shouldBe` "41"
+    it "スカラーの *p = v" $ do
+      result <- compileSourceAndRun "let x: i32 = 1;\nlet p = &x;\n*p = *p + 41;\nx"
+      result `shouldBe` "42"
+    it "末尾式が配列へのポインタなら%p形式で出力する" $ do
+      result <- compileSourceAndRun "let a = [1, 2];\n&a"
+      take 2 result `shouldBe` "0x"
+    it "ポインタ経由の範囲外アクセスは実行時エラー" $ do
+      (code, out) <-
+        compileSourceAndRunExit "fn get(p: &[i64; 2], i: usize) -> i64 { p[i] }\nlet a = [1, 2];\nget(&a, 2usize)"
       out `shouldBe` "index out of bounds"
       code `shouldNotBe` ExitSuccess
 

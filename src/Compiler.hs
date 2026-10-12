@@ -254,11 +254,18 @@ compileStmtsFrom fnSigs initEnv initCursor loopCtx returnCtx stmts = foldM step 
       instrs <- lift (compileExprTyped fnSigs env ty expr)
       -- 変数とアドレスのマップはそのまま, 命令＋追加命令＋変数のストア
       pure (env, cursor, acc ++ instrs ++ [Store (storageWidth ty) off])
-    -- xxx[i] = ...（要素のアドレスを計算し、要素型を期待型として値をコンパイルしてから間接ストアする）
-    step (env, cursor, acc) (SAssignIndex name idx expr) = do
-      (elemTy, addrInstrs) <- lift (indexAddr fnSigs env (Var name) idx)
-      instrs <- lift (compileExprTyped fnSigs env elemTy expr)
-      pure (env, cursor, acc ++ addrInstrs ++ instrs ++ [StoreInd (storageWidth elemTy)])
+    -- a[i] = ... / p[i] = ... / *p = ...（場所式のアドレスを計算し、その型を期待型として値をコンパイルしてから間接ストアする）
+    step (env, cursor, acc) (SAssignPlace lhs expr) = do
+      case lhs of
+        Index _ _ -> pure ()
+        Deref _ -> pure ()
+        _ -> lift (Left "invalid left-hand side of assignment")
+      (ty, addrInstrs) <- lift (addressOf fnSigs env lhs)
+      case ty of
+        TArray _ _ -> lift (Left "cannot assign to array; assign to elements instead")
+        _ -> pure ()
+      instrs <- lift (compileExprTyped fnSigs env ty expr)
+      pure (env, cursor, acc ++ addrInstrs ++ instrs ++ [StoreInd (storageWidth ty)])
     -- { ... }
     step (env, cursor, acc) (SBlock innerStmts) = do
       -- 先頭に空スコープをpushして再帰コンパイルし、返り値のEnv/cursorは破棄して呼び出し前の値をそのまま継続に使う
@@ -285,6 +292,7 @@ compileStmtsFrom fnSigs initEnv initCursor loopCtx returnCtx stmts = foldM step 
     -- return expr;
     step (env, cursor, acc) (SReturn expr) = do
       (retTy, endLabel) <- lift (maybe (Left "return used outside function") Right returnCtx)
+      lift (checkNoLocalRef env expr)
       instrs <- lift (compileExprTyped fnSigs env retTy expr)
       pure (env, cursor, acc ++ instrs ++ [Jmp endLabel])
 
@@ -371,11 +379,26 @@ compileFnDecl fnSigs (FnDecl name params _ (stmts, tailExpr)) = do
       spillInstrs = [StoreArg i (storageWidth ty) off | (i, (_, off, ty)) <- zip [0 ..] assigned]
       returnCtx = Just (retTy, endLabel)
   (env1, _cursor1, stmtInstrs) <- compileStmtsFrom fnSigs env0 paramCursor Nothing returnCtx stmts
+  lift (checkNoLocalRef env1 tailExpr)
   tailInstrs <- lift (compileExprTyped fnSigs env1 retTy tailExpr)
   -- pTraceShowM ("assigned of " ++ name, assigned)
   -- pTraceShowM ("env0 of " ++ name, env0)
   -- pTraceShowM ("env1 of " ++ name, env1)
   pure (name, spillInstrs ++ stmtInstrs ++ tailInstrs ++ [Label endLabel])
+
+-- 関数から返す式（return式・末尾式）が、直接その関数のローカル変数（仮引数を含む）を指すポインタで
+-- あればエラーとする（関数から戻るとスタックフレームが破棄され、ダングリングポインタになるため）。
+-- 検出するのは `&x` と `&a[i]`（aがローカルの配列）を直接返す形のみの簡易検査で、中間変数を経由する
+-- `let p = &x; p` などは検出しない。`&*p` や `&p[i]`（pがポインタ）は呼び出し元のデータを指すため許可する
+checkNoLocalRef :: Env -> Expr -> Either String ()
+checkNoLocalRef env (AddrOf place) =
+  case place of
+    Var name | Just _ <- lookupVar name env -> localRef name
+    Index (Var name) _ | Just (_, TArray _ _) <- lookupVar name env -> localRef name
+    _ -> Right ()
+  where
+    localRef name = Left ("cannot return reference to local variable: " ++ name)
+checkNoLocalRef _ _ = Right ()
 
 -- Maybe Type の単一化（Nothing = 整数リテラルなど未確定な部分木）
 unifyType :: Type -> Type -> Either String Type
@@ -429,11 +452,12 @@ inferMaybeType fnSigs env expr = do
     go (ArrayRepeat e n) = do
       elemTy <- go e
       Right (Just (TArray (maybe (TyInt Signed W64) id elemTy) n))
-    -- a[i] の型は配列の要素型
+    -- a[i] の型は配列の要素型（p[i] のように配列へのポインタも自動デリファレンスする）
     go (Index base _) = do
       t <- go base
       case t of
         Just (TArray elemTy _) -> Right (Just elemTy)
+        Just (TPtr (TArray elemTy _)) -> Right (Just elemTy)
         Just other -> Left ("cannot index into a value of type " ++ typeName other)
         Nothing -> Left "cannot index into a value of type integer literal"
     -- &lvalue の型は lvalue 自身の型を TPtr で包んだもの（addressOf に委譲する）
@@ -479,15 +503,14 @@ operandType fnSigs env a b = do
   tb <- inferMaybeType fnSigs env b
   maybe (TyInt Signed W64) id <$> unifyMaybeType ta tb
 
--- lvalue（&の対象になれる式）の実効アドレスを計算する命令列と、その参照先の型を返す。
--- lvalueとして認めるのは変数参照と、ポインタのデリファレンス（&*p は p 自身の値が
--- 既にアドレスそのものなので LoadAddr/LoadInd を使わず p を普通にコンパイルするだけでよい）の2種のみ。
+-- lvalue（&の対象・代入の左辺になれる式）の実効アドレスを計算する命令列と、その参照先の型を返す。
+-- lvalueとして認めるのは変数参照（配列を含む）、ポインタのデリファレンス（&*p は p 自身の値が
+-- 既にアドレスそのものなので LoadAddr/LoadInd を使わず p を普通にコンパイルするだけでよい）、配列要素の3種のみ。
 -- それ以外（リテラル・算術式・関数呼び出し・&式自身 等）は意味論エラーとする。
 addressOf :: FnSigs -> Env -> Expr -> Either String (Type, [Instr])
 addressOf _ env (Var name) =
   case lookupVar name env of
     Nothing -> Left ("undeclared variable: " ++ name)
-    Just (_, TArray _ _) -> Left ("cannot take address of array " ++ name)
     Just (off, ty) -> Right (ty, [LoadAddr off])
 -- &a[i] は要素の実効アドレス
 addressOf fnSigs env (Index base idx) = indexAddr fnSigs env base idx
@@ -548,7 +571,6 @@ addressOfSlot :: Map String FnDecl -> ResolvedSlots -> LocalEnv -> Expr -> Eithe
 addressOfSlot _ _ env (Var name) =
   case lookupLocal name env of
     Nothing -> Left ("undeclared variable: " ++ name)
-    Just (Right (TArray _ _)) -> Left ("cannot take address of array " ++ name)
     Just status -> Right status
 addressOfSlot fnDeclMap resolved env e@(Index _ _) = do
   r <- resolveExprType fnDeclMap resolved env e
@@ -606,6 +628,7 @@ resolveExprType fnDeclMap resolved env expr = do
     go (Index base _) =
       go base `chainSlot` \t -> case t of
         Just (TArray elemTy _) -> Right (Right (Just elemTy))
+        Just (TPtr (TArray elemTy _)) -> Right (Right (Just elemTy))
         Just other -> Left ("cannot index into a value of type " ++ typeName other)
         Nothing -> Left "cannot index into a value of type integer literal"
     go (AddrOf e) = case addressOfSlot fnDeclMap resolved env e of
@@ -704,10 +727,10 @@ collectEvidenceStmts fnDeclMap resolved curFn localenv stmts = do
       ev <- callEvidence fnDeclMap resolved env expr
       -- pTraceShowM ("ev", ev)
       pure (env, ev)
-    step env (SAssignIndex _ idx expr) = do
-      idxEv <- callEvidence fnDeclMap resolved env idx
+    step env (SAssignPlace lhs expr) = do
+      lhsEv <- callEvidence fnDeclMap resolved env lhs
       ev <- callEvidence fnDeclMap resolved env expr
-      pure (env, idxEv ++ ev)
+      pure (env, lhsEv ++ ev)
     step env (SBlock inner) = do
       (_, ev) <- collectEvidenceStmts fnDeclMap resolved curFn (Map.empty : env) inner
       pure (env, ev)
@@ -867,7 +890,7 @@ resolveFnSigs fnDecls stmts tailExpr = do
   mapM_
     ( \(name, (paramTys, retTy)) ->
         when (any isArrayType (retTy : paramTys)) $
-          Left ("array type is not allowed in function signature: " ++ name)
+          Left ("array type is not allowed in function signature (pass &[T; N] instead): " ++ name)
     )
     sigs
   pure (Map.fromList sigs)
@@ -974,6 +997,7 @@ compileExprTyped fnSigs env expected (AddrOf e) = do
     then Right instrs
     else Left ("type mismatch: expected " ++ typeName expected ++ ", found " ++ typeName (TPtr pointeeTy))
 -- [let ]xxx = *ptr;（expectedをそのまま子へ TPtr expected として伝播する。Castと異なり一様伝播を崩さない）
+compileExprTyped _ _ (TArray _ _) (Deref _) = Left "array cannot be used as a value: dereferenced array pointer"
 compileExprTyped fnSigs env expected (Deref e) = do
   ei <- compileExprTyped fnSigs env (TPtr expected) e
   Right (ei ++ [LoadInd (storageWidth expected)] ++ loadFixup expected)
@@ -1016,18 +1040,11 @@ compileCompare fnSigs env expected l r allowBool cmp
           Right (li ++ ri ++ [cmp opTy])
 
 -- 配列要素 base[idx] の実効アドレスを計算する命令列と、その要素型を返す（読み出し・代入・&a[i] で共用）。
--- base は配列型のローカル変数のみ。添字は usize 型で、実行時に範囲検査（IBoundsCheck）を行う。
--- 添字が整数リテラルであればコンパイル時にも範囲検査する
+-- 添字は usize 型で、実行時に範囲検査（IBoundsCheck）を行う。要素数は型から得られるため、
+-- 配列へのポインタ経由でも検査できる。添字が整数リテラルであればコンパイル時にも範囲検査する
 indexAddr :: FnSigs -> Env -> Expr -> Expr -> Either String (Type, [Instr])
 indexAddr fnSigs env base idx = do
-  (off, elemTy, len) <- case base of
-    Var name -> case lookupVar name env of
-      Nothing -> Left ("undeclared variable: " ++ name)
-      Just (off, TArray elemTy len) -> Right (off, elemTy, len)
-      Just (_, ty) -> Left ("cannot index into a value of type " ++ typeName ty)
-    _ -> do
-      mty <- inferMaybeType fnSigs env base
-      Left ("cannot index into a value of type " ++ maybe "integer literal" typeName mty)
+  (elemTy, len, baseInstrs) <- arrayBase fnSigs env base
   case literalIndex idx of
     Just n
       | toU64 n >= fromIntegral len ->
@@ -1035,11 +1052,30 @@ indexAddr fnSigs env base idx = do
     _ -> Right ()
   idxInstrs <- compileExprTyped fnSigs env TUsize idx
   let elemSize = widthBytes (storageWidth elemTy)
-  Right (elemTy, [LoadAddr off] ++ idxInstrs ++ [IBoundsCheck len, Push elemSize, IMul W64, IAdd W64])
+  Right (elemTy, baseInstrs ++ idxInstrs ++ [IBoundsCheck len, Push elemSize, IMul W64, IAdd W64])
   where
     literalIndex (Lit n) = Just n
     literalIndex (LitTyped n TUsize) = Just n
     literalIndex _ = Nothing
+
+-- 添字アクセスの基底となる配列の (要素型, 要素数, 先頭アドレスを積む命令列) を返す。
+--   a      （配列のローカル変数）    → LoadAddr で変数自身のアドレス
+--   ( *p ) （p: &[T; N]）            → p の値がそのまま先頭アドレス
+--   p      （&[T; N] 型の任意の式）  → 自動デリファレンス（式の値がそのまま先頭アドレス）
+arrayBase :: FnSigs -> Env -> Expr -> Either String (Type, Int, [Instr])
+arrayBase _ env (Var name)
+  | Just (off, TArray elemTy len) <- lookupVar name env = Right (elemTy, len, [LoadAddr off])
+arrayBase fnSigs env base = do
+  mty <- inferMaybeType fnSigs env base
+  case (base, mty) of
+    (Deref e, Just (TArray elemTy len)) -> do
+      instrs <- compileExprTyped fnSigs env (TPtr (TArray elemTy len)) e
+      Right (elemTy, len, instrs)
+    (_, Just ty@(TPtr (TArray elemTy len))) -> do
+      instrs <- compileExprTyped fnSigs env ty base
+      Right (elemTy, len, instrs)
+    (_, Just ty) -> Left ("cannot index into a value of type " ++ typeName ty)
+    (_, Nothing) -> Left "cannot index into a value of type integer literal"
 
 -- 配列型の let の初期化。要素ごとに静的なオフセット（先頭 off から要素サイズずつ）へ直接ストアする。
 -- [e; N] は e を1回だけ評価して要素0へストアし、残りの要素へはそれをコピーする（副作用は1回のみ）
