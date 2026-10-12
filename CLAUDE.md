@@ -24,6 +24,7 @@ Haskell で実装されており、GCC をリンカとして利用する。
 - 符号なし整数型（u32/u64）の設計: `docs/step018.md`
 - 配列型（`[T; N]`）とusize型の設計: `docs/step019.md`
 - 配列へのポインタ（`&[T; N]`）と関数での受け渡しの設計: `docs/step020.md`
+- 将来の課題（バックログ）: `docs/backlog.md`（stepを追加するたびに更新する）
 
 ## Build & Run
 
