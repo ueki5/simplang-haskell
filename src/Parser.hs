@@ -1,12 +1,12 @@
-module Parser (Token (..), Expr (..), Stmt (..), FnDecl (..), Width (..), Type (..), Program, tokenize, parse) where
+module Parser (Token (..), Expr (..), Stmt (..), FnDecl (..), Width (..), Signedness (..), Type (..), Program, tokenize, parse) where
 
 import Data.Char (isAlpha, isAlphaNum, isDigit, isSpace)
 import Data.List (stripPrefix)
 
 data Token
   = TInt Int
-  | -- 'i32'/'i64'サフィックス付き整数リテラル（例: `9999i64`）。空白を挟まず直接連結される
-    TIntSuffixed Int Width
+  | -- 'i32'/'i64'/'u32'/'u64'サフィックス付き整数リテラル（例: `9999i64`）。空白を挟まず直接連結される
+    TIntSuffixed Int Signedness Width
   | TIdent String
   | TLet
   | TIf
@@ -44,8 +44,8 @@ data Token
 
 data Expr
   = Lit Int
-  | -- 'i32'/'i64'サフィックスで型を固定した整数リテラル（例: `9999i64`）。Litと異なりexpectedとは無関係に型が確定する
-    LitTyped Int Width
+  | -- 'i32'/'i64'/'u32'/'u64'サフィックスで型を固定した整数リテラル（例: `9999i64`）。Litと異なりexpectedとは無関係に型が確定する
+    LitTyped Int Signedness Width
   | BoolLit Bool
   | Var String
   | Add Expr Expr
@@ -60,8 +60,8 @@ data Expr
   | Gt Expr Expr
   | Ge Expr Expr
   | Not Expr
-  | -- `expr as i64` / `expr as i32`（キャスト先は整数型のみ）
-    Cast Expr Width
+  | -- `expr as i64` / `expr as u32` など（キャスト先は整数型のみ）
+    Cast Expr Signedness Width
   | Call String [Expr]
   | AddrOf Expr
   | Deref Expr
@@ -99,9 +99,12 @@ type Program = ([FnDecl], [Stmt], Expr)
 -- 整数演算・変数のビット幅（codegenのレジスタ幅）
 data Width = W32 | W64 deriving (Show, Eq)
 
+-- 整数の符号の有無（i32/i64 は Signed、u32/u64 は Unsigned）
+data Signedness = Signed | Unsigned deriving (Show, Eq)
+
 -- ソースレベルの論理型。Width は整数のレジスタ幅を表すのに対し、
 -- Type はレジスタ幅を持たない bool・再帰的なポインタ型も含めたソース上の型を表す。
-data Type = TyInt Width | TBool | TPtr Type deriving (Show, Eq)
+data Type = TyInt Signedness Width | TBool | TPtr Type deriving (Show, Eq)
 
 -- Lexer
 
@@ -117,7 +120,8 @@ tokenize (c : cs)
   | isDigit c =
       let (digits, rest) = span isDigit (c : cs)
        in case matchIntSuffix rest of
-            Just (w, rest') -> (TIntSuffixed (read digits) w :) <$> tokenize rest'
+            -- u64 の最大値のように Int の範囲を超える値は、read が同じビットパターンの負数へラップする
+            Just (s, w, rest') -> (TIntSuffixed (read digits) s w :) <$> tokenize rest'
             Nothing -> (TInt (read digits) :) <$> tokenize rest
   | isAlpha c =
       let (ident, rest) = span (\ch -> isAlphaNum ch || ch == '_') (c : cs)
@@ -152,13 +156,15 @@ tokenize (c : cs)
   | c == ';' = (TSemicolon :) <$> tokenize cs
   | otherwise = Left ("unexpected character: " ++ [c])
 
--- 整数リテラル直後の型サフィックス（'i64'/'i32'）を認識する。識別子境界（次の文字が
+-- 整数リテラル直後の型サフィックス（'i64'/'i32'/'u64'/'u32'）を認識する。識別子境界（次の文字が
 -- 識別子構成文字でない、または入力終端）まで含めて判定することで、`10i64`は`TIntSuffixed`に、
 -- `10i64x`や`10i65`は誤ってサフィックスとして消費せず従来どおり`TInt`+`TIdent`のトークン列にする
-matchIntSuffix :: String -> Maybe (Width, String)
+matchIntSuffix :: String -> Maybe (Signedness, Width, String)
 matchIntSuffix s
-  | Just rest <- stripPrefix "i64" s, boundary rest = Just (W64, rest)
-  | Just rest <- stripPrefix "i32" s, boundary rest = Just (W32, rest)
+  | Just rest <- stripPrefix "i64" s, boundary rest = Just (Signed, W64, rest)
+  | Just rest <- stripPrefix "i32" s, boundary rest = Just (Signed, W32, rest)
+  | Just rest <- stripPrefix "u64" s, boundary rest = Just (Unsigned, W64, rest)
+  | Just rest <- stripPrefix "u32" s, boundary rest = Just (Unsigned, W32, rest)
   | otherwise = Nothing
  where
   boundary (ch : _) = not (isAlphaNum ch || ch == '_')
@@ -177,17 +183,17 @@ matchIntSuffix s
 -- break-stmt    ::= 'break' ';'
 -- continue-stmt ::= 'continue' ';'
 -- return-stmt   ::= 'return' expr ';'
--- type       ::= '&' type | 'i32' | 'i64' | 'bool'
+-- type       ::= '&' type | 'i32' | 'i64' | 'u32' | 'u64' | 'bool'
 -- expr       ::= equality
 -- equality   ::= comparison (('==' | '!=') comparison)*
 -- comparison ::= additive (('<' | '<=' | '>' | '>=') additive)*
 -- additive   ::= multiplicative (('+' | '-') multiplicative)*
 -- multiplicative       ::= cast (('*' | '/') cast)*
--- cast       ::= factor ('as' type)*（type は 'i32' | 'i64' のみ）
--- factor     ::= INT | INT ('i64' | 'i32') | 'true' | 'false' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
+-- cast       ::= factor ('as' type)*（type は整数型（'i32' | 'i64' | 'u32' | 'u64'）のみ）
+-- factor     ::= INT | INT ('i64' | 'i32' | 'u64' | 'u32') | 'true' | 'false' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
 --              | '(' expr ')' | '-' factor | '!' factor
 --              | '&' factor | '*' factor
---              ※ INT ('i64'|'i32') は字句解析側で空白を挟まず1トークン（TIntSuffixed）に融合される
+--              ※ INT ('i64'|'i32'|'u64'|'u32') は字句解析側で空白を挟まず1トークン（TIntSuffixed）に融合される
 
 type ParseResult a = Either String (a, [Token])
 
@@ -315,8 +321,10 @@ parseLetStmt tokens = do
 
 -- 型名 -> Type の変換（ベース型のみ。'&'接頭辞は parseTypeAnnotation 側で処理する）
 parseType :: String -> Either String Type
-parseType "i32" = Right (TyInt W32)
-parseType "i64" = Right (TyInt W64)
+parseType "i32" = Right (TyInt Signed W32)
+parseType "i64" = Right (TyInt Signed W64)
+parseType "u32" = Right (TyInt Unsigned W32)
+parseType "u64" = Right (TyInt Unsigned W64)
 parseType "bool" = Right TBool
 parseType ty = Left ("unsupported type: " ++ ty)
 
@@ -507,8 +515,8 @@ parseCastRest :: Expr -> [Token] -> ParseResult Expr
 parseCastRest expr (TAs : rest) = do
   (ty, rest') <- parseTypeAnnotation rest
   case ty of
-    TyInt w -> parseCastRest (Cast expr w) rest'
-    _ -> Left "invalid cast target: only i32 or i64 is allowed"
+    TyInt s w -> parseCastRest (Cast expr s w) rest'
+    _ -> Left "invalid cast target: only integer types (i32/i64/u32/u64) are allowed"
 parseCastRest expr rest = Right (expr, rest)
 
 -- multiplicative ::= cast (('*' | '/') cast)*
@@ -521,12 +529,12 @@ parseMultiplicativeRest left (TSlash : rest) = do
   parseMultiplicativeRest (Div left right) rest'
 parseMultiplicativeRest left rest = Right (left, rest)
 
--- factor ::= INT | INT ('i64' | 'i32') | 'true' | 'false' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
+-- factor ::= INT | INT ('i64' | 'i32' | 'u64' | 'u32') | 'true' | 'false' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
 --          | '(' expr ')' | '-' factor | '!' factor
 --          | '&' factor | '*' factor
 parseFactor :: [Token] -> ParseResult Expr
 parseFactor (TInt n : rest) = Right (Lit n, rest)
-parseFactor (TIntSuffixed n w : rest) = Right (LitTyped n w, rest)
+parseFactor (TIntSuffixed n s w : rest) = Right (LitTyped n s w, rest)
 parseFactor (TTrue : rest) = Right (BoolLit True, rest)
 parseFactor (TFalse : rest) = Right (BoolLit False, rest)
 parseFactor (TIdent name : TLParen : rest) = do
