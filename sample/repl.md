@@ -154,7 +154,7 @@ Module 'Compiler' is not interpreted` と拒否される。実行ファイルを
    ```
 
    ブレークポイントにヒットすると `Stopped in Compiler.compile, ...` と表示され、
-   その時点でスコープに入っているローカル変数（`fnDecls`/`stmts`/`expr` など）を
+   その時点でスコープに入っているローカル変数（`fnDecls` など）を
    そのままプロンプトで評価できる。`:step` で1式ずつ進め、`:continue` で次の
    ブレークポイント（またはプログラム終了）まで実行を再開する。
 

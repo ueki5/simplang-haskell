@@ -1,3 +1,6 @@
 fn f(x) { x }
-let a:i64 = 4;
-f(&a)
+
+fn main() {
+    let a:i64 = 4;
+    f(&a)
+}

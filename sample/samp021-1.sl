@@ -4,7 +4,10 @@ fn set_positive(p: &i64, v: i64) -> () {
     }
     *p = v;
 }
-let x = 1;
-set_positive(&x, 5);
-set_positive(&x, -1);
-x
+
+fn main() {
+    let x = 1;
+    set_positive(&x, 5);
+    set_positive(&x, -1);
+    x
+}

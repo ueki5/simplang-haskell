@@ -6,6 +6,9 @@ fn fill_squares(p: &[u64; 5]) {
         i = i + 1;
     }
 }
-let sq = [0u64; 5];
-fill_squares(&sq);
-sq[3] + sq[4]
+
+fn main() {
+    let sq = [0u64; 5];
+    fill_squares(&sq);
+    sq[3] + sq[4]
+}

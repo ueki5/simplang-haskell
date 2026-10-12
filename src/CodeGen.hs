@@ -12,8 +12,8 @@ import Parser (Signedness (..), Type (..), Width (..))
 -- -- print/putStrLn: IOモナド内
 -- import Debug.Trace (trace)
 
--- 各fn（(名前, 命令列)）＋暗黙main（末尾式の型, 命令列）からアセンブリ全体を組み立てる。
--- .text/.globl main はファイル全体で一度だけ、各fnラベルはその後に、暗黙mainはmain:として
+-- main以外の各fn（(名前, 命令列)）＋main（戻り値の型, 命令列）からアセンブリ全体を組み立てる。
+-- .text/.globl main はファイル全体で一度だけ、各fnラベルはその後に、mainはmain:として
 -- 最後に並べる（GASのラベル解決は出現順に依存しないため順序自体に意味はない）
 codegen :: [(String, [Instr])] -> Type -> [Instr] -> String
 codegen fns finalType mainInstrs =
@@ -65,7 +65,7 @@ epilogueRet =
   , "    ret"
   ]
 
--- 末尾式の型ごとに printf への引数の渡し方を切り替える（暗黙main専用）。
+-- mainの戻り値の型ごとに printf への引数の渡し方を切り替える（main専用）。
 -- 整数型・ポインタ型はそのまま値を %rsi に渡すが、bool は 0/1 を "true"/"false" 文字列へ分岐させる。
 epilogue :: Type -> [String]
 epilogue (TyInt sg w) = printfEpilogue (fmtLabel sg w)
