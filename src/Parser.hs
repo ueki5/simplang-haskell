@@ -1,12 +1,13 @@
-module Parser (Token (..), Expr (..), Stmt (..), FnDecl (..), Width (..), Signedness (..), Type (..), Program, tokenize, parse) where
+module Parser (Token (..), Expr (..), Stmt (..), FnDecl (..), Width (..), Signedness (..), Type (..), Program, intRepr, tokenize, parse) where
 
 import Data.Char (isAlpha, isAlphaNum, isDigit, isSpace)
 import Data.List (stripPrefix)
 
 data Token
   = TInt Int
-  | -- 'i32'/'i64'/'u32'/'u64'サフィックス付き整数リテラル（例: `9999i64`）。空白を挟まず直接連結される
-    TIntSuffixed Int Signedness Width
+  | -- 'i32'/'i64'/'u32'/'u64'/'usize'サフィックス付き整数リテラル（例: `9999i64`）。空白を挟まず直接連結される。
+    -- 型は常に整数型（intRepr が Just を返す型）
+    TIntSuffixed Int Type
   | TIdent String
   | TLet
   | TIf
@@ -40,12 +41,14 @@ data Token
   | TRParen
   | TLBrace
   | TRBrace
+  | TLBracket
+  | TRBracket
   deriving (Show, Eq)
 
 data Expr
   = Lit Int
-  | -- 'i32'/'i64'/'u32'/'u64'サフィックスで型を固定した整数リテラル（例: `9999i64`）。Litと異なりexpectedとは無関係に型が確定する
-    LitTyped Int Signedness Width
+  | -- 'i32'/'i64'/'u32'/'u64'/'usize'サフィックスで型を固定した整数リテラル（例: `9999i64`）。Litと異なりexpectedとは無関係に型が確定する
+    LitTyped Int Type
   | BoolLit Bool
   | Var String
   | Add Expr Expr
@@ -60,11 +63,17 @@ data Expr
   | Gt Expr Expr
   | Ge Expr Expr
   | Not Expr
-  | -- `expr as i64` / `expr as u32` など（キャスト先は整数型のみ）
-    Cast Expr Signedness Width
+  | -- `expr as i64` / `expr as usize` など（キャスト先は整数型のみ）
+    Cast Expr Type
   | Call String [Expr]
   | AddrOf Expr
   | Deref Expr
+  | -- 配列リテラル `[e1, e2, ...]`（letの初期化式でのみ使える）
+    ArrayLit [Expr]
+  | -- 繰り返し配列リテラル `[e; N]`（letの初期化式でのみ使える。Nは無型の整数リテラル）
+    ArrayRepeat Expr Int
+  | -- 添字アクセス `a[i]`（添字はusize型）
+    Index Expr Expr
   deriving (Show, Eq)
 
 data Stmt
@@ -72,6 +81,8 @@ data Stmt
   | -- 型注釈を省略したlet（例: `let x = 5;`）。型はcompileExprTyped側でinferTypeにより推論する
     SLetInferred String Expr
   | SAssign String Expr
+  | -- 配列要素への代入 `a[i] = expr;`
+    SAssignIndex String Expr Expr
   | SBlock [Stmt]
   | -- if/else-if*/else?（値を返さない文。分岐は [(条件式, 本体)] の列＋任意のelse本体）
     SIf [(Expr, [Stmt])] (Maybe [Stmt])
@@ -103,8 +114,16 @@ data Width = W32 | W64 deriving (Show, Eq)
 data Signedness = Signed | Unsigned deriving (Show, Eq)
 
 -- ソースレベルの論理型。Width は整数のレジスタ幅を表すのに対し、
--- Type はレジスタ幅を持たない bool・再帰的なポインタ型も含めたソース上の型を表す。
-data Type = TyInt Signedness Width | TBool | TPtr Type deriving (Show, Eq)
+-- Type はレジスタ幅を持たない bool・再帰的なポインタ型・配列型も含めたソース上の型を表す。
+-- TUsize は配列の添字用の型で、表現・命令列は u64 と同一だが u64 とは別の型として扱う（Rust準拠）。
+-- TArray の要素型は配列以外の型のみ（ネストした配列は扱わない）
+data Type = TyInt Signedness Width | TUsize | TBool | TPtr Type | TArray Type Int deriving (Show, Eq)
+
+-- 整数型の (符号の有無, レジスタ幅) への分解（usize は u64 と同じ表現）。整数型でなければ Nothing
+intRepr :: Type -> Maybe (Signedness, Width)
+intRepr (TyInt sg w) = Just (sg, w)
+intRepr TUsize = Just (Unsigned, W64)
+intRepr _ = Nothing
 
 -- Lexer
 
@@ -121,7 +140,7 @@ tokenize (c : cs)
       let (digits, rest) = span isDigit (c : cs)
        in case matchIntSuffix rest of
             -- u64 の最大値のように Int の範囲を超える値は、read が同じビットパターンの負数へラップする
-            Just (s, w, rest') -> (TIntSuffixed (read digits) s w :) <$> tokenize rest'
+            Just (ty, rest') -> (TIntSuffixed (read digits) ty :) <$> tokenize rest'
             Nothing -> (TInt (read digits) :) <$> tokenize rest
   | isAlpha c =
       let (ident, rest) = span (\ch -> isAlphaNum ch || ch == '_') (c : cs)
@@ -147,6 +166,8 @@ tokenize (c : cs)
   | c == ')' = (TRParen :) <$> tokenize cs
   | c == '{' = (TLBrace :) <$> tokenize cs
   | c == '}' = (TRBrace :) <$> tokenize cs
+  | c == '[' = (TLBracket :) <$> tokenize cs
+  | c == ']' = (TRBracket :) <$> tokenize cs
   | c == ',' = (TComma :) <$> tokenize cs
   | c == ':' = (TColon :) <$> tokenize cs
   | c == '=' = (TAssign :) <$> tokenize cs
@@ -156,15 +177,16 @@ tokenize (c : cs)
   | c == ';' = (TSemicolon :) <$> tokenize cs
   | otherwise = Left ("unexpected character: " ++ [c])
 
--- 整数リテラル直後の型サフィックス（'i64'/'i32'/'u64'/'u32'）を認識する。識別子境界（次の文字が
+-- 整数リテラル直後の型サフィックス（'i64'/'i32'/'u64'/'u32'/'usize'）を認識する。識別子境界（次の文字が
 -- 識別子構成文字でない、または入力終端）まで含めて判定することで、`10i64`は`TIntSuffixed`に、
 -- `10i64x`や`10i65`は誤ってサフィックスとして消費せず従来どおり`TInt`+`TIdent`のトークン列にする
-matchIntSuffix :: String -> Maybe (Signedness, Width, String)
+matchIntSuffix :: String -> Maybe (Type, String)
 matchIntSuffix s
-  | Just rest <- stripPrefix "i64" s, boundary rest = Just (Signed, W64, rest)
-  | Just rest <- stripPrefix "i32" s, boundary rest = Just (Signed, W32, rest)
-  | Just rest <- stripPrefix "u64" s, boundary rest = Just (Unsigned, W64, rest)
-  | Just rest <- stripPrefix "u32" s, boundary rest = Just (Unsigned, W32, rest)
+  | Just rest <- stripPrefix "i64" s, boundary rest = Just (TyInt Signed W64, rest)
+  | Just rest <- stripPrefix "i32" s, boundary rest = Just (TyInt Signed W32, rest)
+  | Just rest <- stripPrefix "u64" s, boundary rest = Just (TyInt Unsigned W64, rest)
+  | Just rest <- stripPrefix "u32" s, boundary rest = Just (TyInt Unsigned W32, rest)
+  | Just rest <- stripPrefix "usize" s, boundary rest = Just (TUsize, rest)
   | otherwise = Nothing
  where
   boundary (ch : _) = not (isAlphaNum ch || ch == '_')
@@ -174,26 +196,29 @@ matchIntSuffix s
 --
 -- program    ::= (fn-decl | stmt)* expr
 -- fn-decl    ::= 'fn' IDENT '(' (IDENT (':' type)? (',' IDENT (':' type)?)*)? ')' ('->' type)? '{' stmt* expr '}'
--- stmt       ::= let-stmt | assign-stmt | block-stmt | if-stmt | while-stmt | break-stmt | continue-stmt | return-stmt
+-- stmt       ::= let-stmt | assign-stmt | index-assign-stmt | block-stmt | if-stmt | while-stmt | break-stmt | continue-stmt | return-stmt
 -- let-stmt    ::= 'let' IDENT ':' type '=' expr ';' | 'let' IDENT '=' expr ';'
 -- assign-stmt ::= IDENT '=' expr ';'
+-- index-assign-stmt ::= IDENT '[' expr ']' '=' expr ';'
 -- block-stmt ::= '{' stmt* '}'
 -- if-stmt    ::= 'if' expr '{' stmt* '}' ('else' 'if' expr '{' stmt* '}')* ('else' '{' stmt* '}')?
 -- while-stmt    ::= 'while' expr '{' stmt* '}'
 -- break-stmt    ::= 'break' ';'
 -- continue-stmt ::= 'continue' ';'
 -- return-stmt   ::= 'return' expr ';'
--- type       ::= '&' type | 'i32' | 'i64' | 'u32' | 'u64' | 'bool'
+-- type       ::= '&' type | '[' type ';' INT ']' | 'i32' | 'i64' | 'u32' | 'u64' | 'usize' | 'bool'
+--              ※ 配列の要素型に配列は不可、配列へのポインタ（'&' '[' ...）も不可
 -- expr       ::= equality
 -- equality   ::= comparison (('==' | '!=') comparison)*
 -- comparison ::= additive (('<' | '<=' | '>' | '>=') additive)*
 -- additive   ::= multiplicative (('+' | '-') multiplicative)*
 -- multiplicative       ::= cast (('*' | '/') cast)*
--- cast       ::= factor ('as' type)*（type は整数型（'i32' | 'i64' | 'u32' | 'u64'）のみ）
--- factor     ::= INT | INT ('i64' | 'i32' | 'u64' | 'u32') | 'true' | 'false' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
---              | '(' expr ')' | '-' factor | '!' factor
---              | '&' factor | '*' factor
---              ※ INT ('i64'|'i32'|'u64'|'u32') は字句解析側で空白を挟まず1トークン（TIntSuffixed）に融合される
+-- cast       ::= factor ('as' type)*（type は整数型（'i32' | 'i64' | 'u32' | 'u64' | 'usize'）のみ）
+-- factor     ::= '-' factor | '!' factor | '&' factor | '*' factor | postfix
+-- postfix    ::= primary ('[' expr ']')*
+-- primary    ::= INT | INT ('i64' | 'i32' | 'u64' | 'u32' | 'usize') | 'true' | 'false' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
+--              | '(' expr ')' | '[' expr (',' expr)* ']' | '[' expr ';' INT ']'
+--              ※ INT ('i64'|'i32'|'u64'|'u32'|'usize') は字句解析側で空白を挟まず1トークン（TIntSuffixed）に融合される
 
 type ParseResult a = Either String (a, [Token])
 
@@ -275,6 +300,15 @@ parseStmts (TIdent name : TAssign : rest) = do
   (stmt, rest') <- parseAssignStmt name rest
   (stmts, rest'') <- parseStmts rest'
   Right (stmt : stmts, rest'')
+-- IDENT '[' で始まる場合、IDENT '[' expr ']' まで試しに読み、次が '=' なら要素への代入文とする。
+-- そうでなければ（末尾式 `a[0]` など）文は無いものとして元のトークン列のまま戻る
+parseStmts tokens@(TIdent name : TLBracket : rest) =
+  case parseIndexTarget rest of
+    Right (idx, TAssign : rest') -> do
+      (stmt, rest'') <- parseIndexAssignStmt name idx rest'
+      (stmts, rest3) <- parseStmts rest''
+      Right (stmt : stmts, rest3)
+    _ -> Right ([], tokens)
 parseStmts (TLBrace : rest) = do
   (stmt, rest') <- parseBlockStmt rest
   (stmts, rest'') <- parseStmts rest'
@@ -325,14 +359,28 @@ parseType "i32" = Right (TyInt Signed W32)
 parseType "i64" = Right (TyInt Signed W64)
 parseType "u32" = Right (TyInt Unsigned W32)
 parseType "u64" = Right (TyInt Unsigned W64)
+parseType "usize" = Right TUsize
 parseType "bool" = Right TBool
 parseType ty = Left ("unsupported type: " ++ ty)
 
--- type ::= '&' type | IDENT（IDENTは parseType でベース型に変換する）
+-- type ::= '&' type | '[' type ';' INT ']' | IDENT（IDENTは parseType でベース型に変換する）
 parseTypeAnnotation :: [Token] -> ParseResult Type
 parseTypeAnnotation (TAmp : rest) = do
   (inner, rest') <- parseTypeAnnotation rest
-  Right (TPtr inner, rest')
+  case inner of
+    TArray _ _ -> Left "pointer to array is not supported"
+    _ -> Right (TPtr inner, rest')
+parseTypeAnnotation (TLBracket : rest) = do
+  (elemTy, rest') <- parseTypeAnnotation rest
+  case elemTy of
+    TArray _ _ -> Left "nested arrays are not supported"
+    _ -> Right ()
+  rest'' <- expectToken TSemicolon rest'
+  case rest'' of
+    (TInt n : TRBracket : rest3)
+      | n >= 1 -> Right (TArray elemTy n, rest3)
+      | otherwise -> Left "array length must be at least 1"
+    _ -> Left "expected array length (integer literal) followed by ']'"
 parseTypeAnnotation tokens = do
   (tyName, rest) <- expectIdent tokens
   ty <- parseType tyName
@@ -344,6 +392,20 @@ parseAssignStmt name tokens = do
   (expr, rest) <- parseExpr tokens
   rest' <- expectToken TSemicolon rest
   Right (SAssign name expr, rest')
+
+-- '[' の直後から expr ']' を読む（'[' は呼び出し側で消費済み、']' はここで消費する）
+parseIndexTarget :: [Token] -> ParseResult Expr
+parseIndexTarget tokens = do
+  (idx, rest) <- parseExpr tokens
+  rest' <- expectToken TRBracket rest
+  Right (idx, rest')
+
+-- index-assign-stmt ::= IDENT '[' expr ']' '=' expr ';'（'=' までは呼び出し側で消費済み）
+parseIndexAssignStmt :: String -> Expr -> [Token] -> ParseResult Stmt
+parseIndexAssignStmt name idx tokens = do
+  (expr, rest) <- parseExpr tokens
+  rest' <- expectToken TSemicolon rest
+  Right (SAssignIndex name idx expr, rest')
 
 -- block-stmt ::= '{' stmt* '}'（'{' は呼び出し側で消費済み）
 parseBlockStmt :: [Token] -> ParseResult Stmt
@@ -514,9 +576,9 @@ parseCast tokens = do
 parseCastRest :: Expr -> [Token] -> ParseResult Expr
 parseCastRest expr (TAs : rest) = do
   (ty, rest') <- parseTypeAnnotation rest
-  case ty of
-    TyInt s w -> parseCastRest (Cast expr s w) rest'
-    _ -> Left "invalid cast target: only integer types (i32/i64/u32/u64) are allowed"
+  case intRepr ty of
+    Just _ -> parseCastRest (Cast expr ty) rest'
+    Nothing -> Left "invalid cast target: only integer types (i32/i64/u32/u64/usize) are allowed"
 parseCastRest expr rest = Right (expr, rest)
 
 -- multiplicative ::= cast (('*' | '/') cast)*
@@ -529,23 +591,9 @@ parseMultiplicativeRest left (TSlash : rest) = do
   parseMultiplicativeRest (Div left right) rest'
 parseMultiplicativeRest left rest = Right (left, rest)
 
--- factor ::= INT | INT ('i64' | 'i32' | 'u64' | 'u32') | 'true' | 'false' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
---          | '(' expr ')' | '-' factor | '!' factor
---          | '&' factor | '*' factor
+-- factor ::= '-' factor | '!' factor | '&' factor | '*' factor | postfix
+-- （添字 '[' ']' は後置演算子として単項演算子より強く結合する。`-a[0]` は `-(a[0])`、`&a[i]` は `&(a[i])`）
 parseFactor :: [Token] -> ParseResult Expr
-parseFactor (TInt n : rest) = Right (Lit n, rest)
-parseFactor (TIntSuffixed n s w : rest) = Right (LitTyped n s w, rest)
-parseFactor (TTrue : rest) = Right (BoolLit True, rest)
-parseFactor (TFalse : rest) = Right (BoolLit False, rest)
-parseFactor (TIdent name : TLParen : rest) = do
-  (args, rest') <- parseArgList rest
-  Right (Call name args, rest')
-parseFactor (TIdent name : rest) = Right (Var name, rest)
-parseFactor (TLParen : rest) = do
-  (expr, rest') <- parseExpr rest
-  case rest' of
-    (TRParen : rest'') -> Right (expr, rest'')
-    _ -> Left "expected closing parenthesis"
 parseFactor (TMinus : rest) = do
   (expr, rest') <- parseFactor rest
   Right (Neg expr, rest')
@@ -558,8 +606,54 @@ parseFactor (TAmp : rest) = do
 parseFactor (TStar : rest) = do
   (expr, rest') <- parseFactor rest
   Right (Deref expr, rest')
-parseFactor [] = Left "unexpected end of input"
-parseFactor (t : _) = Left ("unexpected token: " ++ show t)
+parseFactor tokens = do
+  (expr, rest) <- parsePrimary tokens
+  parsePostfixRest expr rest
+
+-- postfix ::= primary ('[' expr ']')*
+parsePostfixRest :: Expr -> [Token] -> ParseResult Expr
+parsePostfixRest expr (TLBracket : rest) = do
+  (idx, rest') <- parseIndexTarget rest
+  parsePostfixRest (Index expr idx) rest'
+parsePostfixRest expr rest = Right (expr, rest)
+
+-- primary ::= INT | INT ('i64' | 'i32' | 'u64' | 'u32' | 'usize') | 'true' | 'false' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
+--           | '(' expr ')' | '[' expr (',' expr)* ']' | '[' expr ';' INT ']'
+parsePrimary :: [Token] -> ParseResult Expr
+parsePrimary (TInt n : rest) = Right (Lit n, rest)
+parsePrimary (TIntSuffixed n ty : rest) = Right (LitTyped n ty, rest)
+parsePrimary (TTrue : rest) = Right (BoolLit True, rest)
+parsePrimary (TFalse : rest) = Right (BoolLit False, rest)
+parsePrimary (TIdent name : TLParen : rest) = do
+  (args, rest') <- parseArgList rest
+  Right (Call name args, rest')
+parsePrimary (TIdent name : rest) = Right (Var name, rest)
+parsePrimary (TLParen : rest) = do
+  (expr, rest') <- parseExpr rest
+  case rest' of
+    (TRParen : rest'') -> Right (expr, rest'')
+    _ -> Left "expected closing parenthesis"
+parsePrimary (TLBracket : TRBracket : _) = Left "empty array literal is not supported"
+parsePrimary (TLBracket : rest) = do
+  (first, rest') <- parseExpr rest
+  case rest' of
+    -- '[' expr ';' INT ']'（繰り返し回数は無型の整数リテラルのみ）
+    (TSemicolon : TInt n : TRBracket : rest'')
+      | n >= 1 -> Right (ArrayRepeat first n, rest'')
+      | otherwise -> Left "array length must be at least 1"
+    (TSemicolon : _) -> Left "expected array length (integer literal) followed by ']'"
+    _ -> parseArrayElemsRest [first] rest'
+parsePrimary [] = Left "unexpected end of input"
+parsePrimary (t : _) = Left ("unexpected token: " ++ show t)
+
+-- 配列リテラルの残りの要素: (',' expr)* ']'
+parseArrayElemsRest :: [Expr] -> [Token] -> ParseResult Expr
+parseArrayElemsRest acc (TComma : rest) = do
+  (e, rest') <- parseExpr rest
+  parseArrayElemsRest (acc ++ [e]) rest'
+parseArrayElemsRest acc (TRBracket : rest) = Right (ArrayLit acc, rest)
+parseArrayElemsRest _ (t : _) = Left ("expected ',' or ']', got: " ++ show t)
+parseArrayElemsRest _ [] = Left "expected ',' or ']', got end of input"
 
 -- 実引数リスト: (expr (',' expr)*)?（'(' は呼び出し側で消費済み、終端の ')' はここで消費する）
 parseArgList :: [Token] -> ParseResult [Expr]
