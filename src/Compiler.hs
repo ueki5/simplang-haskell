@@ -4,9 +4,10 @@ import Control.Monad (foldM, when, zipWithM)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.State (StateT, evalStateT, get, put)
 import Data.Int (Int32)
+import Data.Word (Word32, Word64)
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Parser (Expr (..), FnDecl (..), Program, Stmt (..), Type (..), Width (..))
+import Parser (Expr (..), FnDecl (..), Program, Signedness (..), Stmt (..), Type (..), Width (..))
 
 -- -- Debug Printサンプル（pTraceShow: 純粋関数内, pTraceShowM: モナド内）
 -- import Debug.Pretty.Simple (pTraceShow, pTraceShowM)
@@ -22,6 +23,8 @@ data Instr
   | ISub Width
   | IMul Width
   | IDiv Width
+  | -- 符号なし除算（u32/u64 用。加減乗は符号の有無で下位ビットが変わらないため専用命令は不要）
+    IDivU Width
   | INeg Width
   | Load Width Int
   | Store Width Int
@@ -31,6 +34,11 @@ data Instr
   | ICmpLe
   | ICmpGt
   | ICmpGe
+  | -- 符号なし大小比較（u32 はゼロ拡張済みのため、幅によらず64bitの符号なし比較でよい）
+    ICmpLtU
+  | ICmpLeU
+  | ICmpGtU
+  | ICmpGeU
   | INot
   | -- スタック先頭をpopしてゼロ判定し、真（非ゼロ）ならフォールスルー、偽（ゼロ）ならジャンプする
     JmpIfZero String
@@ -42,6 +50,8 @@ data Instr
     -- i32→i64 の拡大は被演算子が既に正規化済みi32であることが前提だが、
     -- リテラル直渡し等で正規化されていない値が漏れないよう、両方向とも同じ命令で強制的に正規化する）
     ISext32
+  | -- 下位32bitをゼロ拡張して64bitへ戻す（u32 の正規化。as u32 や u32 の演算・読み出しの後に使う）
+    IZext32
   | -- ローカル変数の%rbp相対実効アドレスを計算しpushする（&lvalue 用）
     LoadAddr Int
   | -- 操作スタック先頭のアドレスをpopし、指定幅でその先の値をロードして
@@ -102,16 +112,38 @@ widthBytes W64 = 8
 
 -- 型の物理格納幅（bool は i32 用の32bitスロットを流用する。ポインタは指す先の型によらず常に8バイト）
 storageWidth :: Type -> Width
-storageWidth (TyInt w) = w
+storageWidth (TyInt _ w) = w
 storageWidth TBool = W32
 storageWidth (TPtr _) = W64
 
 -- エラーメッセージ表示用の型名
 typeName :: Type -> String
-typeName (TyInt W32) = "i32"
-typeName (TyInt W64) = "i64"
+typeName (TyInt Signed W32) = "i32"
+typeName (TyInt Signed W64) = "i64"
+typeName (TyInt Unsigned W32) = "u32"
+typeName (TyInt Unsigned W64) = "u64"
 typeName TBool = "bool"
 typeName (TPtr t) = "&" ++ typeName t
+
+-- 32bit整数の値を64bitスタック上の正規形（i32 は符号拡張、u32 はゼロ拡張）へ揃える命令
+normalize32 :: Signedness -> Instr
+normalize32 Signed = ISext32
+normalize32 Unsigned = IZext32
+
+-- 型 ty の値をスタックへ読み出した直後に必要な正規化命令（u32 のみ。Load/LoadInd W32 は符号拡張するため）
+loadFixup :: Type -> [Instr]
+loadFixup (TyInt Unsigned W32) = [IZext32]
+loadFixup _ = []
+
+-- 加減乗の結果を期待型の正規形へ揃える命令（i32 は IAdd W32 等が符号拡張済み、u32 のみゼロ拡張し直す）
+arithFixup :: Signedness -> Width -> [Instr]
+arithFixup Unsigned W32 = [IZext32]
+arithFixup _ _ = []
+
+-- 被演算子の型に応じた大小比較命令の選択（符号なし整数のみ U 版。符号あり整数・ポインタは従来の命令）
+cmpInstr :: Type -> Instr -> Instr -> Instr
+cmpInstr (TyInt Unsigned _) _ unsignedInstr = unsignedInstr
+cmpInstr _ signedInstr _ = signedInstr
 
 -- 関数シグネチャ表: 名前 -> (仮引数の型リスト, 戻り値の型)。
 -- 全fnの本体をコンパイルする前に一括構築する、コンパイル中不変のグローバルな読み取り専用テーブル
@@ -333,7 +365,7 @@ inferMaybeType fnSigs env expr = do
   where
     go (Lit _) = Right Nothing
     -- サフィックス付きリテラルは Var と同様、常に確定した型を持つ（expectedとは無関係）
-    go (LitTyped _ w) = Right (Just (TyInt w))
+    go (LitTyped _ sg w) = Right (Just (TyInt sg w))
     go (BoolLit _) = Right (Just TBool)
     go (Var name) =
       maybe (Left ("undeclared variable: " ++ name)) (Right . Just . snd) (lookupVar name env)
@@ -341,7 +373,7 @@ inferMaybeType fnSigs env expr = do
     go (Not e) = do
       t <- go e
       case t of
-        Just (TyInt w) -> Left ("type mismatch: expected bool, found " ++ typeName (TyInt w))
+        Just ty@(TyInt _ _) -> Left ("type mismatch: expected bool, found " ++ typeName ty)
         _ -> Right (Just TBool)
     go (Add a b) = combine a b
     go (Sub a b) = combine a b
@@ -356,7 +388,7 @@ inferMaybeType fnSigs env expr = do
     go (Gt a b) = combine a b >> Right (Just TBool)
     go (Ge a b) = combine a b >> Right (Just TBool)
     -- キャスト（as i64/as i32）の結果型は被演算子によらず常に確定する（BoolLit と同様、部分木を辿る必要はない）
-    go (Cast _ w) = Right (Just (TyInt w))
+    go (Cast _ sg w) = Right (Just (TyInt sg w))
     -- &lvalue の型は lvalue 自身の型を TPtr で包んだもの（addressOf に委譲する）
     go (AddrOf e) = do
       (pointeeTy, _) <- addressOf fnSigs env e
@@ -391,14 +423,14 @@ inferMaybeType fnSigs env expr = do
 
 -- 最後まで未確定なら i64 をデフォルトとする。
 inferType :: FnSigs -> Env -> Expr -> Either String Type
-inferType fnSigs env expr = maybe (TyInt W64) id <$> inferMaybeType fnSigs env expr
+inferType fnSigs env expr = maybe (TyInt Signed W64) id <$> inferMaybeType fnSigs env expr
 
 -- Eq/Neq の被演算子同士の共通の型を決定する（外側の expected とは独立に推論する）
 operandType :: FnSigs -> Env -> Expr -> Expr -> Either String Type
 operandType fnSigs env a b = do
   ta <- inferMaybeType fnSigs env a
   tb <- inferMaybeType fnSigs env b
-  maybe (TyInt W64) id <$> unifyMaybeType ta tb
+  maybe (TyInt Signed W64) id <$> unifyMaybeType ta tb
 
 -- lvalue（&の対象になれる式）の実効アドレスを計算する命令列と、その参照先の型を返す。
 -- lvalueとして認めるのは変数参照と、ポインタのデリファレンス（&*p は p 自身の値が
@@ -483,7 +515,7 @@ resolveExprType fnDeclMap resolved env expr = do
   go expr
   where
     go (Lit _) = Right (Right Nothing)
-    go (LitTyped _ w) = Right (Right (Just (TyInt w)))
+    go (LitTyped _ sg w) = Right (Right (Just (TyInt sg w)))
     go (BoolLit _) = Right (Right (Just TBool))
     go (Var name) = case lookupLocal name env of
       Nothing -> Left ("undeclared variable: " ++ name)
@@ -492,7 +524,7 @@ resolveExprType fnDeclMap resolved env expr = do
     go (Neg e) = go e
     go (Not e) =
       go e `chainSlot` \t -> case t of
-        Just (TyInt w) -> Left ("type mismatch: expected bool, found " ++ typeName (TyInt w))
+        Just ty@(TyInt _ _) -> Left ("type mismatch: expected bool, found " ++ typeName ty)
         _ -> Right (Right (Just TBool))
     go (Add a b) = combine a b
     go (Sub a b) = combine a b
@@ -504,7 +536,7 @@ resolveExprType fnDeclMap resolved env expr = do
     go (Le a b) = combineBool a b
     go (Gt a b) = combineBool a b
     go (Ge a b) = combineBool a b
-    go (Cast _ w) = Right (Right (Just (TyInt w)))
+    go (Cast _ sg w) = Right (Right (Just (TyInt sg w)))
     go (AddrOf e) = case addressOfSlot fnDeclMap resolved env e of
       Left err -> Left err
       Right (Left slot) -> Right (Left slot)
@@ -538,7 +570,7 @@ callEvidence fnDeclMap resolved env expr = do
   go expr
   where
     go (Lit _) = Right []
-    go (LitTyped _ _) = Right []
+    go (LitTyped _ _ _) = Right []
     go (BoolLit _) = Right []
     go (Var _) = Right []
     go (Neg e) = go e
@@ -553,7 +585,7 @@ callEvidence fnDeclMap resolved env expr = do
     go (Le a b) = combine a b
     go (Gt a b) = combine a b
     go (Ge a b) = combine a b
-    go (Cast e _) = go e
+    go (Cast e _ _) = go e
     go (AddrOf e) = go e
     go (Deref e) = go e
     go (Call name args) = do
@@ -592,7 +624,7 @@ collectEvidenceStmts fnDeclMap resolved curFn localenv stmts = do
         Left err -> Left err
         Right (Left slot) -> Right (Left slot)
         Right (Right (Just ty)) -> Right (Right ty)
-        Right (Right Nothing) -> Right (Right (TyInt W64))
+        Right (Right Nothing) -> Right (Right (TyInt Signed W64))
       pure (setLocal name status env, ev)
     step env (SAssign _ expr) = do
       ev <- callEvidence fnDeclMap resolved env expr
@@ -733,7 +765,7 @@ resolveOne evidence slot = do
     (blocker : _) -> Right (Left blocker)
     [] -> do
       u <- foldM unifyMaybeType Nothing [mty | Right mty <- candidates]
-      Right (Right (maybe (TyInt W64) id u))
+      Right (Right (maybe (TyInt Signed W64) id u))
 
 -- 全fn定義から（型注釈省略を含めて）FnSigsを一括解決する（本体のコンパイルより前に行う1パス目）。
 -- 呼び出し規約・スタックスロット割り付けが必要とする具体的なTypeを、注釈または
@@ -765,14 +797,14 @@ compileExprTyped :: FnSigs -> Env -> Type -> Expr -> Either String [Instr]
 compileExprTyped _ _ TBool (Lit _) = Left "type mismatch: expected bool, found integer literal"
 compileExprTyped _ _ expected@(TPtr _) (Lit _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found integer literal")
-compileExprTyped _ _ (TyInt _) (Lit n) = Right [Push n]
--- [let ]xxx = 1234i64; / 1234i32;（サフィックスで型が確定済み。Varと同様、expectedと食い違えばエラー）
-compileExprTyped _ _ expected (LitTyped n w)
-  | expected == TyInt w = Right [Push n]
-  | otherwise = Left ("type mismatch: expected " ++ typeName expected ++ ", found " ++ typeName (TyInt w))
+compileExprTyped _ _ (TyInt _ _) (Lit n) = Right [Push n]
+-- [let ]xxx = 1234i64; / 1234u32; など（サフィックスで型が確定済み。Varと同様、expectedと食い違えばエラー）
+compileExprTyped _ _ expected (LitTyped n sg w)
+  | expected == TyInt sg w = Right [Push n]
+  | otherwise = Left ("type mismatch: expected " ++ typeName expected ++ ", found " ++ typeName (TyInt sg w))
 -- [let ]xxx = true; / false;（bool以外のコンテキストでは不可）
 compileExprTyped _ _ TBool (BoolLit b) = Right [Push (if b then 1 else 0)]
-compileExprTyped _ _ expected@(TyInt _) (BoolLit _) =
+compileExprTyped _ _ expected@(TyInt _ _) (BoolLit _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
 compileExprTyped _ _ expected@(TPtr _) (BoolLit _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
@@ -783,48 +815,51 @@ compileExprTyped _ env expected (Var name) =
     Just (off, ty)
       | ty /= expected ->
           Left ("type mismatch: expected " ++ typeName expected ++ ", found " ++ typeName ty)
-      | otherwise -> Right [Load (storageWidth ty) off]
+      | otherwise -> Right (Load (storageWidth ty) off : loadFixup ty)
 -- [let ]xxx = expr + expr;
 compileExprTyped _ _ TBool (Add _ _) = Left "type mismatch: expected bool, found arithmetic expression"
 compileExprTyped _ _ expected@(TPtr _) (Add _ _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found arithmetic expression")
-compileExprTyped fnSigs env expected@(TyInt w) (Add l r) = do
+compileExprTyped fnSigs env expected@(TyInt sg w) (Add l r) = do
   li <- compileExprTyped fnSigs env expected l
   ri <- compileExprTyped fnSigs env expected r
-  Right (li ++ ri ++ [IAdd w])
+  Right (li ++ ri ++ [IAdd w] ++ arithFixup sg w)
 -- [let ]xxx = expr - expr;
 compileExprTyped _ _ TBool (Sub _ _) = Left "type mismatch: expected bool, found arithmetic expression"
 compileExprTyped _ _ expected@(TPtr _) (Sub _ _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found arithmetic expression")
-compileExprTyped fnSigs env expected@(TyInt w) (Sub l r) = do
+compileExprTyped fnSigs env expected@(TyInt sg w) (Sub l r) = do
   li <- compileExprTyped fnSigs env expected l
   ri <- compileExprTyped fnSigs env expected r
-  Right (li ++ ri ++ [ISub w])
+  Right (li ++ ri ++ [ISub w] ++ arithFixup sg w)
 -- [let ]xxx = expr * expr;
 compileExprTyped _ _ TBool (Mul _ _) = Left "type mismatch: expected bool, found arithmetic expression"
 compileExprTyped _ _ expected@(TPtr _) (Mul _ _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found arithmetic expression")
-compileExprTyped fnSigs env expected@(TyInt w) (Mul l r) = do
+compileExprTyped fnSigs env expected@(TyInt sg w) (Mul l r) = do
   li <- compileExprTyped fnSigs env expected l
   ri <- compileExprTyped fnSigs env expected r
-  Right (li ++ ri ++ [IMul w])
+  Right (li ++ ri ++ [IMul w] ++ arithFixup sg w)
 -- [let ]xxx = expr / expr;
 compileExprTyped _ _ TBool (Div _ _) = Left "type mismatch: expected bool, found arithmetic expression"
 compileExprTyped _ _ expected@(TPtr _) (Div _ _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found arithmetic expression")
-compileExprTyped fnSigs env expected@(TyInt w) (Div l r) = do
+compileExprTyped fnSigs env expected@(TyInt sg w) (Div l r) = do
   li <- compileExprTyped fnSigs env expected l
   ri <- compileExprTyped fnSigs env expected r
-  Right (li ++ ri ++ [IDiv w])
+  Right (li ++ ri ++ [if sg == Unsigned then IDivU w else IDiv w])
 -- [let ]xxx = -expr;
 compileExprTyped _ _ TBool (Neg _) = Left "type mismatch: expected bool, found arithmetic expression"
 compileExprTyped _ _ expected@(TPtr _) (Neg _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found arithmetic expression")
-compileExprTyped fnSigs env expected@(TyInt w) (Neg e) = do
+-- 符号なし整数の符号反転は意味を持たないため不可（Rustと同じ。`0u32 - x` のように明示的に書く）
+compileExprTyped _ _ expected@(TyInt Unsigned _) (Neg _) =
+  Left ("cannot apply unary minus to unsigned type " ++ typeName expected)
+compileExprTyped fnSigs env expected@(TyInt Signed w) (Neg e) = do
   ei <- compileExprTyped fnSigs env expected e
   Right (ei ++ [INeg w])
 -- [let ]xxx = !expr;
-compileExprTyped _ _ expected@(TyInt _) (Not _) =
+compileExprTyped _ _ expected@(TyInt _ _) (Not _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
 compileExprTyped _ _ expected@(TPtr _) (Not _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
@@ -832,7 +867,7 @@ compileExprTyped fnSigs env TBool (Not e) = do
   ei <- compileExprTyped fnSigs env TBool e
   Right (ei ++ [INot])
 -- [let ]xxx = expr == expr;（被演算子の型は expected とは独立に推論する。ポインタ同士の比較も許可する）
-compileExprTyped _ _ expected@(TyInt _) (Eq _ _) =
+compileExprTyped _ _ expected@(TyInt _ _) (Eq _ _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
 compileExprTyped _ _ expected@(TPtr _) (Eq _ _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
@@ -842,7 +877,7 @@ compileExprTyped fnSigs env TBool (Eq l r) = do
   ri <- compileExprTyped fnSigs env opTy r
   Right (li ++ ri ++ [ICmpEq])
 -- [let ]xxx = expr != expr;
-compileExprTyped _ _ expected@(TyInt _) (Neq _ _) =
+compileExprTyped _ _ expected@(TyInt _ _) (Neq _ _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
 compileExprTyped _ _ expected@(TPtr _) (Neq _ _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
@@ -851,8 +886,9 @@ compileExprTyped fnSigs env TBool (Neq l r) = do
   li <- compileExprTyped fnSigs env opTy l
   ri <- compileExprTyped fnSigs env opTy r
   Right (li ++ ri ++ [ICmpNe])
--- [let ]xxx = expr < expr;（大小比較の結果は常にbool。被演算子はi32/i64/ポインタいずれも可、bool同士の比較のみ不可）
-compileExprTyped _ _ expected@(TyInt _) (Lt _ _) =
+-- [let ]xxx = expr < expr;（大小比較の結果は常にbool。被演算子は整数/ポインタいずれも可、bool同士の比較のみ不可。
+-- 符号なし整数は U 版の比較命令を使う）
+compileExprTyped _ _ expected@(TyInt _ _) (Lt _ _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
 compileExprTyped _ _ expected@(TPtr _) (Lt _ _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
@@ -863,9 +899,9 @@ compileExprTyped fnSigs env TBool (Lt l r) = do
     _ -> do
       li <- compileExprTyped fnSigs env opTy l
       ri <- compileExprTyped fnSigs env opTy r
-      Right (li ++ ri ++ [ICmpLt])
+      Right (li ++ ri ++ [cmpInstr opTy ICmpLt ICmpLtU])
 -- [let ]xxx = expr <= expr;
-compileExprTyped _ _ expected@(TyInt _) (Le _ _) =
+compileExprTyped _ _ expected@(TyInt _ _) (Le _ _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
 compileExprTyped _ _ expected@(TPtr _) (Le _ _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
@@ -876,9 +912,9 @@ compileExprTyped fnSigs env TBool (Le l r) = do
     _ -> do
       li <- compileExprTyped fnSigs env opTy l
       ri <- compileExprTyped fnSigs env opTy r
-      Right (li ++ ri ++ [ICmpLe])
+      Right (li ++ ri ++ [cmpInstr opTy ICmpLe ICmpLeU])
 -- [let ]xxx = expr > expr;
-compileExprTyped _ _ expected@(TyInt _) (Gt _ _) =
+compileExprTyped _ _ expected@(TyInt _ _) (Gt _ _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
 compileExprTyped _ _ expected@(TPtr _) (Gt _ _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
@@ -889,9 +925,9 @@ compileExprTyped fnSigs env TBool (Gt l r) = do
     _ -> do
       li <- compileExprTyped fnSigs env opTy l
       ri <- compileExprTyped fnSigs env opTy r
-      Right (li ++ ri ++ [ICmpGt])
+      Right (li ++ ri ++ [cmpInstr opTy ICmpGt ICmpGtU])
 -- [let ]xxx = expr >= expr;
-compileExprTyped _ _ expected@(TyInt _) (Ge _ _) =
+compileExprTyped _ _ expected@(TyInt _ _) (Ge _ _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
 compileExprTyped _ _ expected@(TPtr _) (Ge _ _) =
   Left ("type mismatch: expected " ++ typeName expected ++ ", found bool")
@@ -902,20 +938,19 @@ compileExprTyped fnSigs env TBool (Ge l r) = do
     _ -> do
       li <- compileExprTyped fnSigs env opTy l
       ri <- compileExprTyped fnSigs env opTy r
-      Right (li ++ ri ++ [ICmpGe])
--- [let ]xxx = expr as i64; / expr as i32;（結果は常にキャスト先の型で、expectedと厳密に一致しなければならない。
+      Right (li ++ ri ++ [cmpInstr opTy ICmpGe ICmpGeU])
+-- [let ]xxx = expr as i64; / expr as u32; など（結果は常にキャスト先の型で、expectedと厳密に一致しなければならない。
 -- 被演算子はexpectedとは独立に自身の推論型でコンパイルし、型なしリテラルのみの場合はi64とみなす）
-compileExprTyped fnSigs env expected (Cast e w)
-  | expected /= TyInt w =
-      Left ("type mismatch: expected " ++ typeName expected ++ ", found " ++ typeName (TyInt w))
+compileExprTyped fnSigs env expected (Cast e sg w)
+  | expected /= TyInt sg w =
+      Left ("type mismatch: expected " ++ typeName expected ++ ", found " ++ typeName (TyInt sg w))
   | otherwise = do
-      srcTy <- maybe (TyInt W64) id <$> inferMaybeType fnSigs env e
+      srcTy <- maybe (TyInt Signed W64) id <$> inferMaybeType fnSigs env e
       case srcTy of
-        TyInt srcW -> do
+        TyInt srcSg srcW -> do
           ei <- compileExprTyped fnSigs env srcTy e
-          -- i64→i64 以外は ISext32 で正規化する（i32への縮小、i32→i64の拡大、i32→i32 の再正規化）
-          Right (ei ++ (if srcW == W64 && w == W64 then [] else [ISext32]))
-        other -> Left ("invalid cast: cannot cast " ++ typeName other ++ " to " ++ typeName (TyInt w))
+          Right (ei ++ castInstrs srcSg srcW sg w)
+        other -> Left ("invalid cast: cannot cast " ++ typeName other ++ " to " ++ typeName (TyInt sg w))
 -- [let ]xxx = f(expr, ...);（引数は宣言順にシグネチャの型で厳密検査し、暗黙変換は行わない）
 compileExprTyped fnSigs env expected (Call name args) =
   case Map.lookup name fnSigs of
@@ -944,7 +979,16 @@ compileExprTyped fnSigs env expected (AddrOf e) = do
 -- [let ]xxx = *ptr;（expectedをそのまま子へ TPtr expected として伝播する。Castと異なり一様伝播を崩さない）
 compileExprTyped fnSigs env expected (Deref e) = do
   ei <- compileExprTyped fnSigs env (TPtr expected) e
-  Right (ei ++ [LoadInd (storageWidth expected)])
+  Right (ei ++ [LoadInd (storageWidth expected)] ++ loadFixup expected)
+
+-- 整数キャストの変換命令（Rustの as と同じビットの再解釈）。
+-- 32bitへの変換はキャスト先の符号で正規化する（縮小＝下位32bitの切り詰め、同幅の符号変更＝ビットの再解釈）。
+-- 32bitから64bitへの拡大はキャスト元の符号で拡張する（i32 は符号拡張、u32 はゼロ拡張）。
+-- 64bit同士（i64/u64間の再解釈を含む）は命令不要。
+castInstrs :: Signedness -> Width -> Signedness -> Width -> [Instr]
+castInstrs _ _ dstSg W32 = [normalize32 dstSg]
+castInstrs srcSg W32 _ W64 = [normalize32 srcSg]
+castInstrs _ W64 _ W64 = []
 
 -- Virtual machine
 
@@ -962,6 +1006,9 @@ run instrs = go instrs [] Map.empty
       | b == 0 = Left "division by zero"
       | b == -1 = go rest (trunc w (negate a) : stack) vars
       | otherwise = go rest (trunc w (a `quot` b) : stack) vars
+    go (IDivU w : rest) (b : a : stack) vars
+      | b == 0 = Left "division by zero"
+      | otherwise = go rest (divU w a b : stack) vars
     go (INeg w : rest) (a : stack) vars = go rest (trunc w (negate a) : stack) vars
     go (Load w off : rest) stack vars =
       case Map.lookup off vars of
@@ -974,8 +1021,13 @@ run instrs = go instrs [] Map.empty
     go (ICmpLe : rest) (b : a : stack) vars = go rest ((if a <= b then 1 else 0) : stack) vars
     go (ICmpGt : rest) (b : a : stack) vars = go rest ((if a > b then 1 else 0) : stack) vars
     go (ICmpGe : rest) (b : a : stack) vars = go rest ((if a >= b then 1 else 0) : stack) vars
+    go (ICmpLtU : rest) (b : a : stack) vars = go rest ((if toU64 a < toU64 b then 1 else 0) : stack) vars
+    go (ICmpLeU : rest) (b : a : stack) vars = go rest ((if toU64 a <= toU64 b then 1 else 0) : stack) vars
+    go (ICmpGtU : rest) (b : a : stack) vars = go rest ((if toU64 a > toU64 b then 1 else 0) : stack) vars
+    go (ICmpGeU : rest) (b : a : stack) vars = go rest ((if toU64 a >= toU64 b then 1 else 0) : stack) vars
     go (INot : rest) (a : stack) vars = go rest ((if a == 0 then 1 else 0) : stack) vars
     go (ISext32 : rest) (a : stack) vars = go rest (trunc W32 a : stack) vars
+    go (IZext32 : rest) (a : stack) vars = go rest (zext32 a : stack) vars
     -- vars はオフセットをキーとする抽象メモリなので、"アドレス"はオフセット値そのもの（%rbp=0とみなす）として表現する
     go (LoadAddr off : rest) stack vars = go rest (off : stack) vars
     go (LoadInd w : rest) (addr : stack) vars =
@@ -988,3 +1040,16 @@ run instrs = go instrs [] Map.empty
 trunc :: Width -> Int -> Int
 trunc W64 n = n
 trunc W32 n = fromIntegral (fromIntegral n :: Int32)
+
+-- movl %eax, %eax が行うゼロ拡張を再現する
+zext32 :: Int -> Int
+zext32 n = fromIntegral (fromIntegral n :: Word32)
+
+-- Int のビットパターンを符号なし64bit整数として解釈する
+toU64 :: Int -> Word64
+toU64 = fromIntegral
+
+-- divl/divq による符号なし除算を再現する（結果は u32 ならゼロ拡張済みの値になる）
+divU :: Width -> Int -> Int -> Int
+divU W32 a b = fromIntegral ((fromIntegral a :: Word32) `quot` (fromIntegral b :: Word32))
+divU W64 a b = fromIntegral (toU64 a `quot` toU64 b)

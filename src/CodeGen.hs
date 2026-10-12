@@ -2,7 +2,7 @@ module CodeGen (codegen) where
 
 import Compiler (Instr (..))
 import Data.List (mapAccumL)
-import Parser (Type (..), Width (..))
+import Parser (Signedness (..), Type (..), Width (..))
 
 -- -- Debug Printサンプル（pTraceShow: 純粋関数内, pTraceShowM: モナド内）
 -- import Debug.Pretty.Simple (pTraceShow, pTraceShowM)
@@ -68,7 +68,7 @@ epilogueRet =
 -- 末尾式の型ごとに printf への引数の渡し方を切り替える（暗黙main専用）。
 -- 整数型・ポインタ型はそのまま値を %rsi に渡すが、bool は 0/1 を "true"/"false" 文字列へ分岐させる。
 epilogue :: Type -> [String]
-epilogue (TyInt w) = printfEpilogue (fmtLabel w)
+epilogue (TyInt sg w) = printfEpilogue (fmtLabel sg w)
 epilogue (TPtr _) = printfEpilogue "fmtPtr"
 epilogue TBool =
   [ "    popq  %rax"
@@ -87,7 +87,7 @@ epilogue TBool =
   , "    ret"
   ]
 
--- printf(fmtLabel, 値) の形で末尾式を出力する共通処理（i32/i64/ポインタで共有、フォーマットラベルのみ差し替える）
+-- printf(fmtLabel, 値) の形で末尾式を出力する共通処理（整数型/ポインタで共有、フォーマットラベルのみ差し替える）
 printfEpilogue :: String -> [String]
 printfEpilogue label =
   [ "    popq  %rsi"
@@ -114,6 +114,10 @@ commonTail =
   , "    .string \"%d\\n\""
   , "fmt64:"
   , "    .string \"%ld\\n\""
+  , "fmtU32:"
+  , "    .string \"%u\\n\""
+  , "fmtU64:"
+  , "    .string \"%lu\\n\""
   , "fmtPtr:"
   , "    .string \"%p\\n\""
   , "strTrue:"
@@ -125,9 +129,11 @@ commonTail =
   , "    .section .note.GNU-stack,\"\",@progbits"
   ]
 
-fmtLabel :: Width -> String
-fmtLabel W32 = "fmt32"
-fmtLabel W64 = "fmt64"
+fmtLabel :: Signedness -> Width -> String
+fmtLabel Signed W32 = "fmt32"
+fmtLabel Signed W64 = "fmt64"
+fmtLabel Unsigned W32 = "fmtU32"
+fmtLabel Unsigned W64 = "fmtU64"
 
 -- 関数本体の命令列をアセンブリへ変換する。ICall（ユーザー関数呼び出し）だけは、
 -- 呼び出し直前のスタックアライメントを静的に判定するために操作スタックの深さ
@@ -149,6 +155,7 @@ stackDelta (IAdd _) = -1
 stackDelta (ISub _) = -1
 stackDelta (IMul _) = -1
 stackDelta (IDiv _) = -1
+stackDelta (IDivU _) = -1
 stackDelta (INeg _) = 0
 stackDelta (Store _ _) = -1
 stackDelta ICmpEq = -1
@@ -157,11 +164,16 @@ stackDelta ICmpLt = -1
 stackDelta ICmpLe = -1
 stackDelta ICmpGt = -1
 stackDelta ICmpGe = -1
+stackDelta ICmpLtU = -1
+stackDelta ICmpLeU = -1
+stackDelta ICmpGtU = -1
+stackDelta ICmpGeU = -1
 stackDelta INot = 0
 stackDelta (JmpIfZero _) = -1
 stackDelta (Jmp _) = 0
 stackDelta (Label _) = 0
 stackDelta ISext32 = 0
+stackDelta IZext32 = 0
 stackDelta (LoadAddr _) = 1
 stackDelta (LoadInd _) = 0
 stackDelta (StoreArg _ _ _) = 0
@@ -277,6 +289,26 @@ genInstr (IDiv W32) =
   , "    cltq"
   , "    pushq %rax"
   ]
+-- 符号なし除算。被除数の上位（%rdx/%edx）をゼロにして divq/divl する（符号なしでは最小値/-1 の問題は起きない）。
+-- divl の結果を %eax へ書くと上位32bitは自動的にゼロになるため、u32 のゼロ拡張済みの値がそのまま得られる
+genInstr (IDivU W64) =
+  [ "    popq  %rcx"
+  , "    cmpq  $0, %rcx"
+  , "    je    .Ldiv_zero_error"
+  , "    popq  %rax"
+  , "    xorl  %edx, %edx"
+  , "    divq  %rcx"
+  , "    pushq %rax"
+  ]
+genInstr (IDivU W32) =
+  [ "    popq  %rcx"
+  , "    cmpl  $0, %ecx"
+  , "    je    .Ldiv_zero_error"
+  , "    popq  %rax"
+  , "    xorl  %edx, %edx"
+  , "    divl  %ecx"
+  , "    pushq %rax"
+  ]
 genInstr (INeg W64) =
   [ "    popq  %rax"
   , "    negq  %rax"
@@ -352,6 +384,10 @@ genInstr ICmpGe =
   , "    movzbq %al, %rax"
   , "    pushq %rax"
   ]
+genInstr ICmpLtU = cmpU "setb "
+genInstr ICmpLeU = cmpU "setbe"
+genInstr ICmpGtU = cmpU "seta "
+genInstr ICmpGeU = cmpU "setae"
 genInstr INot =
   [ "    popq  %rax"
   , "    xorq  $1, %rax"
@@ -371,6 +407,11 @@ genInstr (Label lbl) =
 genInstr ISext32 =
   [ "    popq  %rax"
   , "    cltq"
+  , "    pushq %rax"
+  ]
+genInstr IZext32 =
+  [ "    popq  %rax"
+  , "    movl  %eax, %eax"
   , "    pushq %rax"
   ]
 genInstr (LoadAddr off) =
@@ -395,3 +436,14 @@ genInstr (StoreArg i W32 off) =
   ]
 genInstr (ICall _ _) =
   error "ICall requires operand-stack-depth context; must be generated via genBody, not genInstr"
+
+-- 符号なし大小比較（setb/setbe/seta/setae は CF/ZF を見る。u32 はゼロ拡張済みなので64bitで比較してよい）
+cmpU :: String -> [String]
+cmpU setcc =
+  [ "    popq  %rbx"
+  , "    popq  %rax"
+  , "    cmpq  %rbx, %rax"
+  , "    " ++ setcc ++ " %al"
+  , "    movzbq %al, %rax"
+  , "    pushq %rax"
+  ]
