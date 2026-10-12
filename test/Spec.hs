@@ -90,15 +90,15 @@ main = hspec $ do
     it "&&は2つのTAmpとして分割される（論理積演算子は存在しない）" $
       tokenize "&&i64" `shouldBe` Right [TAmp, TAmp, TIdent "i64"]
     it "i64サフィックス付き整数リテラルを変換する" $
-      tokenize "9999i64" `shouldBe` Right [TIntSuffixed 9999 Signed W64]
+      tokenize "9999i64" `shouldBe` Right [TIntSuffixed 9999 (TyInt Signed W64)]
     it "i32サフィックス付き整数リテラルを変換する" $
-      tokenize "123i32" `shouldBe` Right [TIntSuffixed 123 Signed W32]
+      tokenize "123i32" `shouldBe` Right [TIntSuffixed 123 (TyInt Signed W32)]
     it "サフィックス付き整数リテラルは空白を挟まなくても後続トークンと分割される" $
-      tokenize "9999i64+1" `shouldBe` Right [TIntSuffixed 9999 Signed W64, TPlus, TInt 1]
+      tokenize "9999i64+1" `shouldBe` Right [TIntSuffixed 9999 (TyInt Signed W64), TPlus, TInt 1]
     it "u32/u64サフィックス付き整数リテラルを変換する" $
-      tokenize "5u32 7u64" `shouldBe` Right [TIntSuffixed 5 Unsigned W32, TIntSuffixed 7 Unsigned W64]
+      tokenize "5u32 7u64" `shouldBe` Right [TIntSuffixed 5 (TyInt Unsigned W32), TIntSuffixed 7 (TyInt Unsigned W64)]
     it "u64の最大値はInt上で同じビットパターン（-1）として保持する" $
-      tokenize "18446744073709551615u64" `shouldBe` Right [TIntSuffixed (-1) Unsigned W64]
+      tokenize "18446744073709551615u64" `shouldBe` Right [TIntSuffixed (-1) (TyInt Unsigned W64)]
     it "u32の後に識別子文字が続く場合はサフィックスとみなさない" $
       tokenize "5u32x" `shouldBe` Right [TInt 5, TIdent "u32x"]
     it "数字の直後が'i64'/'i32'に一致しない識別子ならサフィックスとして扱わずTInt+TIdentのまま" $
@@ -110,12 +110,12 @@ main = hspec $ do
     it "整数リテラル" $
       parse [TInt 5] `shouldBe` Right ([], [], Lit 5)
     it "i64サフィックス付き整数リテラル" $
-      parse [TIntSuffixed 9999 Signed W64] `shouldBe` Right ([], [], LitTyped 9999 Signed W64)
+      parse [TIntSuffixed 9999 (TyInt Signed W64)] `shouldBe` Right ([], [], LitTyped 9999 (TyInt Signed W64))
     it "i32サフィックス付き整数リテラル" $
-      parse [TIntSuffixed 123 Signed W32] `shouldBe` Right ([], [], LitTyped 123 Signed W32)
+      parse [TIntSuffixed 123 (TyInt Signed W32)] `shouldBe` Right ([], [], LitTyped 123 (TyInt Signed W32))
     it "サフィックス付き整数リテラルの加算" $
-      parse [TIntSuffixed 1 Signed W64, TPlus, TInt 2]
-        `shouldBe` Right ([], [], Add (LitTyped 1 Signed W64) (Lit 2))
+      parse [TIntSuffixed 1 (TyInt Signed W64), TPlus, TInt 2]
+        `shouldBe` Right ([], [], Add (LitTyped 1 (TyInt Signed W64)) (Lit 2))
     it "加算" $
       parse [TInt 1, TPlus, TInt 2] `shouldBe` Right ([], [], Add (Lit 1) (Lit 2))
     it "減算" $
@@ -185,8 +185,8 @@ main = hspec $ do
       parse [TLet, TIdent "x", TAssign, TInt 1, TSemicolon, TIdent "x"]
         `shouldBe` Right ([], [SLetInferred "x" (Lit 1)], Var "x")
     it "let宣言（型注釈省略、サフィックス付きリテラル）" $
-      parse [TLet, TIdent "x", TAssign, TIntSuffixed 1 Signed W32, TSemicolon, TIdent "x"]
-        `shouldBe` Right ([], [SLetInferred "x" (LitTyped 1 Signed W32)], Var "x")
+      parse [TLet, TIdent "x", TAssign, TIntSuffixed 1 (TyInt Signed W32), TSemicolon, TIdent "x"]
+        `shouldBe` Right ([], [SLetInferred "x" (LitTyped 1 (TyInt Signed W32))], Var "x")
     it "let宣言（型注釈あり・省略）が混在しても両方正しくパースされる" $
       parse
         [ TLet, TIdent "a", TColon, TIdent "i32", TAssign, TInt 1, TSemicolon
@@ -248,44 +248,44 @@ main = hspec $ do
       parse [TLParen, TInt 1, TEq, TInt 1, TRParen]
         `shouldBe` Right ([], [], Eq (Lit 1) (Lit 1))
     it "as i64キャスト" $
-      parse [TIdent "x", TAs, TIdent "i64"] `shouldBe` Right ([], [], Cast (Var "x") Signed W64)
+      parse [TIdent "x", TAs, TIdent "i64"] `shouldBe` Right ([], [], Cast (Var "x") (TyInt Signed W64))
     it "as i32キャスト" $
-      parse [TInt 64, TAs, TIdent "i32"] `shouldBe` Right ([], [], Cast (Lit 64) Signed W32)
+      parse [TInt 64, TAs, TIdent "i32"] `shouldBe` Right ([], [], Cast (Lit 64) (TyInt Signed W32))
     it "キャストは左結合で連鎖できる" $
       parse [TIdent "x", TAs, TIdent "i32", TAs, TIdent "i64"]
-        `shouldBe` Right ([], [], Cast (Cast (Var "x") Signed W32) Signed W64)
+        `shouldBe` Right ([], [], Cast (Cast (Var "x") (TyInt Signed W32)) (TyInt Signed W64))
     it "単項マイナスはasより強く結合する" $
       parse [TMinus, TIdent "x", TAs, TIdent "i64"]
-        `shouldBe` Right ([], [], Cast (Neg (Var "x")) Signed W64)
+        `shouldBe` Right ([], [], Cast (Neg (Var "x")) (TyInt Signed W64))
     it "デリファレンスはasより強く結合する" $
       parse [TStar, TIdent "p", TAs, TIdent "i64"]
-        `shouldBe` Right ([], [], Cast (Deref (Var "p")) Signed W64)
+        `shouldBe` Right ([], [], Cast (Deref (Var "p")) (TyInt Signed W64))
     it "asは乗算より強く結合する" $
       parse [TIdent "a", TStar, TIdent "b", TAs, TIdent "i64"]
-        `shouldBe` Right ([], [], Mul (Var "a") (Cast (Var "b") Signed W64))
+        `shouldBe` Right ([], [], Mul (Var "a") (Cast (Var "b") (TyInt Signed W64)))
     it "asは加算より強く結合する" $
       parse [TIdent "a", TPlus, TIdent "b", TAs, TIdent "i64"]
-        `shouldBe` Right ([], [], Add (Var "a") (Cast (Var "b") Signed W64))
+        `shouldBe` Right ([], [], Add (Var "a") (Cast (Var "b") (TyInt Signed W64)))
     it "括弧で囲んだ式をキャストできる" $
       parse [TLParen, TIdent "a", TPlus, TIdent "b", TRParen, TAs, TIdent "i64"]
-        `shouldBe` Right ([], [], Cast (Add (Var "a") (Var "b")) Signed W64)
+        `shouldBe` Right ([], [], Cast (Add (Var "a") (Var "b")) (TyInt Signed W64))
     it "boolへのキャストはエラー" $
       parse [TIdent "x", TAs, TIdent "bool"]
-        `shouldBe` Left "invalid cast target: only integer types (i32/i64/u32/u64) are allowed"
+        `shouldBe` Left "invalid cast target: only integer types (i32/i64/u32/u64/usize) are allowed"
     it "ポインタ型へのキャストはエラー" $
       parse [TIdent "x", TAs, TAmp, TIdent "i64"]
-        `shouldBe` Left "invalid cast target: only integer types (i32/i64/u32/u64) are allowed"
+        `shouldBe` Left "invalid cast target: only integer types (i32/i64/u32/u64/usize) are allowed"
     it "未知の型へのキャストはエラー" $
       parse [TIdent "x", TAs, TIdent "foo"] `shouldBe` Left "unsupported type: foo"
     it "as u32キャスト" $
-      parse [TIdent "x", TAs, TIdent "u32"] `shouldBe` Right ([], [], Cast (Var "x") Unsigned W32)
+      parse [TIdent "x", TAs, TIdent "u32"] `shouldBe` Right ([], [], Cast (Var "x") (TyInt Unsigned W32))
     it "as u64キャスト" $
-      parse [TIdent "x", TAs, TIdent "u64"] `shouldBe` Right ([], [], Cast (Var "x") Unsigned W64)
+      parse [TIdent "x", TAs, TIdent "u64"] `shouldBe` Right ([], [], Cast (Var "x") (TyInt Unsigned W64))
     it "u32/u64の型注釈付きlet" $
       parse [TLet, TIdent "x", TColon, TIdent "u32", TAssign, TInt 1, TSemicolon, TIdent "x"]
         `shouldBe` Right ([], [SLet "x" (TyInt Unsigned W32) (Lit 1)], Var "x")
     it "u32サフィックス付きリテラルをパースする" $
-      parse [TIntSuffixed 5 Unsigned W32] `shouldBe` Right ([], [], LitTyped 5 Unsigned W32)
+      parse [TIntSuffixed 5 (TyInt Unsigned W32)] `shouldBe` Right ([], [], LitTyped 5 (TyInt Unsigned W32))
     it "asの後に型が無いとエラー" $
       parse [TIdent "x", TAs] `shouldSatisfy` isLeft
     it "空ブロック" $
@@ -1012,7 +1012,7 @@ main = hspec $ do
       result <- compileAndRun (Not (BoolLit False))
       result `shouldBe` "true"
     it "リテラル as i32を評価する" $ do
-      result <- compileAndRun (Cast (Lit 64) Signed W32)
+      result <- compileAndRun (Cast (Lit 64) (TyInt Signed W32))
       result `shouldBe` "64"
 
   describe "compile + codegen + gcc（変数を含むソースの結合テスト）" $ do
@@ -1382,6 +1382,189 @@ main = hspec $ do
     it "u64のゼロ除算もエラーメッセージを出力して非ゼロ終了する（IDivU W64）" $ do
       (code, out) <- compileSourceAndRunExit "let x: u64 = 5;\nx / 0"
       out `shouldBe` "division by zero"
+      code `shouldNotBe` ExitSuccess
+
+  describe "配列・usize（tokenize/parse）" $ do
+    it "[ ] を変換する" $
+      tokenize "a[0]" `shouldBe` Right [TIdent "a", TLBracket, TInt 0, TRBracket]
+    it "usizeサフィックス付き整数リテラルを変換する" $
+      tokenize "5usize" `shouldBe` Right [TIntSuffixed 5 TUsize]
+    it "usizeの後に識別子文字が続く場合はサフィックスとみなさない" $
+      tokenize "5usizex" `shouldBe` Right [TInt 5, TIdent "usizex"]
+    let parseSource src = tokenize src >>= parse
+    it "配列型の型注釈と配列リテラル" $
+      parseSource "let a: [i32; 3] = [1, 2, 3];\n0"
+        `shouldBe` Right ([], [SLet "a" (TArray (TyInt Signed W32) 3) (ArrayLit [Lit 1, Lit 2, Lit 3])], Lit 0)
+    it "繰り返し配列リテラル" $
+      parseSource "let a = [0; 5];\n0" `shouldBe` Right ([], [SLetInferred "a" (ArrayRepeat (Lit 0) 5)], Lit 0)
+    it "ポインタ型の配列" $
+      parseSource "let a: [&bool; 2] = [&x, &y];\n0"
+        `shouldBe` Right ([], [SLet "a" (TArray (TPtr TBool) 2) (ArrayLit [AddrOf (Var "x"), AddrOf (Var "y")])], Lit 0)
+    it "添字アクセス（末尾式のa[0]は代入文と区別される）" $
+      parseSource "a[0]" `shouldBe` Right ([], [], Index (Var "a") (Lit 0))
+    it "要素への代入文" $
+      parseSource "a[i] = 1;\n0" `shouldBe` Right ([], [SAssignIndex "a" (Var "i") (Lit 1)], Lit 0)
+    it "添字は単項演算子より強く結合する" $ do
+      parseSource "-a[0]" `shouldBe` Right ([], [], Neg (Index (Var "a") (Lit 0)))
+      parseSource "&a[1]" `shouldBe` Right ([], [], AddrOf (Index (Var "a") (Lit 1)))
+      parseSource "*p[1]" `shouldBe` Right ([], [], Deref (Index (Var "p") (Lit 1)))
+    it "as usize" $
+      parseSource "x as usize" `shouldBe` Right ([], [], Cast (Var "x") TUsize)
+    it "ネストした配列はエラー" $
+      parseSource "let a: [[i32; 2]; 2] = 0;\n0" `shouldBe` Left "nested arrays are not supported"
+    it "配列へのポインタはエラー" $
+      parseSource "let p: &[i32; 2] = 0;\n0" `shouldBe` Left "pointer to array is not supported"
+    it "空の配列リテラルはエラー" $
+      parseSource "let a = [];\n0" `shouldBe` Left "empty array literal is not supported"
+    it "長さ0の配列型はエラー" $
+      parseSource "let a: [i32; 0] = 0;\n0" `shouldBe` Left "array length must be at least 1"
+
+  describe "配列・usize（compile）" $ do
+    let compileSource src = tokenize src >>= parse >>= compile
+    it "配列リテラルは要素ごとに静的オフセットへストアし、a[i]はアドレス計算＋範囲検査＋LoadInd" $
+      compileSource "let a: [i32; 2] = [1, 2];\na[1]"
+        `shouldBe` Right
+          ( []
+          , TyInt Signed W32
+          , [ Push 1, Store W32 (-8), Push 2, Store W32 (-4)
+            , LoadAddr (-8), Push 1, IBoundsCheck 2, Push 4, IMul W64, IAdd W64, LoadInd W32
+            ]
+          )
+    it "[e; N] は e を1回だけ評価し、残りの要素へコピーする（u32は読み出し後にゼロ拡張）" $
+      compileSource "let a = [5u32; 3];\na[0]"
+        `shouldBe` Right
+          ( []
+          , TyInt Unsigned W32
+          , [ Push 5, Store W32 (-12), Load W32 (-12), Store W32 (-8), Load W32 (-12), Store W32 (-4)
+            , LoadAddr (-12), Push 0, IBoundsCheck 3, Push 4, IMul W64, IAdd W64, LoadInd W32, IZext32
+            ]
+          )
+    it "要素への代入はアドレス計算＋値＋StoreInd" $
+      compileSource "let a = [1, 2];\na[0] = 3;\n0"
+        `shouldBe` Right
+          ( []
+          , TyInt Signed W64
+          , [ Push 1, Store W64 (-16), Push 2, Store W64 (-8)
+            , LoadAddr (-16), Push 0, IBoundsCheck 2, Push 8, IMul W64, IAdd W64, Push 3, StoreInd W64
+            , Push 0
+            ]
+          )
+    it "usizeの演算はu64と同じ命令列" $
+      compileSource "let i: usize = 4;\ni / 2"
+        `shouldBe` Right ([], TUsize, [Push 4, Store W64 (-8), Load W64 (-8), Push 2, IDivU W64])
+    it "as usize は as u64 と同じ命令列" $
+      compileSource "let x: i32 = 1;\nx as usize"
+        `shouldBe` Right ([], TUsize, [Push 1, Store W32 (-4), Load W32 (-4), ISext32])
+    it "配列の後に宣言した変数は配列全体の後ろに割り付けられる" $
+      fmap (\(_, _, is) -> last (init is)) (compileSource "let a = [true; 2];\nlet x: i64 = 1;\nx")
+        `shouldBe` Right (Store W64 (-16))
+
+  describe "配列・usize（意味論エラー）" $ do
+    let compileSource src = fmap (const ()) (tokenize src >>= parse >>= compile)
+    it "要素数の不一致" $
+      compileSource "let a: [i32; 3] = [1, 2];\n0" `shouldBe` Left "array length mismatch: expected 3, found 2"
+    it "繰り返し回数の不一致" $
+      compileSource "let a: [i32; 3] = [1; 4];\n0" `shouldBe` Left "array length mismatch: expected 3, found 4"
+    it "リテラル添字の範囲外はコンパイル時エラー" $
+      compileSource "let a = [1, 2, 3];\na[3]" `shouldBe` Left "index out of bounds: the length is 3 but the index is 3"
+    it "u64の添字はエラー（usizeとは別の型）" $
+      compileSource "let a = [1, 2];\nlet i: u64 = 0;\na[i]" `shouldBe` Left "type mismatch: expected usize, found u64"
+    it "i64の添字はエラー" $
+      compileSource "let a = [1, 2];\nlet i = 0;\na[i]" `shouldBe` Left "type mismatch: expected usize, found i64"
+    it "usizeとu64の混在はエラー" $
+      compileSource "let i: usize = 1;\nlet j: u64 = 2;\ni + j" `shouldBe` Left "type mismatch: usize and u64"
+    it "要素型の不一致" $
+      compileSource "let a: [i32; 2] = [1, true];\n0" `shouldBe` Left "type mismatch: expected i32, found bool"
+    it "要素への代入の型不一致" $
+      compileSource "let a = [1u32, 2u32];\na[0] = 1i64;\n0" `shouldBe` Left "type mismatch: expected u32, found i64"
+    it "配列リテラルの要素型の混在" $
+      compileSource "let a = [1i32, 2i64];\n0" `shouldBe` Left "type mismatch: i32 and i64"
+    it "usizeへの単項マイナスはエラー" $
+      compileSource "let i: usize = 1;\n-i" `shouldBe` Left "cannot apply unary minus to unsigned type usize"
+    it "配列を値として使うとエラー" $ do
+      compileSource "let a = [1, 2];\na" `shouldBe` Left "array cannot be used as a value: a"
+      compileSource "let a = [1, 2];\nlet b = [1, 2];\na == b" `shouldBe` Left "array cannot be used as a value: a"
+    it "配列変数で配列を初期化するとエラー" $
+      compileSource "let a = [1, 2];\nlet b = a;\n0" `shouldBe` Left "array must be initialized with an array literal"
+    it "配列全体への代入はエラー" $
+      compileSource "let a = [1, 2];\na = [3, 4];\n0" `shouldBe` Left "cannot assign to array a; assign to elements instead"
+    it "配列のアドレス取得はエラー" $
+      compileSource "let a = [1, 2];\n&a" `shouldBe` Left "cannot take address of array a"
+    it "配列リテラルをlet初期化以外で使うとエラー" $
+      compileSource "[1, 2][0]" `shouldBe` Left "cannot index into a value of type [i64; 2]"
+    it "配列でない値への添字はエラー" $
+      compileSource "let x = 1;\nx[0]" `shouldBe` Left "cannot index into a value of type i64"
+    it "関数の仮引数・戻り値に配列型は使えない（注釈）" $
+      compileSource "fn f(a: [i32; 2]) -> i32 { 0 }\n0" `shouldBe` Left "array type is not allowed in function signature: f"
+    it "関数の仮引数・戻り値に配列型は使えない（推論）" $
+      compileSource "fn f(a) { 0 }\nlet a = [1, 2];\nf(a)" `shouldBe` Left "array type is not allowed in function signature: f"
+
+  describe "配列（VM・codegen）" $ do
+    it "IBoundsCheckは範囲内なら添字を残す" $
+      run [Push 1, IBoundsCheck 2] `shouldBe` Right 1
+    it "IBoundsCheckは範囲外ならエラー（負の値は符号なしで巨大な値とみなす）" $ do
+      run [Push 2, IBoundsCheck 2] `shouldBe` Left "index out of bounds"
+      run [Push (-1), IBoundsCheck 2] `shouldBe` Left "index out of bounds"
+    it "StoreIndで書き込んだ値をLoadIndで読み戻す" $
+      run [LoadAddr (-8), Push 7, StoreInd W64, LoadAddr (-8), LoadInd W64] `shouldBe` Right 7
+    it "IBoundsCheckは符号なし比較で.Lindex_errorへジャンプする" $
+      codegen [] (TyInt Signed W64) [IBoundsCheck 3] `shouldContain` "jae   .Lindex_error"
+    it "StoreInd W32はmovlで間接ストアする" $
+      codegen [] (TyInt Signed W64) [StoreInd W32] `shouldContain` "movl  %eax, (%rcx)"
+    it "usizeの末尾式は%luで出力する" $
+      codegen [] TUsize [] `shouldContain` "leaq  fmtU64(%rip), %rdi"
+
+  describe "compile + codegen + gcc（配列の結合テスト）" $ do
+    it "i32配列の合計をusizeのwhileループで求める" $ do
+      result <-
+        compileSourceAndRun
+          "let a: [i32; 5] = [1, 2, 3, 4, 5];\nlet s: i32 = 0;\nlet i: usize = 0;\nwhile i < 5 {\ns = s + a[i];\ni = i + 1;\n}\ns"
+      result `shouldBe` "15"
+    it "[0; 5] へ書き込んで読み戻す（i64）" $ do
+      result <-
+        compileSourceAndRun
+          "let a = [0; 5];\nlet i: usize = 0;\nwhile i < 5 {\na[i] = (i as i64) * 10;\ni = i + 1;\n}\na[0] + a[4]"
+      result `shouldBe` "40"
+    it "u32配列の要素はラップアラウンドする" $ do
+      result <- compileSourceAndRun "let a = [0u32; 2];\na[1] = a[0] - 1u32;\na[1]"
+      result `shouldBe` "4294967295"
+    it "u64配列" $ do
+      result <- compileSourceAndRun "let a = [18446744073709551615u64, 1u64];\na[0] / 2u64"
+      result `shouldBe` "9223372036854775807"
+    it "bool配列" $ do
+      result <- compileSourceAndRun "let b = [true, false, true];\nb[1] = true;\nb[0] == b[1]"
+      result `shouldBe` "true"
+    it "ポインタ型の配列" $ do
+      result <-
+        compileSourceAndRun "let x: i32 = 10;\nlet y: i32 = 20;\nlet ps: [&i32; 2] = [&x, &y];\ny = 25;\n*ps[0] + *ps[1]"
+      result `shouldBe` "35"
+    it "&a[i] で要素のアドレスを取得し、*で読み戻す" $ do
+      result <- compileSourceAndRun "let a = [1, 2, 3];\nlet p = &a[2];\na[2] = 9;\n*p + *&a[0]"
+      result `shouldBe` "10"
+    it "[e; N] の e は1回だけ評価される（関数呼び出し）" $ do
+      result <- compileSourceAndRun "fn seven() -> i32 { 7 }\nlet a = [seven(); 3];\na[0] + a[1] + a[2]"
+      result `shouldBe` "21"
+    it "関数内のローカル配列" $ do
+      result <-
+        compileSourceAndRun
+          "fn sum3(x: i64, y: i64, z: i64) -> i64 {\nlet a = [x, y, z];\na[0] + a[1] + a[2]\n}\nsum3(1, 2, 3)"
+      result `shouldBe` "6"
+    it "配列の前後の変数を壊さない" $ do
+      result <- compileSourceAndRun "let x: i32 = 1;\nlet a = [0i32; 3];\nlet y: i32 = 2;\na[0] = 5;\na[2] = 7;\nx + y"
+      result `shouldBe` "3"
+    it "usizeの最大値を%luで出力する" $ do
+      result <- compileSourceAndRun "18446744073709551615usize"
+      result `shouldBe` "18446744073709551615"
+    it "-1 as usize はusizeの最大値（as u64 と同じ）" $ do
+      result <- compileSourceAndRun "let x: i32 = -1;\nx as usize"
+      result `shouldBe` "18446744073709551615"
+    it "実行時の添字の範囲外はエラーメッセージを出力して非ゼロ終了する" $ do
+      (code, out) <- compileSourceAndRunExit "let a = [1, 2, 3];\nlet i: usize = 3;\na[i]"
+      out `shouldBe` "index out of bounds"
+      code `shouldNotBe` ExitSuccess
+    it "要素への代入でも範囲外を検出する（0 - 1 のラップアラウンド）" $ do
+      (code, out) <- compileSourceAndRunExit "let a = [1, 2];\nlet i: usize = 0;\na[i - 1] = 5;\n0"
+      out `shouldBe` "index out of bounds"
       code `shouldNotBe` ExitSuccess
 
 compileAndRun :: Expr -> IO String

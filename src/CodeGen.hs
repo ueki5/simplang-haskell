@@ -69,7 +69,10 @@ epilogueRet =
 -- 整数型・ポインタ型はそのまま値を %rsi に渡すが、bool は 0/1 を "true"/"false" 文字列へ分岐させる。
 epilogue :: Type -> [String]
 epilogue (TyInt sg w) = printfEpilogue (fmtLabel sg w)
+epilogue TUsize = printfEpilogue "fmtU64"
 epilogue (TPtr _) = printfEpilogue "fmtPtr"
+-- 配列は値として扱えないため、末尾式の型が配列になることはない（compile側でエラーになる）
+epilogue (TArray _ _) = error "epilogue: array type cannot be the type of the final expression"
 epilogue TBool =
   [ "    popq  %rax"
   , "    andq  $-16, %rsp"
@@ -100,12 +103,18 @@ printfEpilogue label =
   , "    ret"
   ]
 
--- ゼロ除算時のエラー処理とrodataセクションは全関数で共通、ファイル全体で一度だけ出力する
+-- ゼロ除算・配列の範囲外アクセス時のエラー処理とrodataセクションは全関数で共通、ファイル全体で一度だけ出力する
 commonTail :: [String]
 commonTail =
   [ ".Ldiv_zero_error:"
   , "    andq  $-16, %rsp"
   , "    leaq  errmsg(%rip), %rdi"
+  , "    call  puts"
+  , "    movl  $1, %edi"
+  , "    call  exit"
+  , ".Lindex_error:"
+  , "    andq  $-16, %rsp"
+  , "    leaq  idxerrmsg(%rip), %rdi"
   , "    call  puts"
   , "    movl  $1, %edi"
   , "    call  exit"
@@ -126,6 +135,8 @@ commonTail =
   , "    .string \"false\\n\""
   , "errmsg:"
   , "    .string \"division by zero\""
+  , "idxerrmsg:"
+  , "    .string \"index out of bounds\""
   , "    .section .note.GNU-stack,\"\",@progbits"
   ]
 
@@ -177,6 +188,8 @@ stackDelta IZext32 = 0
 stackDelta (LoadAddr _) = 1
 stackDelta (LoadInd _) = 0
 stackDelta (StoreArg _ _ _) = 0
+stackDelta (IBoundsCheck _) = 0
+stackDelta (StoreInd _) = -2
 stackDelta (ICall _ n) = 1 - n
 
 -- 呼び出し直前（＝n個の引数をレジスタへpopし終えた時点）の深さ d = depthAtCall - n が奇数なら、
@@ -427,6 +440,24 @@ genInstr (LoadInd W32) =
   [ "    popq  %rax"
   , "    movslq (%rax), %rax"
   , "    pushq %rax"
+  ]
+-- 添字（スタック先頭）はpopせずに覗き見る。符号なしで比較するため、負の値を
+-- 符号なしへ再解釈した巨大な添字も範囲外として検出される
+genInstr (IBoundsCheck n) =
+  [ "    movq  (%rsp), %rax"
+  , "    movabsq $" ++ show n ++ ", %rcx"
+  , "    cmpq  %rcx, %rax"
+  , "    jae   .Lindex_error"
+  ]
+genInstr (StoreInd W64) =
+  [ "    popq  %rax"
+  , "    popq  %rcx"
+  , "    movq  %rax, (%rcx)"
+  ]
+genInstr (StoreInd W32) =
+  [ "    popq  %rax"
+  , "    popq  %rcx"
+  , "    movl  %eax, (%rcx)"
   ]
 genInstr (StoreArg i W64 off) =
   [ "    movq  " ++ argReg64 i ++ ", " ++ show off ++ "(%rbp)"
