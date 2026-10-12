@@ -81,8 +81,8 @@ data Stmt
   | -- 型注釈を省略したlet（例: `let x = 5;`）。型はcompileExprTyped側でinferTypeにより推論する
     SLetInferred String Expr
   | SAssign String Expr
-  | -- 配列要素への代入 `a[i] = expr;`
-    SAssignIndex String Expr Expr
+  | -- 場所式（配列要素・デリファレンス）への代入 `a[i] = expr;` / `p[i] = expr;` / `*p = expr;`
+    SAssignPlace Expr Expr
   | SBlock [Stmt]
   | -- if/else-if*/else?（値を返さない文。分岐は [(条件式, 本体)] の列＋任意のelse本体）
     SIf [(Expr, [Stmt])] (Maybe [Stmt])
@@ -196,10 +196,10 @@ matchIntSuffix s
 --
 -- program    ::= (fn-decl | stmt)* expr
 -- fn-decl    ::= 'fn' IDENT '(' (IDENT (':' type)? (',' IDENT (':' type)?)*)? ')' ('->' type)? '{' stmt* expr '}'
--- stmt       ::= let-stmt | assign-stmt | index-assign-stmt | block-stmt | if-stmt | while-stmt | break-stmt | continue-stmt | return-stmt
+-- stmt       ::= let-stmt | assign-stmt | place-assign-stmt | block-stmt | if-stmt | while-stmt | break-stmt | continue-stmt | return-stmt
 -- let-stmt    ::= 'let' IDENT ':' type '=' expr ';' | 'let' IDENT '=' expr ';'
 -- assign-stmt ::= IDENT '=' expr ';'
--- index-assign-stmt ::= IDENT '[' expr ']' '=' expr ';'
+-- place-assign-stmt ::= expr '=' expr ';'（左辺は場所式。a[i] / p[i] / (*p)[i] / *p など）
 -- block-stmt ::= '{' stmt* '}'
 -- if-stmt    ::= 'if' expr '{' stmt* '}' ('else' 'if' expr '{' stmt* '}')* ('else' '{' stmt* '}')?
 -- while-stmt    ::= 'while' expr '{' stmt* '}'
@@ -207,7 +207,7 @@ matchIntSuffix s
 -- continue-stmt ::= 'continue' ';'
 -- return-stmt   ::= 'return' expr ';'
 -- type       ::= '&' type | '[' type ';' INT ']' | 'i32' | 'i64' | 'u32' | 'u64' | 'usize' | 'bool'
---              ※ 配列の要素型に配列は不可、配列へのポインタ（'&' '[' ...）も不可
+--              ※ 配列の要素型に配列は不可（配列へのポインタ '&' '[' ... は可）
 -- expr       ::= equality
 -- equality   ::= comparison (('==' | '!=') comparison)*
 -- comparison ::= additive (('<' | '<=' | '>' | '>=') additive)*
@@ -300,15 +300,6 @@ parseStmts (TIdent name : TAssign : rest) = do
   (stmt, rest') <- parseAssignStmt name rest
   (stmts, rest'') <- parseStmts rest'
   Right (stmt : stmts, rest'')
--- IDENT '[' で始まる場合、IDENT '[' expr ']' まで試しに読み、次が '=' なら要素への代入文とする。
--- そうでなければ（末尾式 `a[0]` など）文は無いものとして元のトークン列のまま戻る
-parseStmts tokens@(TIdent name : TLBracket : rest) =
-  case parseIndexTarget rest of
-    Right (idx, TAssign : rest') -> do
-      (stmt, rest'') <- parseIndexAssignStmt name idx rest'
-      (stmts, rest3) <- parseStmts rest''
-      Right (stmt : stmts, rest3)
-    _ -> Right ([], tokens)
 parseStmts (TLBrace : rest) = do
   (stmt, rest') <- parseBlockStmt rest
   (stmts, rest'') <- parseStmts rest'
@@ -333,7 +324,16 @@ parseStmts (TReturn : rest) = do
   (stmt, rest') <- parseReturnStmt rest
   (stmts, rest'') <- parseStmts rest'
   Right (stmt : stmts, rest'')
-parseStmts tokens = Right ([], tokens)
+-- キーワードで始まらない場合は式を試しに読み、次が '=' なら場所式への代入文とする。
+-- そうでなければ（末尾式 `a[0]` / `*p` など）文は無いものとして元のトークン列のまま戻る
+-- （パースエラーも末尾式として読み直す側で報告される）
+parseStmts tokens =
+  case parseExpr tokens of
+    Right (lhs, TAssign : rest) -> do
+      (stmt, rest') <- parsePlaceAssignStmt lhs rest
+      (stmts, rest'') <- parseStmts rest'
+      Right (stmt : stmts, rest'')
+    _ -> Right ([], tokens)
 
 -- let-stmt    ::= 'let' IDENT ':' type '=' expr ';' | 'let' IDENT '=' expr ';'
 parseLetStmt :: [Token] -> ParseResult Stmt
@@ -367,9 +367,7 @@ parseType ty = Left ("unsupported type: " ++ ty)
 parseTypeAnnotation :: [Token] -> ParseResult Type
 parseTypeAnnotation (TAmp : rest) = do
   (inner, rest') <- parseTypeAnnotation rest
-  case inner of
-    TArray _ _ -> Left "pointer to array is not supported"
-    _ -> Right (TPtr inner, rest')
+  Right (TPtr inner, rest')
 parseTypeAnnotation (TLBracket : rest) = do
   (elemTy, rest') <- parseTypeAnnotation rest
   case elemTy of
@@ -400,12 +398,12 @@ parseIndexTarget tokens = do
   rest' <- expectToken TRBracket rest
   Right (idx, rest')
 
--- index-assign-stmt ::= IDENT '[' expr ']' '=' expr ';'（'=' までは呼び出し側で消費済み）
-parseIndexAssignStmt :: String -> Expr -> [Token] -> ParseResult Stmt
-parseIndexAssignStmt name idx tokens = do
+-- place-assign-stmt ::= expr '=' expr ';'（左辺と '=' は呼び出し側で消費済み。左辺が場所式かどうかはcompile側で検査する）
+parsePlaceAssignStmt :: Expr -> [Token] -> ParseResult Stmt
+parsePlaceAssignStmt lhs tokens = do
   (expr, rest) <- parseExpr tokens
   rest' <- expectToken TSemicolon rest
-  Right (SAssignIndex name idx expr, rest')
+  Right (SAssignPlace lhs expr, rest')
 
 -- block-stmt ::= '{' stmt* '}'（'{' は呼び出し側で消費済み）
 parseBlockStmt :: [Token] -> ParseResult Stmt
