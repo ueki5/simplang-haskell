@@ -50,7 +50,7 @@ data Expr
   | -- 'i32'/'i64'/'u32'/'u64'/'usize'サフィックスで型を固定した整数リテラル（例: `9999i64`）。Litと異なりexpectedとは無関係に型が確定する
     LitTyped Int Type
   | BoolLit Bool
-  | -- ユニット値 `()`。fn本体・暗黙mainの末尾式の省略や `return;` もパーサでこれへ脱糖する
+  | -- ユニット値 `()`。fn本体の末尾式の省略や `return;` もパーサでこれへ脱糖する
     UnitLit
   | Var String
   | Add Expr Expr
@@ -100,7 +100,7 @@ data Stmt
     SExpr Expr
   deriving (Show, Eq)
 
--- 文の列 + 末尾式（関数本体・プログラム全体で共通の形。省略された末尾式は UnitLit へ脱糖済み）
+-- 文の列 + 末尾式（関数本体の形。省略された末尾式は UnitLit へ脱糖済み）
 type Body = ([Stmt], Expr)
 
 -- 関数定義: 名前, 仮引数(名前, 型注釈省略可)の列, 戻り値の型(省略可), 本体。
@@ -108,8 +108,8 @@ type Body = ([Stmt], Expr)
 data FnDecl = FnDecl String [(String, Maybe Type)] (Maybe Type) Body
   deriving (Show, Eq)
 
--- fn定義の列 + 既存の暗黙main本体
-type Program = ([FnDecl], [Stmt], Expr)
+-- fn定義の列（main を含む。トップレベルにはfn定義しか書けない）
+type Program = [FnDecl]
 
 -- 整数演算・変数のビット幅（codegenのレジスタ幅）
 data Width = W32 | W64 deriving (Show, Eq)
@@ -199,7 +199,7 @@ matchIntSuffix s
 
 -- Parser
 --
--- program    ::= (fn-decl | stmt)* expr?（末尾式を省略した場合は () とする）
+-- program    ::= fn-decl*（main を含む。トップレベルに文・式は書けない）
 -- fn-decl    ::= 'fn' IDENT '(' (IDENT (':' type)? (',' IDENT (':' type)?)*)? ')' ('->' type)? '{' stmt* expr? '}'
 --              （末尾式を省略した場合は () とする）
 -- stmt       ::= let-stmt | assign-stmt | place-assign-stmt | expr-stmt | block-stmt | if-stmt | while-stmt | break-stmt | continue-stmt | return-stmt
@@ -229,33 +229,13 @@ matchIntSuffix s
 
 type ParseResult a = Either String (a, [Token])
 
--- program ::= (fn-decl | stmt)* expr?
+-- program ::= fn-decl*
 parse :: [Token] -> Either String Program
-parse tokens = do
-  (fnDecls, stmts, rest) <- parseTopLevel tokens
-  -- 末尾式の省略（入力終端）は () とする
-  (expr, rest') <- case rest of
-    [] -> Right (UnitLit, [])
-    _ -> parseExpr rest
-  case rest' of
-    [] -> Right (fnDecls, stmts, expr)
-    (t : _) -> Left ("unexpected token: " ++ show t)
-
--- トップレベルの (fn定義 | 文)* を読む。fn定義は既存のstmtの列とは独立に集約する
--- （ネストしたブロック/if/while本体はparseStmtsをそのまま使うため、その内部にfn定義は出現できない）。
--- 文の連続はparseStmtsで一気に読み、止まった位置が'fn'であれば再帰してさらに読み進める
-parseTopLevel :: [Token] -> Either String ([FnDecl], [Stmt], [Token])
-parseTopLevel (TFn : rest) = do
+parse [] = Right []
+parse (TFn : rest) = do
   (fnDecl, rest') <- parseFnDecl rest
-  (fnDecls, stmts, rest'') <- parseTopLevel rest'
-  Right (fnDecl : fnDecls, stmts, rest'')
-parseTopLevel tokens = do
-  (stmts, rest) <- parseStmts tokens
-  case rest of
-    (TFn : _) -> do
-      (fnDecls, stmts', rest') <- parseTopLevel rest
-      Right (fnDecls, stmts ++ stmts', rest')
-    _ -> Right ([], stmts, rest)
+  (fnDecl :) <$> parse rest'
+parse (t : _) = Left ("expected 'fn' at top level, got: " ++ show t)
 
 -- fn定義（先頭の'fn'は呼び出し側で消費済み）
 parseFnDecl :: [Token] -> ParseResult FnDecl

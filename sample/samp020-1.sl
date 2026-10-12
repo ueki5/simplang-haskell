@@ -7,5 +7,8 @@ fn sum(p) {
     }
     s
 }
-let a = [10, 20, 30, 40];
-sum(&a)
+
+fn main() {
+    let a = [10, 20, 30, 40];
+    sum(&a)
+}

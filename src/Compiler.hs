@@ -175,24 +175,23 @@ type FnSigs = Map String ([Type], Type)
 maxParams :: Int
 maxParams = 6
 
--- [FnDecl] ＋ [文]＋式（Program）から命令を抽出する。
--- 各fnの本体は外側（暗黙main・他の関数）を一切参照しない独立スコープでコンパイルされ、
--- ラベル採番用のカウンタ（CompileM）は全fn＋暗黙mainを通じて単一のものを共有する
+-- [FnDecl]（Program）から命令を抽出する。
+-- 各fnの本体は他の関数を一切参照しない独立スコープでコンパイルされ、
+-- ラベル採番用のカウンタ（CompileM）は全fnを通じて単一のものを共有する
 -- （同名ラベルの重複はアセンブル時に壊れるため）。
+-- 戻り値は (main以外のfnの命令列, mainの戻り値型, mainの命令列)。mainは戻り値を表示して
+-- 終了する特別な末尾（codegen側のepilogue）を持つため、他のfnとは分けて返す
 compile :: Program -> Either String ([(String, [Instr])], Type, [Instr])
-compile (fnDecls, stmts, expr) = do
-  fnSigs <- resolveFnSigs fnDecls stmts expr
-  evalStateT (compileProgram fnSigs fnDecls stmts expr) 0
+compile fnDecls = do
+  fnSigs <- resolveFnSigs fnDecls
+  evalStateT (compileProgram fnSigs fnDecls) 0
 
-compileProgram :: FnSigs -> [FnDecl] -> [Stmt] -> Expr -> CompileM ([(String, [Instr])], Type, [Instr])
-compileProgram fnSigs fnDecls stmts expr = do
+compileProgram :: FnSigs -> [FnDecl] -> CompileM ([(String, [Instr])], Type, [Instr])
+compileProgram fnSigs fnDecls = do
   fns <- mapM (compileFnDecl fnSigs) fnDecls
-  -- 暗黙main本体: 外側の関数を持たない（ReturnCtx = Nothing、returnはコンパイルエラー）
-  (env, _cursor, stmtInstrs) <- compileStmtsFrom fnSigs [Map.empty] 0 Nothing Nothing stmts
-  finalType <- lift (inferType fnSigs env expr)
-  exprInstrs <- lift (compileExprTyped fnSigs env finalType expr)
-  -- pTraceShowM ("env", env)
-  pure (fns, finalType, stmtInstrs ++ exprInstrs)
+  let mainInstrs = maybe [] id (lookup "main" fns)
+      (_, mainType) = fnSigs Map.! "main"
+  pure ([fn | fn@(name, _) <- fns, name /= "main"], mainType, mainInstrs)
 
 -- if の分岐ラベル採番用のカウンタを持ち回るモナド。
 -- Env/cursor はブロックやif分岐を抜けるたびに「呼び出し前の値へ巻き戻す」必要がある一方、
@@ -219,11 +218,11 @@ freshLabel prefix = do
 -- スコープ的な情報なので、cursor/Envと同じ素朴な引数渡しがそのまま正しい挙動を与える。
 type LoopCtx = Maybe (String, String)
 
--- 現在コンパイル中の関数の (戻り値の型, 関数末尾ラベル)。関数の外側（暗黙main）では Nothing であり、
--- returnの使用はコンパイルエラーとなる。LoopCtxと同じ理由で普通の関数引数として渡す：
+-- 現在コンパイル中の関数の (関数名, 戻り値の型, 関数末尾ラベル)。関数の外側では Nothing であり、
+-- returnの使用はコンパイルエラーとなる（全ての文はfn本体の中にあるため、現在は常に Just）。LoopCtxと同じ理由で普通の関数引数として渡す：
 -- ブロック/if分岐/while本体へは変更せずそのまま素通しし（returnは常に直近の外側“関数”から戻るため、
 -- ループを跨いでも値を保ち続ける必要がある）、関数本体に入るときだけ新しい値に差し替える。
-type ReturnCtx = Maybe (Type, String)
+type ReturnCtx = Maybe (String, Type, String)
 
 -- 任意のEnv/cursor/loopCtx/returnCtxを起点に[文]から命令を抽出する（ブロック/if分岐/while本体/関数本体の再帰コンパイルに使う）
 compileStmtsFrom :: FnSigs -> Env -> Int -> LoopCtx -> ReturnCtx -> [Stmt] -> CompileM (Env, Int, [Instr])
@@ -295,8 +294,8 @@ compileStmtsFrom fnSigs initEnv initCursor loopCtx returnCtx stmts = foldM step 
       pure (env, cursor, acc ++ [Jmp lbl])
     -- return expr;
     step (env, cursor, acc) (SReturn expr) = do
-      (retTy, endLabel) <- lift (maybe (Left "return used outside function") Right returnCtx)
-      lift (checkNoLocalRef env expr)
+      (fnName, retTy, endLabel) <- lift (maybe (Left "return used outside function") Right returnCtx)
+      lift (checkNoLocalRef fnName env expr)
       instrs <- lift (compileExprTyped fnSigs env retTy expr)
       pure (env, cursor, acc ++ instrs ++ [Jmp endLabel])
     -- expr;（letの型注釈省略と同じ規則で型を決めてコンパイルし、値は捨てる）
@@ -374,7 +373,7 @@ allocParams params = (reverse revAssigned, Map.fromList [(n, (o, t)) | (n, o, t)
       let off = c - stackBytes ty
        in ((name, off, ty) : acc, off)
 
--- 関数本体のコンパイル。パラメータのみを含む独立スコープ（外側の暗黙main・他の関数の変数は
+-- 関数本体のコンパイル。パラメータのみを含む独立スコープ（他の関数の変数は
 -- 一切参照できない）から開始し、パラメータはプロローグ直後にレジスタからスタックへスピルする
 -- （StoreArg）。早期returnと末尾式のフォールスルーは同じ関数末尾ラベルへ合流する
 compileFnDecl :: FnSigs -> FnDecl -> CompileM (String, [Instr])
@@ -386,9 +385,9 @@ compileFnDecl fnSigs (FnDecl name params _ (stmts, tailExpr)) = do
       (assigned, paramEnv, paramCursor) = allocParams (zip (map fst params) paramTys)
       env0 = [paramEnv]
       spillInstrs = [StoreArg i (storageWidth ty) off | (i, (_, off, ty)) <- zip [0 ..] assigned]
-      returnCtx = Just (retTy, endLabel)
+      returnCtx = Just (name, retTy, endLabel)
   (env1, _cursor1, stmtInstrs) <- compileStmtsFrom fnSigs env0 paramCursor Nothing returnCtx stmts
-  lift (checkNoLocalRef env1 tailExpr)
+  lift (checkNoLocalRef name env1 tailExpr)
   tailInstrs <- lift (compileExprTyped fnSigs env1 retTy tailExpr)
   -- pTraceShowM ("assigned of " ++ name, assigned)
   -- pTraceShowM ("env0 of " ++ name, env0)
@@ -398,16 +397,18 @@ compileFnDecl fnSigs (FnDecl name params _ (stmts, tailExpr)) = do
 -- 関数から返す式（return式・末尾式）が、直接その関数のローカル変数（仮引数を含む）を指すポインタで
 -- あればエラーとする（関数から戻るとスタックフレームが破棄され、ダングリングポインタになるため）。
 -- 検出するのは `&x` と `&a[i]`（aがローカルの配列）を直接返す形のみの簡易検査で、中間変数を経由する
--- `let p = &x; p` などは検出しない。`&*p` や `&p[i]`（pがポインタ）は呼び出し元のデータを指すため許可する
-checkNoLocalRef :: Env -> Expr -> Either String ()
-checkNoLocalRef env (AddrOf place) =
+-- `let p = &x; p` などは検出しない。`&*p` や `&p[i]`（pがポインタ）は呼び出し元のデータを指すため許可する。
+-- main は対象外（main の戻り値は main 自身のスタックフレーム上で表示してから終了するため、ダングリングにならない）
+checkNoLocalRef :: String -> Env -> Expr -> Either String ()
+checkNoLocalRef "main" _ _ = Right ()
+checkNoLocalRef _ env (AddrOf place) =
   case place of
     Var name | Just _ <- lookupVar name env -> localRef name
     Index (Var name) _ | Just (_, TArray _ _) <- lookupVar name env -> localRef name
     _ -> Right ()
   where
     localRef name = Left ("cannot return reference to local variable: " ++ name)
-checkNoLocalRef _ _ = Right ()
+checkNoLocalRef _ _ _ = Right ()
 
 -- Maybe Type の単一化（Nothing = 整数リテラルなど未確定な部分木）
 unifyType :: Type -> Type -> Either String Type
@@ -483,6 +484,7 @@ inferMaybeType fnSigs env expr = do
         Nothing -> Left "type mismatch: cannot dereference an untyped literal"
     -- 呼び出しの型は常にシグネチャの戻り値型で確定する（算術演算と異なり、引数の型を
     -- 単一化する必要はない。各引数の型検査はcompileExprTyped側で行う）
+    go (Call "main" _) = Left "cannot call main"
     go (Call name args) =
       case Map.lookup name fnSigs of
         Nothing -> Left ("undeclared function: " ++ name)
@@ -552,7 +554,7 @@ describeSlot (ReturnSlot name) = name ++ " return type"
 -- これまでに解決済みのスロットの値
 type ResolvedSlots = Map Slot Type
 
--- 関数本体（または暗黙main）内のローカル変数（仮引数・let）の、型解決の観点からの状態。
+-- 関数本体内のローカル変数（仮引数・let）の、型解決の観点からの状態。
 -- Env（%rbp相対オフセット, 型）と異なり、まだ解決されていないスロット待ちのことがある
 type LocalEnv = [Map String (Either Slot Type)]
 
@@ -651,6 +653,7 @@ resolveExprType fnDeclMap resolved env expr = do
         Just (TPtr inner) -> Right (Right (Just inner))
         Just other -> Left ("type mismatch: expected pointer, found " ++ typeName other)
         Nothing -> Left "type mismatch: cannot dereference an untyped literal"
+    go (Call "main" _) = Left "cannot call main"
     go (Call name _) = case Map.lookup name fnDeclMap of
       Nothing -> Left ("undeclared function: " ++ name)
       Just _ -> case Map.lookup (ReturnSlot name) resolved of
@@ -708,10 +711,10 @@ callEvidence fnDeclMap resolved env expr = do
       pure (nested ++ paramEv) -- 再帰的に取得 ＋＋ 既知の情報から取得
     combine a b = (++) <$> go a <*> go b
 
--- 関数本体（または暗黙main）の本文を辿り、(対象スロット, 証拠) を集める。compileStmtsFrom と同じ形
+-- 関数本体の本文を辿り、(対象スロット, 証拠) を集める。compileStmtsFrom と同じ形
 -- （スコープのpush/pop、SBlock/SIf/SWhileの再帰）だが、命令列の代わりに証拠を集める点だけが異なる
 collectEvidenceStmts ::
-  Map String FnDecl -> ResolvedSlots -> Maybe String -> LocalEnv -> [Stmt] -> Either String (LocalEnv, Evidence)
+  Map String FnDecl -> ResolvedSlots -> String -> LocalEnv -> [Stmt] -> Either String (LocalEnv, Evidence)
 collectEvidenceStmts fnDeclMap resolved curFn localenv stmts = do
   -- pTraceShowM ("collectEvidenceStmts実行", curFn)
   go localenv stmts
@@ -771,11 +774,8 @@ collectEvidenceStmts fnDeclMap resolved curFn localenv stmts = do
     step env (SReturn expr) = do
       ev <- callEvidence fnDeclMap resolved env expr
       -- pTraceShowM ("ev", ev)
-      case curFn of
-        Nothing -> pure (env, ev)
-        Just fnName -> do
-          r <- resolveExprType fnDeclMap resolved env expr
-          pure (env, ev ++ [(ReturnSlot fnName, r)])
+      r <- resolveExprType fnDeclMap resolved env expr
+      pure (env, ev ++ [(ReturnSlot curFn, r)])
     step env (SExpr expr) = do
       ev <- callEvidence fnDeclMap resolved env expr
       pure (env, ev)
@@ -793,25 +793,17 @@ paramLocalScope resolved fnName params =
             Nothing -> maybe (Left slot) Right (Map.lookup slot resolved)
     ]
 
--- プログラム全体（全fn本体＋暗黙main）を1回走査し、現在のResolvedSlotsに対する証拠を集める
-programEvidence :: Map String FnDecl -> ResolvedSlots -> [FnDecl] -> [Stmt] -> Expr -> Either String Evidence
-programEvidence fnDeclMap resolved fnDecls stmts tailExpr = do
-  -- pTraceShowM ("programEvidence実行", tailExpr)
-  fnEv <- concat <$> mapM (fnDeclEvidence fnDeclMap resolved) fnDecls -- 全ての関数から証拠を取得
-  (env1, topEv) <- collectEvidenceStmts fnDeclMap resolved Nothing [Map.empty] stmts -- 暗黙mainの文からLocalEnv、証拠を取得
-  tailEv <- callEvidence fnDeclMap resolved env1 tailExpr -- 暗黙mainの末尾式から証拠を取得
-  -- pTraceShowM ("fnEv", fnEv)
-  -- pTraceShowM ("env1", env1)
-  -- pTraceShowM ("topEv", topEv)
-  -- pTraceShowM ("tailEv", tailEv)
-  pure (fnEv ++ topEv ++ tailEv)
+-- プログラム全体（mainを含む全fn本体）を1回走査し、現在のResolvedSlotsに対する証拠を集める
+programEvidence :: Map String FnDecl -> ResolvedSlots -> [FnDecl] -> Either String Evidence
+programEvidence fnDeclMap resolved fnDecls =
+  concat <$> mapM (fnDeclEvidence fnDeclMap resolved) fnDecls -- 全ての関数から証拠を取得
 
 -- １つの関数に対して仮引数、本文、末尾式から証拠を集める
 fnDeclEvidence :: Map String FnDecl -> ResolvedSlots -> FnDecl -> Either String [(Slot, Either Slot (Maybe Type))]
 fnDeclEvidence fnDeclMap resolved (FnDecl name params _ (body, tailE)) = do
   -- pTraceShowM ("fnDeclEvidence実行", name)
   let env0 = [paramLocalScope resolved name params] -- 仮引数からLocalEnvを作成
-  (env1, bodyEv) <- collectEvidenceStmts fnDeclMap resolved (Just name) env0 body -- 関数の本文から(LocalEnv、証拠)を収集
+  (env1, bodyEv) <- collectEvidenceStmts fnDeclMap resolved name env0 body -- 関数の本文から(LocalEnv、証拠)を収集
   tailCallEv <- callEvidence fnDeclMap resolved env1 tailE -- 末尾式内のCallから実引数(ParamSlot)の証拠を取得
   tailRet <- resolveExprType fnDeclMap resolved env1 tailE -- 末尾式から戻り値(ReturnSlot)の証拠を取得
   -- pTraceShowM ("env0", env0)
@@ -820,16 +812,19 @@ fnDeclEvidence fnDeclMap resolved (FnDecl name params _ (body, tailE)) = do
   -- pTraceShowM ("tailCallEv", tailCallEv)
   -- pTraceShowM ("tailRet", tailRet)
   pure (bodyEv ++ tailCallEv ++ [(ReturnSlot name, tailRet)]) -- 本文、末尾式内の実引数、末尾式の戻り値からの証拠を連結して返却
-  -- 構造検証: main予約名・重複定義・最大引数数（旧buildFnSigsのチェックをそのまま踏襲する。型の中身は見ない）
 
+-- 構造検証: 重複定義・最大引数数・mainの存在と引数なし（型の中身は見ない）
 validateFnShapes :: [FnDecl] -> Either String ()
-validateFnShapes fnDecls = () <$ foldM addSig Map.empty fnDecls
+validateFnShapes fnDecls = do
+  seen <- foldM addSig Map.empty fnDecls
+  when (not (Map.member "main" seen)) $ Left "missing function: main"
   where
     addSig :: Map String () -> FnDecl -> Either String (Map String ())
     addSig seen (FnDecl name params _ _)
-      | name == "main" = Left "function name 'main' is reserved"
       | Map.member name seen = Left ("function already declared: " ++ name)
       | length params > maxParams = Left ("too many parameters (max " ++ show maxParams ++ "): " ++ name)
+      -- main は呼び出し元を持たず、戻り値を表示して終了するだけなので、引数を受け取る経路が無い
+      | name == "main" && not (null params) = Left "main function must not take parameters"
       | otherwise = Right (Map.insert name () seen)
 
 -- 各fnの型注釈が省略された箇所をSlotとして列挙し、注釈済みの箇所は即座にResolvedSlotsへ投入する
@@ -849,10 +844,10 @@ initialSlots fnDecls = (Map.fromList resolved, unresolved)
 -- 判定されるのを防ぐ）。1ラウンドで1つも前進しなければ、残りは（自己ループ以外の）
 -- 未解決スロット同士で行き詰まっている＝循環と判定してエラーとする
 resolveSlots ::
-  Map String FnDecl -> [FnDecl] -> [Stmt] -> Expr -> ResolvedSlots -> [Slot] -> Either String ResolvedSlots
-resolveSlots _ _ _ _ resolved [] = Right resolved -- 未解決スロットが空になったら終了
-resolveSlots fnDeclMap fnDecls stmts tailExpr resolved pending = do
-  evidence <- programEvidence fnDeclMap resolved fnDecls stmts tailExpr -- 全プログラム（全関数＋暗黙のmain）から証拠を集める
+  Map String FnDecl -> [FnDecl] -> ResolvedSlots -> [Slot] -> Either String ResolvedSlots
+resolveSlots _ _ resolved [] = Right resolved -- 未解決スロットが空になったら終了
+resolveSlots fnDeclMap fnDecls resolved pending = do
+  evidence <- programEvidence fnDeclMap resolved fnDecls -- 全プログラム（mainを含む全関数）から証拠を集める
   results <- mapM (resolveOne evidence) pending -- 未解決スロットを解決
   -- pTraceShowM ("evidence", evidence)
   -- pTraceShowM ("results", results)
@@ -869,7 +864,7 @@ resolveSlots fnDeclMap fnDecls stmts tailExpr resolved pending = do
               ++ describeSlot blockedOn
               ++ " (add an explicit type annotation to break the cycle)"
           )
-    else resolveSlots fnDeclMap fnDecls stmts tailExpr (Map.union (Map.fromList advanced) resolved) stillPending
+    else resolveSlots fnDeclMap fnDecls (Map.union (Map.fromList advanced) resolved) stillPending
 
 -- Evidenceから対象スロット == slotかつ自分自身待ち（Left slot）ではないものだけをcandidatesとして抜き出す
 -- candidatesの中にLeft blocker（他のスロット待ち）が1つでも残っていれば、slotはまだblocker待ちとしてRight (Left blocker)を返す（＝今ラウンドでは前進しない）
@@ -886,12 +881,12 @@ resolveOne evidence slot = do
 -- 全fn定義から（型注釈省略を含めて）FnSigsを一括解決する（本体のコンパイルより前に行う1パス目）。
 -- 呼び出し規約・スタックスロット割り付けが必要とする具体的なTypeを、注釈または
 -- 呼び出し箇所の実引数・自身のreturn/末尾式からの推論のいずれかで確定させる
-resolveFnSigs :: [FnDecl] -> [Stmt] -> Expr -> Either String FnSigs
-resolveFnSigs fnDecls stmts tailExpr = do
+resolveFnSigs :: [FnDecl] -> Either String FnSigs
+resolveFnSigs fnDecls = do
   validateFnShapes fnDecls
   let fnDeclMap = Map.fromList [(name, d) | d@(FnDecl name _ _ _) <- fnDecls]
       (initResolved, pending) = initialSlots fnDecls -- 全ての関数から解決済みスロット、未解決スロットを取得
-  resolved <- resolveSlots fnDeclMap fnDecls stmts tailExpr initResolved pending
+  resolved <- resolveSlots fnDeclMap fnDecls initResolved pending
   -- pTraceShowM ("initResolved", initResolved)
   -- pTraceShowM ("pending", pending)
   -- pTraceShowM ("resolved", resolved)
@@ -991,6 +986,8 @@ compileExprTyped fnSigs env expected (Cast e dstTy)
           Right (ei ++ castInstrs srcSg srcW dstSg dstW)
         _ -> Left ("invalid cast: cannot cast " ++ typeName srcTy ++ " to " ++ typeName dstTy)
 -- [let ]xxx = f(expr, ...);（引数は宣言順にシグネチャの型で厳密検査し、暗黙変換は行わない）
+-- main は戻り値を表示して終了する特別な関数のため、呼び出し元へは戻れない（呼び出し不可）
+compileExprTyped _ _ _ (Call "main" _) = Left "cannot call main"
 compileExprTyped fnSigs env expected (Call name args) =
   case Map.lookup name fnSigs of
     Nothing -> Left ("undeclared function: " ++ name)
@@ -1180,6 +1177,8 @@ run instrs = go instrs [] Map.empty
       | otherwise = go rest stack vars
     go (StoreInd w : rest) (v : addr : stack) vars = go rest stack (Map.insert addr (trunc w v) vars)
     go (IPop : rest) (_ : stack) vars = go rest stack vars
+    -- ラベルは何もしない（main を含む関数の命令列は末尾に関数末尾ラベルを持つ）
+    go (Label _ : rest) stack vars = go rest stack vars
     go _ _ _ = Left "stack underflow"
 
 -- 実アセンブリの movl/movslq 等が行う切り詰め・符号拡張を再現する

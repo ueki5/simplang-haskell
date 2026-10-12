@@ -1,4 +1,6 @@
-let a = 1;
-let b = &a;
-let c = *b;
-c
+fn main() {
+    let a = 1;
+    let b = &a;
+    let c = *b;
+    c
+}
