@@ -71,6 +71,12 @@ epilogue :: Type -> [String]
 epilogue (TyInt sg w) = printfEpilogue (fmtLabel sg w)
 epilogue TUsize = printfEpilogue "fmtU64"
 epilogue (TPtr _) = printfEpilogue "fmtPtr"
+-- () は何も出力しない（Rust の main と同様）
+epilogue TUnit =
+  [ "    xorl  %eax, %eax"
+  , "    leave"
+  , "    ret"
+  ]
 -- 配列は値として扱えないため、末尾式の型が配列になることはない（compile側でエラーになる）
 epilogue (TArray _ _) = error "epilogue: array type cannot be the type of the final expression"
 epilogue TBool =
@@ -191,6 +197,7 @@ stackDelta (StoreArg _ _ _) = 0
 stackDelta (IBoundsCheck _) = 0
 stackDelta (StoreInd _) = -2
 stackDelta (ICall _ n) = 1 - n
+stackDelta IPop = -1
 
 -- 呼び出し直前（＝n個の引数をレジスタへpopし終えた時点）の深さ d = depthAtCall - n が奇数なら、
 -- 16バイト境界からrspが8バイトずれるため、call前後に8バイトのパディングを挟んで補正する
@@ -464,6 +471,9 @@ genInstr (StoreArg i W64 off) =
   ]
 genInstr (StoreArg i W32 off) =
   [ "    movl  " ++ argReg32 i ++ ", " ++ show off ++ "(%rbp)"
+  ]
+genInstr IPop =
+  [ "    addq  $8, %rsp"
   ]
 genInstr (ICall _ _) =
   error "ICall requires operand-stack-depth context; must be generated via genBody, not genInstr"
