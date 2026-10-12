@@ -1,6 +1,5 @@
 module Main where
 
-import CodeGen (codegen)
 import Compiler (Instr (..), compile, run)
 import Data.Either (isLeft, isRight)
 import Parser (Expr (..), FnDecl (..), Stmt (..), Token (..), Type (..), Width (..), parse, tokenize)
@@ -9,6 +8,7 @@ import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readProcess, readProcessWithExitCode)
 import Test.Hspec
+import CodeGen (codegen)
 
 main :: IO ()
 main = hspec $ do
@@ -56,10 +56,12 @@ main = hspec $ do
       tokenize "true false" `shouldBe` Right [TTrue, TFalse]
     it "true/falseで始まる識別子はTIdentのまま" $
       tokenize "truest falsely" `shouldBe` Right [TIdent "truest", TIdent "falsely"]
-    it "to_i64/to_i32予約語を変換する" $
-      tokenize "to_i64 to_i32" `shouldBe` Right [TToI64, TToI32]
-    it "to_i64/to_i32で始まる識別子はTIdentのまま" $
-      tokenize "to_i64x to_i32_foo" `shouldBe` Right [TIdent "to_i64x", TIdent "to_i32_foo"]
+    it "as予約語を変換する" $
+      tokenize "x as i64" `shouldBe` Right [TIdent "x", TAs, TIdent "i64"]
+    it "asで始まる識別子はTIdentのまま" $
+      tokenize "ask as_x" `shouldBe` Right [TIdent "ask", TIdent "as_x"]
+    it "to_i64/to_i32は予約語ではなく識別子になる" $
+      tokenize "to_i64 to_i32" `shouldBe` Right [TIdent "to_i64", TIdent "to_i32"]
     it "if/else予約語を変換する" $
       tokenize "if else" `shouldBe` Right [TIf, TElse]
     it "if/elseで始まる識別子はTIdentのまま" $
@@ -135,28 +137,14 @@ main = hspec $ do
         `shouldBe` Right ([], [SLet "x" TBool (BoolLit True)], Var "x")
     it "let宣言（&i64、アドレス取得）" $
       parse
-        [ TLet,
-          TIdent "a",
-          TColon,
-          TIdent "i64",
-          TAssign,
-          TInt 0,
-          TSemicolon,
-          TLet,
-          TIdent "b",
-          TColon,
-          TAmp,
-          TIdent "i64",
-          TAssign,
-          TAmp,
-          TIdent "a",
-          TSemicolon,
-          TIdent "b"
+        [ TLet, TIdent "a", TColon, TIdent "i64", TAssign, TInt 0, TSemicolon
+        , TLet, TIdent "b", TColon, TAmp, TIdent "i64", TAssign, TAmp, TIdent "a", TSemicolon
+        , TIdent "b"
         ]
         `shouldBe` Right
-          ( [],
-            [SLet "a" (TyInt W64) (Lit 0), SLet "b" (TPtr (TyInt W64)) (AddrOf (Var "a"))],
-            Var "b"
+          ( []
+          , [SLet "a" (TyInt W64) (Lit 0), SLet "b" (TPtr (TyInt W64)) (AddrOf (Var "a"))]
+          , Var "b"
           )
     it "let宣言（&&i64、ポインタのポインタ）" $
       parse [TLet, TIdent "b", TColon, TAmp, TAmp, TIdent "i64", TAssign, TIdent "b", TSemicolon, TIdent "b"]
@@ -182,18 +170,9 @@ main = hspec $ do
       parse [TAmp, TStar, TIdent "p"] `shouldBe` Right ([], [], AddrOf (Deref (Var "p")))
     it "代入文" $
       parse
-        [ TLet,
-          TIdent "x",
-          TColon,
-          TIdent "i64",
-          TAssign,
-          TInt 1,
-          TSemicolon,
-          TIdent "x",
-          TAssign,
-          TInt 2,
-          TSemicolon,
-          TIdent "x"
+        [ TLet, TIdent "x", TColon, TIdent "i64", TAssign, TInt 1, TSemicolon
+        , TIdent "x", TAssign, TInt 2, TSemicolon
+        , TIdent "x"
         ]
         `shouldBe` Right ([], [SLet "x" (TyInt W64) (Lit 1), SAssign "x" (Lit 2)], Var "x")
     it "let宣言（型注釈省略）: コロンが無ければSLetInferredとしてパースする" $
@@ -204,19 +183,9 @@ main = hspec $ do
         `shouldBe` Right ([], [SLetInferred "x" (LitTyped 1 W32)], Var "x")
     it "let宣言（型注釈あり・省略）が混在しても両方正しくパースされる" $
       parse
-        [ TLet,
-          TIdent "a",
-          TColon,
-          TIdent "i32",
-          TAssign,
-          TInt 1,
-          TSemicolon,
-          TLet,
-          TIdent "b",
-          TAssign,
-          TIdent "a",
-          TSemicolon,
-          TIdent "b"
+        [ TLet, TIdent "a", TColon, TIdent "i32", TAssign, TInt 1, TSemicolon
+        , TLet, TIdent "b", TAssign, TIdent "a", TSemicolon
+        , TIdent "b"
         ]
         `shouldBe` Right
           ([], [SLet "a" (TyInt W32) (Lit 1), SLetInferred "b" (Var "a")], Var "b")
@@ -272,34 +241,47 @@ main = hspec $ do
     it "括弧内の等価演算子をパースできる" $
       parse [TLParen, TInt 1, TEq, TInt 1, TRParen]
         `shouldBe` Right ([], [], Eq (Lit 1) (Lit 1))
-    it "to_i64演算子（括弧なし）" $
-      parse [TToI64, TInt 64] `shouldBe` Right ([], [], ToI64 (Lit 64))
-    it "to_i32演算子（括弧なし）" $
-      parse [TToI32, TInt 64] `shouldBe` Right ([], [], ToI32 (Lit 64))
-    it "to_i64演算子（括弧あり）は括弧なしと同じASTになる" $
-      parse [TToI64, TLParen, TIdent "x", TRParen]
-        `shouldBe` Right ([], [], ToI64 (Var "x"))
-    it "to_i32とto_i64は入れ子にできる" $
-      parse [TToI32, TToI64, TIdent "x"]
-        `shouldBe` Right ([], [], ToI32 (ToI64 (Var "x")))
-    it "単項マイナスはto_i32より強く結合する" $
-      parse [TToI32, TMinus, TInt 5]
-        `shouldBe` Right ([], [], ToI32 (Neg (Lit 5)))
+    it "as i64キャスト" $
+      parse [TIdent "x", TAs, TIdent "i64"] `shouldBe` Right ([], [], Cast (Var "x") W64)
+    it "as i32キャスト" $
+      parse [TInt 64, TAs, TIdent "i32"] `shouldBe` Right ([], [], Cast (Lit 64) W32)
+    it "キャストは左結合で連鎖できる" $
+      parse [TIdent "x", TAs, TIdent "i32", TAs, TIdent "i64"]
+        `shouldBe` Right ([], [], Cast (Cast (Var "x") W32) W64)
+    it "単項マイナスはasより強く結合する" $
+      parse [TMinus, TIdent "x", TAs, TIdent "i64"]
+        `shouldBe` Right ([], [], Cast (Neg (Var "x")) W64)
+    it "デリファレンスはasより強く結合する" $
+      parse [TStar, TIdent "p", TAs, TIdent "i64"]
+        `shouldBe` Right ([], [], Cast (Deref (Var "p")) W64)
+    it "asは乗算より強く結合する" $
+      parse [TIdent "a", TStar, TIdent "b", TAs, TIdent "i64"]
+        `shouldBe` Right ([], [], Mul (Var "a") (Cast (Var "b") W64))
+    it "asは加算より強く結合する" $
+      parse [TIdent "a", TPlus, TIdent "b", TAs, TIdent "i64"]
+        `shouldBe` Right ([], [], Add (Var "a") (Cast (Var "b") W64))
+    it "括弧で囲んだ式をキャストできる" $
+      parse [TLParen, TIdent "a", TPlus, TIdent "b", TRParen, TAs, TIdent "i64"]
+        `shouldBe` Right ([], [], Cast (Add (Var "a") (Var "b")) W64)
+    it "boolへのキャストはエラー" $
+      parse [TIdent "x", TAs, TIdent "bool"]
+        `shouldBe` Left "invalid cast target: only i32 or i64 is allowed"
+    it "ポインタ型へのキャストはエラー" $
+      parse [TIdent "x", TAs, TAmp, TIdent "i64"]
+        `shouldBe` Left "invalid cast target: only i32 or i64 is allowed"
+    it "未知の型へのキャストはエラー" $
+      parse [TIdent "x", TAs, TIdent "foo"] `shouldBe` Left "unsupported type: foo"
+    it "asの後に型が無いとエラー" $
+      parse [TIdent "x", TAs] `shouldSatisfy` isLeft
     it "空ブロック" $
       parse [TLBrace, TRBrace, TInt 5]
         `shouldBe` Right ([], [SBlock []], Lit 5)
     it "ブロック内にlet文を含む" $
       parse
-        [ TLBrace,
-          TLet,
-          TIdent "x",
-          TColon,
-          TIdent "i64",
-          TAssign,
-          TInt 1,
-          TSemicolon,
-          TRBrace,
-          TInt 2
+        [ TLBrace
+        , TLet, TIdent "x", TColon, TIdent "i64", TAssign, TInt 1, TSemicolon
+        , TRBrace
+        , TInt 2
         ]
         `shouldBe` Right ([], [SBlock [SLet "x" (TyInt W64) (Lit 1)]], Lit 2)
     it "ネストしたブロック" $
@@ -315,44 +297,23 @@ main = hspec $ do
         `shouldBe` Right ([], [SIf [(BoolLit True, [])] (Just [])], Lit 1)
     it "if-else if-else文（複数のelse if）" $
       parse
-        [ TIf,
-          TTrue,
-          TLBrace,
-          TRBrace,
-          TElse,
-          TIf,
-          TFalse,
-          TLBrace,
-          TRBrace,
-          TElse,
-          TIf,
-          TTrue,
-          TLBrace,
-          TRBrace,
-          TElse,
-          TLBrace,
-          TRBrace,
-          TInt 1
+        [ TIf, TTrue, TLBrace, TRBrace
+        , TElse, TIf, TFalse, TLBrace, TRBrace
+        , TElse, TIf, TTrue, TLBrace, TRBrace
+        , TElse, TLBrace, TRBrace
+        , TInt 1
         ]
         `shouldBe` Right
-          ( [],
-            [SIf [(BoolLit True, []), (BoolLit False, []), (BoolLit True, [])] (Just [])],
-            Lit 1
+          ( []
+          , [SIf [(BoolLit True, []), (BoolLit False, []), (BoolLit True, [])] (Just [])]
+          , Lit 1
           )
     it "if文の本体にlet文を含む" $
       parse
-        [ TIf,
-          TTrue,
-          TLBrace,
-          TLet,
-          TIdent "x",
-          TColon,
-          TIdent "i64",
-          TAssign,
-          TInt 1,
-          TSemicolon,
-          TRBrace,
-          TInt 2
+        [ TIf, TTrue, TLBrace
+        , TLet, TIdent "x", TColon, TIdent "i64", TAssign, TInt 1, TSemicolon
+        , TRBrace
+        , TInt 2
         ]
         `shouldBe` Right ([], [SIf [(BoolLit True, [SLet "x" (TyInt W64) (Lit 1)])] Nothing], Lit 2)
     it "if文はブロック文としてネストできる" $
@@ -371,20 +332,11 @@ main = hspec $ do
         `shouldBe` Right ([], [SWhile (BoolLit True) []], Lit 1)
     it "while文の本体にlet文とbreak文を含む" $
       parse
-        [ TWhile,
-          TTrue,
-          TLBrace,
-          TLet,
-          TIdent "x",
-          TColon,
-          TIdent "i64",
-          TAssign,
-          TInt 1,
-          TSemicolon,
-          TBreak,
-          TSemicolon,
-          TRBrace,
-          TInt 2
+        [ TWhile, TTrue, TLBrace
+        , TLet, TIdent "x", TColon, TIdent "i64", TAssign, TInt 1, TSemicolon
+        , TBreak, TSemicolon
+        , TRBrace
+        , TInt 2
         ]
         `shouldBe` Right ([], [SWhile (BoolLit True) [SLet "x" (TyInt W64) (Lit 1), SBreak]], Lit 2)
     it "continue文" $
@@ -418,41 +370,41 @@ main = hspec $ do
                 [("a", Just (TyInt W64)), ("b", Just (TyInt W32)), ("c", Just TBool)]
                 (Just (TyInt W64))
                 ([], Var "a")
-            ],
-            [],
-            Lit 2
+            ]
+          , []
+          , Lit 2
           )
     it "fn本体は文の列＋末尾式を持てる" $
       parseSrc "fn f() -> i64 {\nlet x: i64 = 1;\nx\n}\n2"
         `shouldBe` Right
-          ( [FnDecl "f" [] (Just (TyInt W64)) ([SLet "x" (TyInt W64) (Lit 1)], Var "x")],
-            [],
-            Lit 2
+          ( [FnDecl "f" [] (Just (TyInt W64)) ([SLet "x" (TyInt W64) (Lit 1)], Var "x")]
+          , []
+          , Lit 2
           )
     it "fn定義は複数並べられる" $
       parseSrc "fn f() -> i64 {\n1\n}\nfn g() -> i64 {\n2\n}\n3"
         `shouldBe` Right
-          ( [ FnDecl "f" [] (Just (TyInt W64)) ([], Lit 1),
-              FnDecl "g" [] (Just (TyInt W64)) ([], Lit 2)
-            ],
-            [],
-            Lit 3
+          ( [ FnDecl "f" [] (Just (TyInt W64)) ([], Lit 1)
+            , FnDecl "g" [] (Just (TyInt W64)) ([], Lit 2)
+            ]
+          , []
+          , Lit 3
           )
     it "fn定義は暗黙main本体の文と自由に混在できる" $
       parseSrc "let a: i64 = 1;\nfn f() -> i64 {\n1\n}\nlet b: i64 = 2;\na + b"
         `shouldBe` Right
-          ( [FnDecl "f" [] (Just (TyInt W64)) ([], Lit 1)],
-            [SLet "a" (TyInt W64) (Lit 1), SLet "b" (TyInt W64) (Lit 2)],
-            Add (Var "a") (Var "b")
+          ( [FnDecl "f" [] (Just (TyInt W64)) ([], Lit 1)]
+          , [SLet "a" (TyInt W64) (Lit 1), SLet "b" (TyInt W64) (Lit 2)]
+          , Add (Var "a") (Var "b")
           )
     it "fn本体に末尾式が無ければエラー（ユニット型は採用しないため）" $
       parseSrc "fn f() -> i64 {\nlet x: i64 = 1;\n}\n2" `shouldSatisfy` isLeft
     it "パラメータの型注釈を省略したfn定義（コロンが無ければNothingとしてパースする）" $
       parseSrc "fn add(a, b) -> i64 {\na + b\n}\n0"
         `shouldBe` Right
-          ( [FnDecl "add" [("a", Nothing), ("b", Nothing)] (Just (TyInt W64)) ([], Add (Var "a") (Var "b"))],
-            [],
-            Lit 0
+          ( [FnDecl "add" [("a", Nothing), ("b", Nothing)] (Just (TyInt W64)) ([], Add (Var "a") (Var "b"))]
+          , []
+          , Lit 0
           )
     it "戻り値の型注釈を省略したfn定義（'->'が無ければNothingとしてパースする）" $
       parseSrc "fn add(a: i64, b: i64) {\na + b\n}\n0"
@@ -462,9 +414,9 @@ main = hspec $ do
                 [("a", Just (TyInt W64)), ("b", Just (TyInt W64))]
                 Nothing
                 ([], Add (Var "a") (Var "b"))
-            ],
-            [],
-            Lit 0
+            ]
+          , []
+          , Lit 0
           )
     it "パラメータ・戻り値の型注釈を両方省略したfn定義" $
       parseSrc "fn add(a, b) {\na + b\n}\n0"
@@ -478,9 +430,9 @@ main = hspec $ do
                 [("a", Just (TyInt W64)), ("b", Nothing)]
                 (Just (TyInt W64))
                 ([], Add (Var "a") (Var "b"))
-            ],
-            [],
-            Lit 0
+            ]
+          , []
+          , Lit 0
           )
     it "引数無しの呼び出し式" $
       parseSrc "f()" `shouldBe` Right ([], [], Call "f" [])
@@ -495,9 +447,9 @@ main = hspec $ do
     it "return文（値付き）" $
       parseSrc "fn f() -> i64 {\nreturn 1;\n2\n}\n3"
         `shouldBe` Right
-          ( [FnDecl "f" [] (Just (TyInt W64)) ([SReturn (Lit 1)], Lit 2)],
-            [],
-            Lit 3
+          ( [FnDecl "f" [] (Just (TyInt W64)) ([SReturn (Lit 1)], Lit 2)]
+          , []
+          , Lit 3
           )
     it "値の無いreturn文はエラー（ユニット型は採用しないため）" $
       parseSrc "fn f() -> i64 {\nreturn;\n1\n}\n2" `shouldSatisfy` isLeft
@@ -571,7 +523,7 @@ main = hspec $ do
       codegen [] (TyInt W64) [ICmpGe] `shouldContain` "setge"
     it "INotをxorq命令に変換する" $
       codegen [] (TyInt W64) [INot] `shouldContain` "xorq"
-    it "ISext32をcltq命令に変換する（to_i64/to_i32共通の符号拡張正規化）" $
+    it "ISext32をcltq命令に変換する（as i64/as i32共通の符号拡張正規化）" $
       codegen [] (TyInt W64) [ISext32] `shouldContain` "cltq"
     it "JmpIfZeroはpop+testq+je命令に変換する" $ do
       let asm = codegen [] (TyInt W64) [JmpIfZero ".Lfoo"]
@@ -612,18 +564,18 @@ main = hspec $ do
         `shouldBe` Left "variable already declared: x"
     it "型注釈がi32/i64/bool以外はエラー" $
       compileSource "let x: i16 = 1;\nx" `shouldBe` Left "unsupported type: i16"
-    it "!ueki5! let初期化式でi32変数とi64変数を混在させる（暗黙の変換）" $
+    it "let初期化式でi32変数とi64変数を混在させるとエラー" $
       compileSource "let x: i32 = 1;\nlet y: i64 = 2;\nlet z: i64 = x + y;\nz"
-        `shouldBe` Right ([], TyInt W64, [Push 1, Store W32 (-4), Push 2, Store W64 (-12), Load W32 (-4), ISext32, Load W64 (-12), IAdd W64, Store W64 (-20), Load W64 (-20)])
-    it "!ueki5! 代入文右辺でi32変数とi64変数を混在させるとエラー" $
+        `shouldBe` Left "type mismatch: expected i64, found i32"
+    it "代入文右辺でi32変数とi64変数を混在させるとエラー" $
       compileSource "let x: i32 = 1;\nlet y: i64 = 2;\ny = x + 1;\ny"
-        `shouldBe` Right ([], TyInt W64, [Push 1, Store W32 (-4), Push 2, Store W64 (-12), Load W32 (-4), Push 1, IAdd W32, ISext32, Store W64 (-12), Load W64 (-12)])
-    it "!ueki5! 末尾式でi32変数とi64変数を混在させるとエラー" $
+        `shouldBe` Left "type mismatch: expected i64, found i32"
+    it "末尾式でi32変数とi64変数を混在させるとエラー" $
       compileSource "let x: i32 = 1;\nlet y: i64 = 2;\nx + y"
-        `shouldBe` Right ([], TyInt W64, [Push 1, Store W32 (-4), Push 2, Store W64 (-12), Load W32 (-4), ISext32, Load W64 (-12), IAdd W64])
-    it "!ueki5! 宣言した型と異なる型の変数を代入するとエラー" $
+        `shouldBe` Left "type mismatch: i32 and i64"
+    it "宣言した型と異なる型の変数を代入するとエラー" $
       compileSource "let x: i32 = 1;\nlet y: i64 = 2;\nlet z: i32 = y;\nz"
-        `shouldBe` Right ([], TyInt W32, [Push 1, Store W32 (-4), Push 2, Store W64 (-12), Load W64 (-12), ISext32, Store W32 (-16), Load W32 (-16)])
+        `shouldBe` Left "type mismatch: expected i32, found i64"
     it "bool変数に整数リテラルを代入するとエラー" $
       compileSource "let x: bool = 1;\nx"
         `shouldBe` Left "type mismatch: expected bool, found integer literal"
@@ -634,20 +586,20 @@ main = hspec $ do
       compileSource "9999i64" `shouldBe` Right ([], TyInt W64, [Push 9999])
     it "i32サフィックス付きリテラル単体はi32としてコンパイルされる" $
       compileSource "9999i32" `shouldBe` Right ([], TyInt W32, [Push 9999])
-    it "!ueki5! i64サフィックス付きリテラルをi32変数へ代入すると幅不一致でエラー" $
+    it "i64サフィックス付きリテラルをi32変数へ代入すると幅不一致でエラー" $
       compileSource "let x: i32 = 9999i64;\nx"
-        `shouldBe` Right ([], TyInt W32, [Push 9999, ISext32, Store W32 (-4), Load W32 (-4)])
-    it "!ueki5! i32サフィックス付きリテラルをi64変数へ代入すると幅不一致でエラー" $
+        `shouldBe` Left "type mismatch: expected i32, found i64"
+    it "i32サフィックス付きリテラルをi64変数へ代入すると幅不一致でエラー" $
       compileSource "let x: i64 = 9999i32;\nx"
-        `shouldBe` Right ([], TyInt W64, [Push 9999, ISext32, Store W64 (-8), Load W64 (-8)])
+        `shouldBe` Left "type mismatch: expected i64, found i32"
     it "サフィックス付きリテラルをbool変数へ代入するとエラー" $
       compileSource "let x: bool = 9999i64;\nx"
         `shouldBe` Left "type mismatch: expected bool, found i64"
     it "無型リテラルとの混在ではサフィックス側の型に固定される" $
       compileSource "9999i32 + 5" `shouldBe` Right ([], TyInt W32, [Push 9999, Push 5, IAdd W32])
-    it "!ueki5! サフィックス付きリテラル同士でi32とi64を混在させるとエラー" $
+    it "サフィックス付きリテラル同士でi32とi64を混在させるとエラー" $
       compileSource "9999i32 + 5i64"
-        `shouldBe` Right ([], TyInt W64, [Push 9999, ISext32, Push 5, IAdd W64])
+        `shouldBe` Left "type mismatch: i32 and i64"
     it "boolに対する算術演算はエラー" $
       compileSource "true + 1"
         `shouldBe` Left "type mismatch: expected bool, found arithmetic expression"
@@ -660,18 +612,18 @@ main = hspec $ do
     it "比較結果をintコンテキストで使うとエラー" $
       compileSource "let x: i32 = 1;\nlet y: i32 = 2;\nlet z: i32 = x == y;\nz"
         `shouldBe` Left "type mismatch: expected i32, found bool"
-    it "!ueki5! 末尾式での比較でi32とi64を混在させるとエラー" $
+    it "末尾式での比較でi32とi64を混在させるとエラー" $
       compileSource "let x: i32 = 1;\nlet y: i64 = 2;\nx == y"
-        `shouldBe` Right ([], TBool, [Push 1, Store W32 (-4), Push 2, Store W64 (-12), Load W32 (-4), ISext32, Load W64 (-12), ICmpEq])
-    it "!ueki5! let宣言の右辺での比較でi32とi64を混在させるとエラー" $
+        `shouldBe` Left "type mismatch: i32 and i64"
+    it "let宣言の右辺での比較でi32とi64を混在させるとエラー" $
       compileSource "let x: i32 = 1;\nlet y: i64 = 2;\nlet z: bool = x == y;\nz"
-        `shouldBe` Right ([], TBool, [Push 1, Store W32 (-4), Push 2, Store W64 (-12), Load W32 (-4), ISext32, Load W64 (-12), ICmpEq, Store W32 (-16), Load W32 (-16)])
+        `shouldBe` Left "type mismatch: i32 and i64"
     it "大小比較結果をintコンテキストで使うとエラー" $
       compileSource "let x: i32 = 1;\nlet y: i32 = 2;\nlet z: i32 = x < y;\nz"
         `shouldBe` Left "type mismatch: expected i32, found bool"
-    it "!ueki5! 末尾式での大小比較でi32とi64を混在させるとエラー" $
+    it "末尾式での大小比較でi32とi64を混在させるとエラー" $
       compileSource "let x: i32 = 1;\nlet y: i64 = 2;\nx < y"
-        `shouldBe` Right ([], TBool, [Push 1, Store W32 (-4), Push 2, Store W64 (-12), Load W32 (-4), ISext32, Load W64 (-12), ICmpLt])
+        `shouldBe` Left "type mismatch: i32 and i64"
     it "bool同士の大小比較（<）はエラー" $
       compileSource "let x: bool = true;\nlet y: bool = false;\nx < y"
         `shouldBe` Left "type mismatch: expected i32 or i64, found bool"
@@ -684,35 +636,49 @@ main = hspec $ do
     it "bool同士の大小比較（>=）はエラー" $
       compileSource "true >= false"
         `shouldBe` Left "type mismatch: expected i32 or i64, found bool"
-    it "!ueki5! to_i64にi64値を渡すとエラー（拡大変換の対象はi32のみ）" $
-      compileSource "let x: i64 = 1;\nto_i64(x)"
+    it "i32をas i64で拡大する" $
+      compileSource "let x: i32 = 1;\nx as i64"
+        `shouldBe` Right ([], TyInt W64, [Push 1, Store W32 (-4), Load W32 (-4), ISext32])
+    it "i64をas i32で縮小する" $
+      compileSource "let x: i64 = 1;\nx as i32"
+        `shouldBe` Right ([], TyInt W32, [Push 1, Store W64 (-8), Load W64 (-8), ISext32])
+    it "i64をas i64でキャストすると恒等変換（変換命令なし）" $
+      compileSource "let x: i64 = 1;\nx as i64"
         `shouldBe` Right ([], TyInt W64, [Push 1, Store W64 (-8), Load W64 (-8)])
-    it "!ueki5! to_i32にi32値を渡すとエラー（縮小変換の対象はi64のみ）" $
-      compileSource "let x: i32 = 1;\nto_i32(x)"
-        `shouldBe` Right ([], TyInt W32, [Push 1, Store W32 (-4), Load W32 (-4)])
-    it "!ueki5! to_i64にbool値を渡すとエラー" $
-      compileSource "let x: bool = true;\nto_i64(x)"
-        `shouldBe` Left "type mismatch: expected i32 or i64, found bool"
-    it "!ueki5! to_i32にbool値を渡すとエラー" $
-      compileSource "let x: bool = true;\nto_i32(x)"
-        `shouldBe` Left "type mismatch: expected i32 or i64, found bool"
-    it "!ueki5! to_i64の結果をi32コンテキストで使うとエラー" $
-      compileSource "let x: i32 = 1;\nlet y: i32 = to_i64(x);\ny"
-        `shouldBe` Right ([], TyInt W32, [Push 1, Store W32 (-4), Load W32 (-4), ISext32, ISext32, Store W32 (-8), Load W32 (-8)])
-    it "!ueki5! to_i32の結果をi64コンテキストで使うとエラー" $
-      compileSource "let x: i64 = 1;\nlet y: i64 = to_i32(x);\ny"
-        `shouldBe` Right ([], TyInt W64, [Push 1, Store W64 (-8), Load W64 (-8), ISext32, ISext32, Store W64 (-16), Load W64 (-16)])
-    it "to_i64の結果をboolコンテキストで使うとエラー" $
-      compileSource "let x: i32 = 1;\nto_i64(x) == true"
+    it "i32をas i32でキャストするとISext32で再正規化する" $
+      compileSource "let x: i32 = 1;\nx as i32"
+        `shouldBe` Right ([], TyInt W32, [Push 1, Store W32 (-4), Load W32 (-4), ISext32])
+    it "型なしリテラルのキャストはi64とみなす" $
+      compileSource "5000000000 as i32"
+        `shouldBe` Right ([], TyInt W32, [Push 5000000000, ISext32])
+    it "型なしリテラルのas i64は変換命令なし" $
+      compileSource "1 as i64" `shouldBe` Right ([], TyInt W64, [Push 1])
+    it "boolのキャストはエラー" $
+      compileSource "let x: bool = true;\nx as i64"
+        `shouldBe` Left "invalid cast: cannot cast bool to i64"
+    it "ポインタのキャストはエラー" $
+      compileSource "let x: i64 = 1;\nlet p: &i64 = &x;\np as i64"
+        `shouldBe` Left "invalid cast: cannot cast &i64 to i64"
+    it "as i64の結果をi32コンテキストで使うとエラー" $
+      compileSource "let x: i32 = 1;\nlet y: i32 = x as i64;\ny"
+        `shouldBe` Left "type mismatch: expected i32, found i64"
+    it "as i32の結果をi64コンテキストで使うとエラー" $
+      compileSource "let x: i64 = 1;\nlet y: i64 = x as i32;\ny"
+        `shouldBe` Left "type mismatch: expected i64, found i32"
+    it "as i64の結果をboolコンテキストで使うとエラー" $
+      compileSource "let x: i32 = 1;\nx as i64 == true"
         `shouldSatisfy` isLeft
+    it "キャスト無しでの幅違いの代入はエラー（暗黙の型変換は行わない）" $
+      compileSource "let x: i32 = 1;\nlet y: i64 = x;\ny"
+        `shouldBe` Left "type mismatch: expected i64, found i32"
     it "未宣言変数への&はエラー" $
       compileSource "let a: &i64 = &b;\na" `shouldBe` Left "undeclared variable: b"
     it "&の結果を誤った型コンテキストで使うとエラー" $
       compileSource "let a: i64 = 0;\nlet b: i64 = &a;\nb"
         `shouldBe` Left "type mismatch: expected i64, found &i64"
-    it "!ueki5! 非ポインタのデリファレンスはエラー" $
+    it "非ポインタのデリファレンスはエラー" $
       compileSource "let a: i64 = 0;\nlet b: i64 = *a;\nb"
-        `shouldBe` Left "type mismatch: expected pointer, found i64"
+        `shouldBe` Left "type mismatch: expected &i64, found i64"
     it "rvalue（整数リテラル）への&はエラー（lvalueではない）" $
       compileSource "let a: &i64 = &5;\na"
         `shouldBe` Left "invalid operand for &: not an lvalue: Lit 5"
@@ -745,23 +711,23 @@ main = hspec $ do
     it "let宣言（型注釈省略）: &lvalueからポインタ型が推論される" $
       compileSource "let a: i32 = 1;\nlet p = &a;\n*p"
         `shouldBe` Right
-          ( [],
-            TyInt W32,
-            [Push 1, Store W32 (-4), LoadAddr (-4), Store W64 (-12), Load W64 (-12), LoadInd W32]
+          ( []
+          , TyInt W32
+          , [Push 1, Store W32 (-4), LoadAddr (-4), Store W64 (-12), Load W64 (-12), LoadInd W32]
           )
     it "let宣言（型注釈省略）: 関数呼び出しの戻り値型が推論される" $
       compileSource "fn f() -> i32 {\n1\n}\nlet x = f();\nx"
         `shouldBe` Right
-          ( [("f", [Push 1, Label ".Lfn_end0"])],
-            TyInt W32,
-            [ICall "f" 0, Store W32 (-4), Load W32 (-4)]
+          ( [("f", [Push 1, Label ".Lfn_end0"])]
+          , TyInt W32
+          , [ICall "f" 0, Store W32 (-4), Load W32 (-4)]
           )
     it "let宣言（型注釈省略）: 無型リテラルとboolの算術演算は型不一致エラー（inferMaybeTypeの単一化はi32/i64のみ検出しないが、後続のcompileExprTypedで検出される）" $
       compileSource "let x = 5 + true;\nx"
         `shouldBe` Left "type mismatch: expected bool, found arithmetic expression"
-    it "!ueki5! let宣言（型注釈省略）: 推論結果と宣言済み変数のi32/i64混在はエラー" $
+    it "let宣言（型注釈省略）: 推論結果と宣言済み変数のi32/i64混在はエラー" $
       compileSource "let x: i32 = 1;\nlet y = x + 1i64;\ny"
-        `shouldBe` Right ([], TyInt W64, [Push 1, Store W32 (-4), Load W32 (-4), ISext32, Push 1, IAdd W64, Store W64 (-12), Load W64 (-12)])
+        `shouldBe` Left "type mismatch: i32 and i64"
     it "let宣言（型注釈省略）と同名の再宣言（同一ブロック内）はエラー" $
       compileSource "let x = 1;\nlet x = 2;\nx"
         `shouldBe` Left "variable already declared: x"
@@ -792,36 +758,6 @@ main = hspec $ do
     it "break文をwhileの外側のブロックで使うとエラー（ループを抜けた後は無効）" $
       compileSource "while true {\nbreak;\n}\n{\nbreak;\n}\n1" `shouldBe` Left "break used outside loop"
 
-  describe "意味論（compile、暗黙の型変換）" $ do
-    let compileSource src = tokenize src >>= parse >>= compile
-    it "i32同士の演算結果をi64へ代入" $
-      compileSource "let a: i32 = 1;\nlet b: i32 = 2;\nlet z: i64 = a * b;\nz"
-        `shouldBe` Right ([], TyInt W64, [Push 1, Store W32 (-4), Push 2, Store W32 (-8), Load W32 (-4), Load W32 (-8), IMul W32, ISext32, Store W64 (-16), Load W64 (-16)])
-    it "単項マイナスの拡大" $
-      compileSource "let a: i32 = 1;\nlet z: i64 = -a;\nz"
-        `shouldBe` Right ([], TyInt W64, [Push 1, Store W32 (-4), Load W32 (-4), INeg W32, ISext32, Store W64 (-12), Load W64 (-12)])
-    it "fn末尾式の縮小" $
-      compileSource "fn f(a: i64) -> i32 {\na\n}\nf(1)"
-        `shouldBe` Right ([("f", [StoreArg 0 W64 (-8), Load W64 (-8), ISext32, Label ".Lfn_end0"])], TyInt W32, [Push 1, ICall "f" 1])
-    it "return文の変換" $
-      compileSource "fn f(a: i32) -> i64 {\nreturn a;\n-a\n}\nf(1)"
-        `shouldBe` Right ([("f", [StoreArg 0 W32 (-4), Load W32 (-4), ISext32, Jmp ".Lfn_end0", Load W32 (-4), INeg W32, ISext32, Label ".Lfn_end0"])], TyInt W64, [Push 1, ICall "f" 1])
-    it "&i32の参照先をi64の文脈で使う" $
-      compileSource "let a: i32 = 7;\nlet p: &i32 = &a;\nlet z: i64 = *p;\nz"
-        `shouldBe` Right ([], TyInt W64, [Push 7, Store W32 (-4), LoadAddr (-4), Store W64 (-12), Load W64 (-12), LoadInd W32, ISext32, Store W64 (-20), Load W64 (-20)])
-    it "ポインタ型は変換されない" $
-      compileSource "let a: i32 = 1;\nlet p: &i64 = &a;\np"
-        `shouldBe` Left "type mismatch: expected &i64, found &i32"
-    it "異なるポインタ型の比較はエラー" $
-      compileSource "let a:i32 = 1;\nlet b:i64 = 1;\n&a == &b"
-        `shouldBe` Left "type mismatch: &i32 and &i64"
-    it "boolは変換されない" $
-      compileSource "let x: i64 = true;\nx"
-        `shouldBe` Left "type mismatch: expected i64, found bool"
-    it "恒等関数の推論" $
-      compileSource "fn id(x) {\nx\n}\nlet a = id(1i32);\nid(2i64)"
-        `shouldBe` Right ([("id", [StoreArg 0 W64 (-8), Load W64 (-8), Label ".Lfn_end0"])], TyInt W64, [Push 1, ISext32, ICall "id" 1, Store W64 (-8), Push 2, ICall "id" 1])
-
   describe "意味論エラー（fn定義・呼び出し）" $ do
     let compileSource src = tokenize src >>= parse >>= compile
     it "未定義関数の呼び出しはエラー" $
@@ -832,12 +768,12 @@ main = hspec $ do
     it "引数個数が多すぎる呼び出しはエラー" $
       compileSource "fn f(a: i64) -> i64 {\na\n}\nf(1, 2)"
         `shouldBe` Left "wrong number of arguments for f: expected 1, found 2"
-    it "!ueki5! 引数の型が宣言と異なる呼び出しはエラー（暗黙変換は行わない）" $
+    it "引数の型が宣言と異なる呼び出しはエラー（暗黙変換は行わない）" $
       compileSource "fn f(a: i64) -> i64 {\na\n}\nlet x: i32 = 1;\nf(x)"
-        `shouldBe` Right ([("f", [StoreArg 0 W64 (-8), Load W64 (-8), Label ".Lfn_end0"])], TyInt W64, [Push 1, Store W32 (-4), Load W32 (-4), ISext32, ICall "f" 1])
-    it "!ueki5! 戻り値の型が期待と異なるとエラー" $
+        `shouldBe` Left "type mismatch: expected i64, found i32"
+    it "戻り値の型が期待と異なるとエラー" $
       compileSource "fn f() -> i64 {\n1\n}\nlet x: i32 = f();\nx"
-        `shouldBe` Right ([("f", [Push 1, Label ".Lfn_end0"])], TyInt W32, [ICall "f" 0, ISext32, Store W32 (-4), Load W32 (-4)])
+        `shouldBe` Left "type mismatch: expected i32, found i64"
     it "関数名'main'は予約されておりエラー" $
       compileSource "fn main() -> i64 {\n1\n}\n2" `shouldBe` Left "function name 'main' is reserved"
     it "同名の関数を再定義するとエラー" $
@@ -858,9 +794,9 @@ main = hspec $ do
     it "複数の呼び出し箇所が同じ型で一致すれば省略パラメータの型は成功裏に推論される" $
       compileSource "fn add(a, b) -> i32 {\na + b\n}\nlet x = add(1i32, 2i32);\nadd(3i32, 4i32)"
         `shouldSatisfy` isRight
-    it "!ueki5! 複数の呼び出し箇所で矛盾する型を渡すと省略パラメータの推論はエラーになる" $
+    it "複数の呼び出し箇所で矛盾する型を渡すと省略パラメータの推論はエラーになる" $
       compileSource "fn add(a, b) -> i64 {\na + b\n}\nlet x = add(1i32, 2i32);\nadd(3i64, 4i64)"
-        `shouldBe` Right ([("add", [StoreArg 0 W64 (-8), StoreArg 1 W64 (-16), Load W64 (-8), Load W64 (-16), IAdd W64, Label ".Lfn_end0"])], TyInt W64, [Push 1, ISext32, Push 2, ISext32, ICall "add" 2, Store W64 (-8), Push 3, Push 4, ICall "add" 2])
+        `shouldBe` Left "type mismatch: i32 and i64"
     it "外部から呼び出しの手がかりが全く無い純粋な自己再帰は循環にならずi64にデフォルトされ成功する" $
       compileSource "fn spin(n) {\nspin(n)\n}\n1" `shouldSatisfy` isRight
     it "相互再帰する2関数の両方でパラメータ型を省略し、かつ外部からの型情報が全く無いと循環依存でエラーになる" $
@@ -909,9 +845,9 @@ main = hspec $ do
       run [Push 0, INot] `shouldBe` Right 1
     it "INotは1を0に反転する" $
       run [Push 1, INot] `shouldBe` Right 0
-    it "ISext32はi32範囲内の値をそのまま保持する（to_i64での値保存の確認）" $
+    it "ISext32はi32範囲内の値をそのまま保持する（as i64での値保存の確認）" $
       run [Push 42, ISext32] `shouldBe` Right 42
-    it "ISext32はi32範囲外の値をラップアラウンドさせる（to_i32での縮小変換の確認）" $
+    it "ISext32はi32範囲外の値をラップアラウンドさせる（as i32での縮小変換の確認）" $
       run [Push 4294967296, ISext32] `shouldBe` Right 0
     it "ISext32はi32範囲外の値を符号拡張してラップアラウンドさせる" $
       run [Push 2147483648, ISext32] `shouldBe` Right (-2147483648)
@@ -976,8 +912,8 @@ main = hspec $ do
     it "否定演算子を評価する" $ do
       result <- compileAndRun (Not (BoolLit False))
       result `shouldBe` "true"
-    it "to_i32(リテラル)を評価する" $ do
-      result <- compileAndRun (ToI32 (Lit 64))
+    it "リテラル as i32を評価する" $ do
+      result <- compileAndRun (Cast (Lit 64) W32)
       result `shouldBe` "64"
 
   describe "compile + codegen + gcc（変数を含むソースの結合テスト）" $ do
@@ -1023,9 +959,9 @@ main = hspec $ do
     it "i32サフィックス付きリテラルをi32変数に束縛して評価する" $ do
       result <- compileSourceAndRun "let x: i32 = 9999i32;\nx + 1"
       result `shouldBe` "10000"
-    it "!ueki5! サフィックス付きリテラルと宣言型が食い違うとコンパイルエラーになる" $
+    it "サフィックス付きリテラルと宣言型が食い違うとコンパイルエラーになる" $
       (tokenize "let x: i64 = 9999i32;\nx" >>= parse >>= compile)
-        `shouldBe` Right ([], TyInt W64, [Push 9999, ISext32, Store W64 (-8), Load W64 (-8)])
+        `shouldBe` Left "type mismatch: expected i64, found i32"
     it "let宣言（型注釈省略）: 無型リテラルはi64にデフォルトされ%ldで出力される" $ do
       result <- compileSourceAndRun "let x = 5;\nx + 1"
       result `shouldBe` "6"
@@ -1077,18 +1013,27 @@ main = hspec $ do
     it "否定演算子と小なり比較を組み合わせて評価する" $ do
       result <- compileSourceAndRun "!(1 < 2)"
       result `shouldBe` "false"
-    it "to_i64はi32の値をそのままi64として保持する（拡大変換は値を保存する）" $ do
-      result <- compileSourceAndRun "let x: i32 = 2147483647;\nlet y: i64 = to_i64(x);\ny"
+    it "as i64はi32の値をそのままi64として保持する（拡大変換は値を保存する）" $ do
+      result <- compileSourceAndRun "let x: i32 = 2147483647;\nlet y: i64 = x as i64;\ny"
       result `shouldBe` "2147483647"
-    it "to_i32はi32範囲外のi64値をラップアラウンドさせる（縮小変換）" $ do
-      result <- compileSourceAndRun "let x: i64 = 4294967296;\nlet y: i32 = to_i32(x) + 5;\ny"
+    it "as i64は負のi32値の符号を保存する" $ do
+      result <- compileSourceAndRun "let x: i32 = -5;\nlet y: i64 = x as i64;\ny"
+      result `shouldBe` "-5"
+    it "as i32はi32範囲外のi64値をラップアラウンドさせる（縮小変換）" $ do
+      result <- compileSourceAndRun "let x: i64 = 4294967296;\nlet y: i32 = x as i32 + 5;\ny"
       result `shouldBe` "5"
-    it "to_i64/to_i32は括弧なしの単項演算子構文でも評価できる" $ do
-      result <- compileSourceAndRun "let x: i64 = 4294967296;\nlet y: i32 = to_i32 x + 5;\ny"
-      result `shouldBe` "5"
-    it "to_i32とto_i64のラウンドトリップ（i32->i64->i32）は値を保存する" $ do
-      result <- compileSourceAndRun "let x: i32 = 42;\nto_i32(to_i64(x))"
+    it "as i32で縮小すると上位ビットが切り捨てられ符号拡張される" $ do
+      result <- compileSourceAndRun "let x: i64 = 2147483648;\nx as i32"
+      result `shouldBe` "-2147483648"
+    it "as i32とas i64のラウンドトリップ（i32->i64->i32）は値を保存する" $ do
+      result <- compileSourceAndRun "let x: i32 = 42;\nx as i64 as i32"
       result `shouldBe` "42"
+    it "被演算子をas i64で拡大すればi32の範囲を超える演算ができる" $ do
+      result <- compileSourceAndRun "let a: i32 = 2147483647;\nlet b: i64 = 1;\na as i64 + b"
+      result `shouldBe` "2147483648"
+    it "to_i64は識別子として使える" $ do
+      result <- compileSourceAndRun "let to_i64 = 1;\nto_i64"
+      result `shouldBe` "1"
     it "ブロック内からの代入は外側の変数へ反映される" $ do
       result <- compileSourceAndRun "let x: i64 = 1;\n{\nx = 2;\n}\nx"
       result `shouldBe` "2"
@@ -1096,9 +1041,8 @@ main = hspec $ do
       result <- compileSourceAndRun "let x: i64 = 1;\n{\nlet x: i64 = 99;\n}\nx"
       result `shouldBe` "1"
     it "兄弟ブロックはそれぞれ独立にローカル変数を持てる（同名変数の再利用を含む）" $ do
-      result <-
-        compileSourceAndRun
-          "let sum: i64 = 0;\n{\nlet y: i64 = 1;\nsum = sum + y;\n}\n{\nlet y: i64 = 2;\nsum = sum + y;\n}\nsum"
+      result <- compileSourceAndRun
+        "let sum: i64 = 0;\n{\nlet y: i64 = 1;\nsum = sum + y;\n}\n{\nlet y: i64 = 2;\nsum = sum + y;\n}\nsum"
       result `shouldBe` "3"
     it "空ブロックは合法で何もしない" $ do
       result <- compileSourceAndRun "let x: i64 = 1;\n{}\nx"
@@ -1124,90 +1068,75 @@ main = hspec $ do
       result <- compileSourceAndRun "let x: i32 = 3;\nlet y: i32 = 0;\nif x < 5 {\ny = 1;\n} else {\ny = 2;\n}\ny"
       result `shouldBe` "1"
     it "else ifで最初に真になった分岐だけを実行する" $ do
-      result <-
-        compileSourceAndRun
-          "let x: i64 = 2;\nlet y: i64 = 0;\nif x == 1 {\ny = 1;\n} else if x == 2 {\ny = 2;\n} else if x == 2 {\ny = 3;\n} else {\ny = 4;\n}\ny"
+      result <- compileSourceAndRun
+        "let x: i64 = 2;\nlet y: i64 = 0;\nif x == 1 {\ny = 1;\n} else if x == 2 {\ny = 2;\n} else if x == 2 {\ny = 3;\n} else {\ny = 4;\n}\ny"
       result `shouldBe` "2"
     it "else ifが全て偽ならelse本体を実行する" $ do
-      result <-
-        compileSourceAndRun
-          "let x: i64 = 9;\nlet y: i64 = 0;\nif x == 1 {\ny = 1;\n} else if x == 2 {\ny = 2;\n} else {\ny = 3;\n}\ny"
+      result <- compileSourceAndRun
+        "let x: i64 = 9;\nlet y: i64 = 0;\nif x == 1 {\ny = 1;\n} else if x == 2 {\ny = 2;\n} else {\ny = 3;\n}\ny"
       result `shouldBe` "3"
     it "else ifが全て偽でelseも無ければ何も実行しない" $ do
-      result <-
-        compileSourceAndRun
-          "let x: i64 = 9;\nlet y: i64 = 0;\nif x == 1 {\ny = 1;\n} else if x == 2 {\ny = 2;\n}\ny"
+      result <- compileSourceAndRun
+        "let x: i64 = 9;\nlet y: i64 = 0;\nif x == 1 {\ny = 1;\n} else if x == 2 {\ny = 2;\n}\ny"
       result `shouldBe` "0"
     it "ifをネストできる" $ do
-      result <-
-        compileSourceAndRun
-          "let x: i64 = 1;\nif x == 1 {\nif x == 1 {\nx = 42;\n}\n}\nx"
+      result <- compileSourceAndRun
+        "let x: i64 = 1;\nif x == 1 {\nif x == 1 {\nx = 42;\n}\n}\nx"
       result `shouldBe` "42"
     it "ブロック内にifをネストできる" $ do
       result <- compileSourceAndRun "let x: i64 = 1;\n{\nif x == 1 {\nx = 42;\n}\n}\nx"
       result `shouldBe` "42"
     it "then節とelse節はそれぞれ独立したローカル変数を持てる（同名変数の再利用を含む）" $ do
-      result <-
-        compileSourceAndRun
-          "let sum: i64 = 0;\nif true {\nlet y: i64 = 1;\nsum = sum + y;\n} else {\nlet y: i64 = 99;\nsum = sum + y;\n}\nsum"
+      result <- compileSourceAndRun
+        "let sum: i64 = 0;\nif true {\nlet y: i64 = 1;\nsum = sum + y;\n} else {\nlet y: i64 = 99;\nsum = sum + y;\n}\nsum"
       result `shouldBe` "1"
     it "if本体を抜けるとその中で宣言した変数は不可視になる（シャドーイングも含めた回帰確認）" $ do
-      result <-
-        compileSourceAndRun
-          "let x: i64 = 1;\nif true {\nlet x: i64 = 99;\nx = 2;\n}\nx"
+      result <- compileSourceAndRun
+        "let x: i64 = 1;\nif true {\nlet x: i64 = 99;\nx = 2;\n}\nx"
       result `shouldBe` "1"
     it "複数のifが連続しても互いに独立して動作する" $ do
-      result <-
-        compileSourceAndRun
-          "let a: i64 = 0;\nlet b: i64 = 0;\nif true {\na = 1;\n} else {\na = 2;\n}\nif false {\nb = 1;\n} else {\nb = 2;\n}\na + b"
+      result <- compileSourceAndRun
+        "let a: i64 = 0;\nlet b: i64 = 0;\nif true {\na = 1;\n} else {\na = 2;\n}\nif false {\nb = 1;\n} else {\nb = 2;\n}\na + b"
       result `shouldBe` "3"
 
   describe "compile + codegen + gcc（while文の結合テスト）" $ do
     it "基本的なカウントダウンループを実行する" $ do
-      result <-
-        compileSourceAndRun
-          "let x: i64 = 3;\nlet sum: i64 = 0;\nwhile x != 0 {\nsum = sum + x;\nx = x - 1;\n}\nsum"
+      result <- compileSourceAndRun
+        "let x: i64 = 3;\nlet sum: i64 = 0;\nwhile x != 0 {\nsum = sum + x;\nx = x - 1;\n}\nsum"
       result `shouldBe` "6"
     it "条件が最初から偽なら本体を一度も実行しない" $ do
       result <- compileSourceAndRun "let x: i64 = 0;\nwhile x != 0 {\nx = 1;\n}\nx"
       result `shouldBe` "0"
     it "breakでループを早期終了する" $ do
-      result <-
-        compileSourceAndRun
-          "let x: i64 = 0;\nwhile true {\nx = x + 1;\nif x == 3 {\nbreak;\n}\n}\nx"
+      result <- compileSourceAndRun
+        "let x: i64 = 0;\nwhile true {\nx = x + 1;\nif x == 3 {\nbreak;\n}\n}\nx"
       result `shouldBe` "3"
     it "continueで本体の残りをスキップし条件を再評価する" $ do
-      result <-
-        compileSourceAndRun
-          "let x: i64 = 0;\nlet sum: i64 = 0;\nwhile x != 5 {\nx = x + 1;\nif x == 3 {\ncontinue;\n}\nsum = sum + x;\n}\nsum"
+      result <- compileSourceAndRun
+        "let x: i64 = 0;\nlet sum: i64 = 0;\nwhile x != 5 {\nx = x + 1;\nif x == 3 {\ncontinue;\n}\nsum = sum + x;\n}\nsum"
       result `shouldBe` "12"
     it "whileをネストできる（内側のbreakは外側に影響しない）" $ do
-      result <-
-        compileSourceAndRun
-          "let i: i64 = 0;\nlet count: i64 = 0;\nwhile i != 3 {\nlet j: i64 = 0;\nwhile j != 5 {\nif j == 2 {\nbreak;\n}\ncount = count + 1;\nj = j + 1;\n}\ni = i + 1;\n}\ncount"
+      result <- compileSourceAndRun
+        "let i: i64 = 0;\nlet count: i64 = 0;\nwhile i != 3 {\nlet j: i64 = 0;\nwhile j != 5 {\nif j == 2 {\nbreak;\n}\ncount = count + 1;\nj = j + 1;\n}\ni = i + 1;\n}\ncount"
       result `shouldBe` "6"
     it "whileのネストで内側のcontinueは外側ループに影響しない" $ do
-      result <-
-        compileSourceAndRun
-          "let i: i64 = 0;\nlet count: i64 = 0;\nwhile i != 2 {\nlet j: i64 = 0;\nwhile j != 3 {\nj = j + 1;\nif j == 2 {\ncontinue;\n}\ncount = count + 1;\n}\ni = i + 1;\n}\ncount"
+      result <- compileSourceAndRun
+        "let i: i64 = 0;\nlet count: i64 = 0;\nwhile i != 2 {\nlet j: i64 = 0;\nwhile j != 3 {\nj = j + 1;\nif j == 2 {\ncontinue;\n}\ncount = count + 1;\n}\ni = i + 1;\n}\ncount"
       result `shouldBe` "4"
     it "while本体を抜けるとその中で宣言した変数は不可視になる（毎イテレーション巻き戻る）" $ do
-      result <-
-        compileSourceAndRun
-          "let x: i64 = 0;\nlet i: i64 = 0;\nwhile i != 3 {\nlet y: i64 = 100;\ny = y + 1;\ni = i + 1;\n}\nx"
+      result <- compileSourceAndRun
+        "let x: i64 = 0;\nlet i: i64 = 0;\nwhile i != 3 {\nlet y: i64 = 100;\ny = y + 1;\ni = i + 1;\n}\nx"
       result `shouldBe` "0"
     it "ブロック内にwhileをネストできる" $ do
       result <- compileSourceAndRun "let x: i64 = 0;\n{\nwhile x != 3 {\nx = x + 1;\n}\n}\nx"
       result `shouldBe` "3"
     it "複数のwhileが連続しても互いに独立して動作する（ラベルの一意性の間接的な確認）" $ do
-      result <-
-        compileSourceAndRun
-          "let a: i64 = 0;\nwhile a != 2 {\na = a + 1;\n}\nlet b: i64 = 0;\nwhile b != 3 {\nb = b + 1;\n}\na + b"
+      result <- compileSourceAndRun
+        "let a: i64 = 0;\nwhile a != 2 {\na = a + 1;\n}\nlet b: i64 = 0;\nwhile b != 3 {\nb = b + 1;\n}\na + b"
       result `shouldBe` "5"
     it "小なり演算子をwhileの条件式に使える（sample/src008.sl相当）" $ do
-      result <-
-        compileSourceAndRun
-          "let a: i64 = 0;\nlet sum: i64 = 0;\nwhile a < 10 {\nsum = sum + a;\na = a + 1;\n}\nsum"
+      result <- compileSourceAndRun
+        "let a: i64 = 0;\nlet sum: i64 = 0;\nwhile a < 10 {\nsum = sum + a;\na = a + 1;\n}\nsum"
       result `shouldBe` "45"
 
   describe "compile + codegen + gcc（fn定義・呼び出しの結合テスト）" $ do
@@ -1221,50 +1150,42 @@ main = hspec $ do
       result <- compileSourceAndRun "fn isPositive(x: i64) -> bool {\nx > 0\n}\nisPositive(5)"
       result `shouldBe` "true"
     it "早期returnを評価する" $ do
-      result <-
-        compileSourceAndRun
-          "fn abs(x: i64) -> i64 {\nif x < 0 {\nreturn 0 - x;\n}\nx\n}\nabs(0 - 5)"
+      result <- compileSourceAndRun
+        "fn abs(x: i64) -> i64 {\nif x < 0 {\nreturn 0 - x;\n}\nx\n}\nabs(0 - 5)"
       result `shouldBe` "5"
     it "自己再帰（階乗）を評価する" $ do
-      result <-
-        compileSourceAndRun
-          "fn fact(n: i64) -> i64 {\nif n <= 1 {\nreturn 1;\n}\nn * fact(n - 1)\n}\nfact(10)"
+      result <- compileSourceAndRun
+        "fn fact(n: i64) -> i64 {\nif n <= 1 {\nreturn 1;\n}\nn * fact(n - 1)\n}\nfact(10)"
       result `shouldBe` "3628800"
     it "宣言順に依存しない相互再帰を評価する" $ do
-      result <-
-        compileSourceAndRun
-          "fn is_even(n: i64) -> bool {\nif n == 0 {\nreturn true;\n}\nis_odd(n - 1)\n}\nfn is_odd(n: i64) -> bool {\nif n == 0 {\nreturn false;\n}\nis_even(n - 1)\n}\nis_even(10)"
+      result <- compileSourceAndRun
+        "fn is_even(n: i64) -> bool {\nif n == 0 {\nreturn true;\n}\nis_odd(n - 1)\n}\nfn is_odd(n: i64) -> bool {\nif n == 0 {\nreturn false;\n}\nis_even(n - 1)\n}\nis_even(10)"
       result `shouldBe` "true"
     it "6個の引数（レジスタ渡しの上限）を持つ関数を評価する" $ do
-      result <-
-        compileSourceAndRun
-          "fn sum6(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64 {\na + b + c + d + e + f\n}\nsum6(1, 2, 3, 4, 5, 6)"
+      result <- compileSourceAndRun
+        "fn sum6(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64 {\na + b + c + d + e + f\n}\nsum6(1, 2, 3, 4, 5, 6)"
       result `shouldBe` "21"
     it "呼び出しは他の呼び出しの引数として入れ子にできる" $ do
-      result <-
-        compileSourceAndRun
-          "fn inc(x: i64) -> i64 {\nx + 1\n}\ninc(inc(inc(0)))"
+      result <- compileSourceAndRun
+        "fn inc(x: i64) -> i64 {\nx + 1\n}\ninc(inc(inc(0)))"
       result `shouldBe` "3"
     it "式の途中（奇数深さ）でのユーザー関数呼び出しでもスタックアライメントが崩れない" $ do
       result <- compileSourceAndRun "fn foo(x: i64) -> i64 {\nx * 2\n}\n1 + 2 + foo(3)"
       result `shouldBe` "9"
     it "fn定義は暗黙main本体の文と自由に混在できる（実行結果の確認）" $ do
-      result <-
-        compileSourceAndRun
-          "let a: i64 = 1;\nfn double(x: i64) -> i64 {\nx * 2\n}\nlet b: i64 = double(a);\nfn triple(x: i64) -> i64 {\nx * 3\n}\ntriple(b)"
+      result <- compileSourceAndRun
+        "let a: i64 = 1;\nfn double(x: i64) -> i64 {\nx * 2\n}\nlet b: i64 = double(a);\nfn triple(x: i64) -> i64 {\nx * 3\n}\ntriple(b)"
       result `shouldBe` "6"
     it "パラメータ・戻り値の型注釈を両方省略した関数を呼び出し箇所の実引数から推論して実行する" $ do
       result <- compileSourceAndRun "fn add(a, b) {\na + b\n}\nadd(3i64, 4i64)"
       result `shouldBe` "7"
     it "戻り値の型注釈のみ省略した自己再帰（階乗）を実行する（returnの無型リテラルからi64が推論される）" $ do
-      result <-
-        compileSourceAndRun
-          "fn fact(n: i64) {\nif n <= 1 {\nreturn 1;\n}\nn * fact(n - 1)\n}\nfact(10)"
+      result <- compileSourceAndRun
+        "fn fact(n: i64) {\nif n <= 1 {\nreturn 1;\n}\nn * fact(n - 1)\n}\nfact(10)"
       result `shouldBe` "3628800"
     it "パラメータ・戻り値の型注釈を両方省略した自己再帰（階乗）を実行する" $ do
-      result <-
-        compileSourceAndRun
-          "fn fact(n) {\nif n <= 1 {\nreturn 1;\n}\nn * fact(n - 1)\n}\nfact(10i64)"
+      result <- compileSourceAndRun
+        "fn fact(n) {\nif n <= 1 {\nreturn 1;\n}\nn * fact(n - 1)\n}\nfact(10i64)"
       result `shouldBe` "3628800"
     it "恒等関数（パラメータ・戻り値とも省略）を実行する" $ do
       result <- compileSourceAndRun "fn id(x) {\nx\n}\nid(5i64)"
@@ -1294,26 +1215,6 @@ main = hspec $ do
       result <- compileSourceAndRun "let a:i64 = 0;\nlet b:&i64 = &a;\nb"
       take 2 result `shouldBe` "0x"
 
-  describe "compile + codegen + gcc（暗黙の型変換の結合テスト）" $ do
-    it "縮小のラップアラウンド" $ do
-      result <- compileSourceAndRun "let x: i64 = 4294967301;\nlet y: i32 = x;\ny"
-      result `shouldBe` "5"
-    it "拡大の符号保存" $ do
-      result <- compileSourceAndRun "let x: i32 = -5;\nlet y: i64 = x;\ny"
-      result `shouldBe` "-5"
-    it "i32演算のオーバーフロー後の拡大" $ do
-      result <- compileSourceAndRun "let a: i32 = 2147483647;\nlet z: i64 = a + 1;\nz"
-      result `shouldBe` "-2147483648"
-    it "混在演算の昇格（オーバーフローしない）" $ do
-      result <- compileSourceAndRun "let a: i32 = 2147483647;\nlet b: i64 = 1;\na + b"
-      result `shouldBe` "2147483648"
-    it "関数の実引数の拡大と戻り値の縮小" $ do
-      result <- compileSourceAndRun "fn f(a: i64) -> i32 {\na + 1\n}\nlet x: i32 = 41;\nf(x)"
-      result `shouldBe` "42"
-    it "&i32の参照先をi64の演算で使う" $ do
-      result <- compileSourceAndRun "let a: i32 = 7;\nlet p: &i32 = &a;\nlet b: i64 = 3;\n*p + b"
-      result `shouldBe` "10"
-
   describe "ゼロ除算の実行時エラー" $ do
     it "変数なしのゼロ除算はエラーメッセージを出力して非ゼロ終了する" $ do
       (code, out) <- compileSourceAndRunExit "1 / 0"
@@ -1330,7 +1231,7 @@ main = hspec $ do
 
 compileAndRun :: Expr -> IO String
 compileAndRun expr =
-  withSystemTempDirectory "simplang-haskell" $ \tmpDir -> do
+  withSystemTempDirectory "hs006" $ \tmpDir -> do
     let asmPath = tmpDir </> "out.s"
         binPath = tmpDir </> "out"
     case compile ([], [], expr) of

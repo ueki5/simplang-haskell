@@ -1,4 +1,4 @@
 let a = 5000000000i32;
 let b = &a;
-let c:i64 = *b;
+let c:i64 = *b as i64;
 c

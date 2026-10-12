@@ -29,8 +29,7 @@ data Token
   | TGt
   | TGe
   | TBang
-  | TToI64
-  | TToI32
+  | TAs
   | TSemicolon
   | TPlus
   | TMinus
@@ -61,8 +60,8 @@ data Expr
   | Gt Expr Expr
   | Ge Expr Expr
   | Not Expr
-  | ToI64 Expr
-  | ToI32 Expr
+  | -- `expr as i64` / `expr as i32`（キャスト先は整数型のみ）
+    Cast Expr Width
   | Call String [Expr]
   | AddrOf Expr
   | Deref Expr
@@ -133,8 +132,7 @@ tokenize (c : cs)
             "false" -> (TFalse :) <$> tokenize rest
             "fn" -> (TFn :) <$> tokenize rest
             "return" -> (TReturn :) <$> tokenize rest
-            "to_i64" -> (TToI64 :) <$> tokenize rest
-            "to_i32" -> (TToI32 :) <$> tokenize rest
+            "as" -> (TAs :) <$> tokenize rest
             _ -> (TIdent ident :) <$> tokenize rest
   | c == '+' = (TPlus :) <$> tokenize cs
   | c == '-' = (TMinus :) <$> tokenize cs
@@ -184,9 +182,10 @@ matchIntSuffix s
 -- equality   ::= comparison (('==' | '!=') comparison)*
 -- comparison ::= additive (('<' | '<=' | '>' | '>=') additive)*
 -- additive   ::= multiplicative (('+' | '-') multiplicative)*
--- multiplicative       ::= factor (('*' | '/') factor)*
+-- multiplicative       ::= cast (('*' | '/') cast)*
+-- cast       ::= factor ('as' type)*（type は 'i32' | 'i64' のみ）
 -- factor     ::= INT | INT ('i64' | 'i32') | 'true' | 'false' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
---              | '(' expr ')' | '-' factor | '!' factor | 'to_i64' factor | 'to_i32' factor
+--              | '(' expr ')' | '-' factor | '!' factor
 --              | '&' factor | '*' factor
 --              ※ INT ('i64'|'i32') は字句解析側で空白を挟まず1トークン（TIntSuffixed）に融合される
 
@@ -494,21 +493,36 @@ parseAdditiveRest left rest = Right (left, rest)
 -- 乗算・除算の抽出
 parseMultiplicative :: [Token] -> ParseResult Expr
 parseMultiplicative tokens = do
-  (left, rest) <- parseFactor tokens
+  (left, rest) <- parseCast tokens
   parseMultiplicativeRest left rest
 
--- multiplicative ::= factor (('*' | '/') factor)*
+-- キャストの抽出（単項演算子より低く、乗除算より高い優先順位。左結合で連鎖できる）
+-- cast ::= factor ('as' type)*
+parseCast :: [Token] -> ParseResult Expr
+parseCast tokens = do
+  (expr, rest) <- parseFactor tokens
+  parseCastRest expr rest
+
+parseCastRest :: Expr -> [Token] -> ParseResult Expr
+parseCastRest expr (TAs : rest) = do
+  (ty, rest') <- parseTypeAnnotation rest
+  case ty of
+    TyInt w -> parseCastRest (Cast expr w) rest'
+    _ -> Left "invalid cast target: only i32 or i64 is allowed"
+parseCastRest expr rest = Right (expr, rest)
+
+-- multiplicative ::= cast (('*' | '/') cast)*
 parseMultiplicativeRest :: Expr -> [Token] -> ParseResult Expr
 parseMultiplicativeRest left (TStar : rest) = do
-  (right, rest') <- parseFactor rest
+  (right, rest') <- parseCast rest
   parseMultiplicativeRest (Mul left right) rest'
 parseMultiplicativeRest left (TSlash : rest) = do
-  (right, rest') <- parseFactor rest
+  (right, rest') <- parseCast rest
   parseMultiplicativeRest (Div left right) rest'
 parseMultiplicativeRest left rest = Right (left, rest)
 
 -- factor ::= INT | INT ('i64' | 'i32') | 'true' | 'false' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
---          | '(' expr ')' | '-' factor | '!' factor | 'to_i64' factor | 'to_i32' factor
+--          | '(' expr ')' | '-' factor | '!' factor
 --          | '&' factor | '*' factor
 parseFactor :: [Token] -> ParseResult Expr
 parseFactor (TInt n : rest) = Right (Lit n, rest)
@@ -530,12 +544,6 @@ parseFactor (TMinus : rest) = do
 parseFactor (TBang : rest) = do
   (expr, rest') <- parseFactor rest
   Right (Not expr, rest')
-parseFactor (TToI64 : rest) = do
-  (expr, rest') <- parseFactor rest
-  Right (ToI64 expr, rest')
-parseFactor (TToI32 : rest) = do
-  (expr, rest') <- parseFactor rest
-  Right (ToI32 expr, rest')
 parseFactor (TAmp : rest) = do
   (expr, rest') <- parseFactor rest
   Right (AddrOf expr, rest')
