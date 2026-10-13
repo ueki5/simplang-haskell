@@ -1,4 +1,4 @@
-fn main() {
+fn main() -> u64 {
     let sq = [0u64; 5];
     let i: usize = 0;
     while i < 5 {

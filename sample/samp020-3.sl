@@ -2,7 +2,7 @@ fn at(p: &[i64; 3], i: usize) -> &i64 {
     &p[i]
 }
 
-fn main() {
+fn main() -> i64 {
     let a = [1, 2, 3];
     let q = at(&a, 1);
     *q = 100;

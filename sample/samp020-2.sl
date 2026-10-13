@@ -5,7 +5,7 @@ fn larger(a: &[i32; 3], b: &[i32; 3]) -> &[i32; 3] {
     b
 }
 
-fn main() {
+fn main() -> i32 {
     let x = [1i32, 2i32, 3i32];
     let y = [4i32, 0i32, 1i32];
     larger(&x, &y)[2]

@@ -1,4 +1,4 @@
-fn main() {
+fn main() -> i64 {
     let a: i64 = 3 * 5;
     let b: i64 = (1 + 2) - 1;
     b = b + 1;

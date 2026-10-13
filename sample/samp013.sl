@@ -1,4 +1,4 @@
-fn main() {
+fn main() -> i64 {
     let a:i64 = 2i64;
     let b:i32 = 4i32;
     let c:i64 = 8;
