@@ -1,4 +1,4 @@
-fn main() {
+fn main() -> i64 {
     let x: i64 = 10;
     let y: i64 = 20;
     let ps: [&i64; 2] = [&x, &y];

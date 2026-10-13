@@ -5,6 +5,6 @@ fn fibonacci(n: i64) -> i64 {
     fibonacci(n - 1) + fibonacci(n - 2)
 }
 
-fn main() {
+fn main() -> i64 {
     fibonacci(10)
 }

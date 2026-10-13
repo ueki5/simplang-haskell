@@ -1,6 +1,6 @@
 fn noop() {}
 
-fn main() {
+fn main() -> bool {
     let u = noop();
     let w: () = ();
     let p = &w;

@@ -103,9 +103,9 @@ data Stmt
 -- 文の列 + 末尾式（関数本体の形。省略された末尾式は UnitLit へ脱糖済み）
 type Body = ([Stmt], Expr)
 
--- 関数定義: 名前, 仮引数(名前, 型注釈省略可)の列, 戻り値の型(省略可), 本体。
--- 型注釈が省略された箇所はNothingとし、呼び出し箇所の実引数・自身のreturn/末尾式から後で推論する
-data FnDecl = FnDecl String [(String, Maybe Type)] (Maybe Type) Body
+-- 関数定義: 名前, 仮引数(名前, 型)の列, 戻り値の型, 本体。
+-- シグネチャは宣言だけで確定する（仮引数の型注釈は必須。'->' を省略した戻り値型は () とする）
+data FnDecl = FnDecl String [(String, Type)] Type Body
   deriving (Show, Eq)
 
 -- fn定義の列（main を含む。トップレベルにはfn定義しか書けない）
@@ -200,7 +200,7 @@ matchIntSuffix s
 -- Parser
 --
 -- program    ::= fn-decl*（main を含む。トップレベルに文・式は書けない）
--- fn-decl    ::= 'fn' IDENT '(' (IDENT (':' type)? (',' IDENT (':' type)?)*)? ')' ('->' type)? '{' stmt* expr? '}'
+-- fn-decl    ::= 'fn' IDENT '(' (IDENT ':' type (',' IDENT ':' type)*)? ')' ('->' type)? '{' stmt* expr? '}'
 --              （末尾式を省略した場合は () とする）
 -- stmt       ::= let-stmt | assign-stmt | place-assign-stmt | expr-stmt | block-stmt | if-stmt | while-stmt | break-stmt | continue-stmt | return-stmt
 -- let-stmt    ::= 'let' IDENT ':' type '=' expr ';' | 'let' IDENT '=' expr ';'
@@ -243,11 +243,10 @@ parseFnDecl tokens = do
   (name, rest) <- expectIdent tokens
   rest' <- expectToken TLParen rest
   (params, rest'') <- parseParamList rest'
+  -- 戻り値型の省略（'->' が無い）は () とする（Rustと同じ）
   (retTy, rest3) <- case rest'' of
-    (TArrow : rest2) -> do
-      (ty, rest2') <- parseTypeAnnotation rest2
-      Right (Just ty, rest2')
-    _ -> Right (Nothing, rest'')
+    (TArrow : rest2) -> parseTypeAnnotation rest2
+    _ -> Right (TUnit, rest'')
   rest5 <- expectToken TLBrace rest3
   (stmts, rest6) <- parseStmts rest5
   -- 末尾式の省略（直後が '}'）は () とする
@@ -258,24 +257,24 @@ parseFnDecl tokens = do
     (TRBrace : rest8) -> Right (FnDecl name params retTy (stmts, tailExpr), rest8)
     _ -> Left "expected closing brace"
 
--- 仮引数リスト: (IDENT (':' type)? (',' IDENT (':' type)?)*)?（'(' は呼び出し側で消費済み、終端の ')' はここで消費する）
-parseParamList :: [Token] -> ParseResult [(String, Maybe Type)]
+-- 仮引数リスト: (IDENT ':' type (',' IDENT ':' type)*)?（'(' は呼び出し側で消費済み、終端の ')' はここで消費する）
+parseParamList :: [Token] -> ParseResult [(String, Type)]
 parseParamList (TRParen : rest) = Right ([], rest)
 parseParamList tokens = do
   (param, rest) <- parseParam tokens
   parseParamListRest [param] rest
 
--- IDENT (':' type)?（型注釈は省略可能。省略時はNothingとし、呼び出し箇所の実引数から後で推論する）
-parseParam :: [Token] -> ParseResult (String, Maybe Type)
+-- IDENT ':' type（型注釈は必須。シグネチャを宣言だけで確定させ、関数本体や呼び出し箇所を見ずに済むようにする）
+parseParam :: [Token] -> ParseResult (String, Type)
 parseParam tokens = do
   (name, rest) <- expectIdent tokens
   case rest of
     (TColon : rest') -> do
       (ty, rest'') <- parseTypeAnnotation rest'
-      Right ((name, Just ty), rest'')
-    _ -> Right ((name, Nothing), rest)
+      Right ((name, ty), rest'')
+    _ -> Left ("expected ':' and type after parameter name: " ++ name)
 
-parseParamListRest :: [(String, Maybe Type)] -> [Token] -> ParseResult [(String, Maybe Type)]
+parseParamListRest :: [(String, Type)] -> [Token] -> ParseResult [(String, Type)]
 parseParamListRest acc (TComma : rest) = do
   (param, rest') <- parseParam rest
   parseParamListRest (acc ++ [param]) rest'

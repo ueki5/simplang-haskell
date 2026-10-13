@@ -1,4 +1,4 @@
-fn main() {
+fn main() -> u64 {
     let x: i32 = -1;
     let u = x as u32;
     let w = x as u64;

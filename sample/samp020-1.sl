@@ -1,4 +1,4 @@
-fn sum(p) {
+fn sum(p: &[i64; 4]) -> i64 {
     let s = 0;
     let i: usize = 0;
     while i < 4 {
@@ -8,7 +8,7 @@ fn sum(p) {
     s
 }
 
-fn main() {
+fn main() -> i64 {
     let a = [10, 20, 30, 40];
     sum(&a)
 }

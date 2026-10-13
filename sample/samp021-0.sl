@@ -7,7 +7,7 @@ fn fill_squares(p: &[u64; 5]) {
     }
 }
 
-fn main() {
+fn main() -> u64 {
     let sq = [0u64; 5];
     fill_squares(&sq);
     sq[3] + sq[4]

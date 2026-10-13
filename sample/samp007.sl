@@ -1,4 +1,4 @@
-fn main() {
+fn main() -> i64 {
     let a:i64=0;
     while a != 10 {
       a = a + 1;

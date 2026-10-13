@@ -78,8 +78,7 @@ data Instr
 -- 変数名 -> (%rbp相対オフセット, 型)。スコープのスタック（先頭が最内側）
 type Env = [Map String (Int, Type)]
 
--- スコープのスタック（[Map String v]、先頭が最内側）に対する共通ロジック。
--- Env（値は (Int, Type)）とLocalEnv（値は Either Slot Type）はどちらもこの形をしている
+-- スコープのスタック（[Map String v]、先頭が最内側）に対する共通ロジック
 
 -- 先頭スコープから順に探し、無ければ外側へフォールバックする
 lookupInScopes :: String -> [Map String v] -> Maybe v
@@ -183,7 +182,7 @@ maxParams = 6
 -- 終了する特別な末尾（codegen側のepilogue）を持つため、他のfnとは分けて返す
 compile :: Program -> Either String ([(String, [Instr])], Type, [Instr])
 compile fnDecls = do
-  fnSigs <- resolveFnSigs fnDecls
+  fnSigs <- buildFnSigs fnDecls
   evalStateT (compileProgram fnSigs fnDecls) 0
 
 compileProgram :: FnSigs -> [FnDecl] -> CompileM ([(String, [Instr])], Type, [Instr])
@@ -377,12 +376,9 @@ allocParams params = (reverse revAssigned, Map.fromList [(n, (o, t)) | (n, o, t)
 -- 一切参照できない）から開始し、パラメータはプロローグ直後にレジスタからスタックへスピルする
 -- （StoreArg）。早期returnと末尾式のフォールスルーは同じ関数末尾ラベルへ合流する
 compileFnDecl :: FnSigs -> FnDecl -> CompileM (String, [Instr])
-compileFnDecl fnSigs (FnDecl name params _ (stmts, tailExpr)) = do
+compileFnDecl fnSigs (FnDecl name params retTy (stmts, tailExpr)) = do
   endLabel <- freshLabel "fn_end"
-  -- パラメータ・戻り値の具体的な型は（型注釈が省略されていた場合を含め）resolveFnSigsが
-  -- 確定させたfnSigsを常に正とする（FnDecl自身のフィールドはMaybe Typeであり得るため使わない）
-  let (paramTys, retTy) = fnSigs Map.! name
-      (assigned, paramEnv, paramCursor) = allocParams (zip (map fst params) paramTys)
+  let (assigned, paramEnv, paramCursor) = allocParams params
       env0 = [paramEnv]
       spillInstrs = [StoreArg i (storageWidth ty) off | (i, (_, off, ty)) <- zip [0 ..] assigned]
       returnCtx = Just (name, retTy, endLabel)
@@ -535,284 +531,6 @@ addressOf fnSigs env (Deref e) = do
     other -> Left ("type mismatch: expected pointer, found " ++ typeName other)
 addressOf _ _ e = Left ("invalid operand for &: not an lvalue: " ++ show e)
 
--- fnの仮引数・戻り値型の注釈省略と型推論（FnSigs確定前の1パス目）
---
--- letと異なりパラメータには初期化式が無いため、型の根拠は
--- (a) 戻り値型なら自身のreturn文・末尾式、(b) パラメータ型なら呼び出し側の実引数式
--- からしか得られず、複数関数にまたがる依存関係・循環（自己再帰・相互再帰）が生じ得る。
--- 呼び出される関数の本体内でのパラメータの使われ方は一切見ない（ボトムアップ推論はしない）。
-
--- 型注釈が省略されたシグネチャ要素1個を指す
-data Slot = ParamSlot String Int | ReturnSlot String
-  deriving (Eq, Ord, Show)
-
--- 循環検出のエラーメッセージ表示用
-describeSlot :: Slot -> String
-describeSlot (ParamSlot name i) = name ++ " param#" ++ show (i + 1)
-describeSlot (ReturnSlot name) = name ++ " return type"
-
--- これまでに解決済みのスロットの値
-type ResolvedSlots = Map Slot Type
-
--- 関数本体内のローカル変数（仮引数・let）の、型解決の観点からの状態。
--- Env（%rbp相対オフセット, 型）と異なり、まだ解決されていないスロット待ちのことがある
-type LocalEnv = [Map String (Either Slot Type)]
-
-lookupLocal :: String -> LocalEnv -> Maybe (Either Slot Type)
-lookupLocal = lookupInScopes
-
-setLocal :: String -> Either Slot Type -> LocalEnv -> LocalEnv
-setLocal = insertInScope
-
--- 1個の式を型付けしようとした結果:
---   Left err          = 確定的な型エラー（未宣言変数・未宣言関数・bool/ポインタ関連の不整合等）
---   Right (Left slot) = 特定のスロットが解決されるまで結論が出せない
---   Right (Right mty) = 証拠が得られた（Nothing = 未確定の整数リテラルのみ。inferMaybeTypeのNothingと同じ意味）
-type SlotResult = Either String (Either Slot (Maybe Type))
-
--- SlotResultを一段展開し、ブロックされていれば即座に伝播し、値が取れていれば継続関数へ渡す
-chainSlot :: SlotResult -> (Maybe Type -> SlotResult) -> SlotResult
-chainSlot r k = do
-  v <- r
-  case v of
-    Left slot -> Right (Left slot)
-    Right ty -> k ty
-
--- lvalue（&の対象）のアドレス先の型を、LocalEnv上で解決する（addressOfのLocalEnv版）
-addressOfSlot :: Map String FnDecl -> ResolvedSlots -> LocalEnv -> Expr -> Either String (Either Slot Type)
-addressOfSlot _ _ env (Var name) =
-  case lookupLocal name env of
-    Nothing -> Left ("undeclared variable: " ++ name)
-    Just status -> Right status
-addressOfSlot fnDeclMap resolved env e@(Index _ _) = do
-  r <- resolveExprType fnDeclMap resolved env e
-  case r of
-    Left slot -> Right (Left slot)
-    Right (Just ty) -> Right (Right ty)
-    Right Nothing -> Left "cannot index into a value of type integer literal"
-addressOfSlot fnDeclMap resolved env (Deref e) = do
-  r <- resolveExprType fnDeclMap resolved env e
-  case r of
-    Left slot -> Right (Left slot)
-    Right (Just (TPtr inner)) -> Right (Right inner)
-    Right (Just other) -> Left ("type mismatch: expected pointer, found " ++ typeName other)
-    Right Nothing -> Left "type mismatch: cannot take address of a dereferenced untyped literal"
-addressOfSlot _ _ _ e = Left ("invalid operand for &: not an lvalue: " ++ show e)
-
--- inferMaybeTypeのLocalEnv版。Var/CallがまだResolvedSlotsに無いスロットを指していれば
--- そのスロットへブロックし、それ以外の構造はinferMaybeTypeと完全に同一のロジックで型を求める
-resolveExprType :: Map String FnDecl -> ResolvedSlots -> LocalEnv -> Expr -> SlotResult
-resolveExprType fnDeclMap resolved env expr = do
-  -- pTraceShowM ("resolveExprType実行", expr)
-  go expr
-  where
-    go (Lit _) = Right (Right Nothing)
-    go (LitTyped _ ty) = Right (Right (Just ty))
-    go (BoolLit _) = Right (Right (Just TBool))
-    go UnitLit = Right (Right (Just TUnit))
-    go (Var name) = case lookupLocal name env of
-      Nothing -> Left ("undeclared variable: " ++ name)
-      Just (Left slot) -> Right (Left slot)
-      Just (Right ty) -> Right (Right (Just ty))
-    go (Neg e) = go e
-    go (Not e) =
-      go e `chainSlot` \t -> case t of
-        Just ty | isIntType ty -> Left ("type mismatch: expected bool, found " ++ typeName ty)
-        _ -> Right (Right (Just TBool))
-    go (Add a b) = combine a b
-    go (Sub a b) = combine a b
-    go (Mul a b) = combine a b
-    go (Div a b) = combine a b
-    go (Eq a b) = combineBool a b
-    go (Neq a b) = combineBool a b
-    go (Lt a b) = combineBool a b
-    go (Le a b) = combineBool a b
-    go (Gt a b) = combineBool a b
-    go (Ge a b) = combineBool a b
-    go (Cast _ ty) = Right (Right (Just ty))
-    go (ArrayLit es) = foldr step (\acc -> Right (Right (Just (TArray (maybe (TyInt Signed W64) id acc) (length es))))) es Nothing
-      where
-        step e k acc =
-          go e `chainSlot` \t -> case unifyMaybeType acc t of
-            Left err -> Left err
-            Right u -> k u
-    go (ArrayRepeat e n) =
-      go e `chainSlot` \t -> Right (Right (Just (TArray (maybe (TyInt Signed W64) id t) n)))
-    go (Index base _) =
-      go base `chainSlot` \t -> case t of
-        Just (TArray elemTy _) -> Right (Right (Just elemTy))
-        Just (TPtr (TArray elemTy _)) -> Right (Right (Just elemTy))
-        Just other -> Left ("cannot index into a value of type " ++ typeName other)
-        Nothing -> Left "cannot index into a value of type integer literal"
-    go (AddrOf e) = case addressOfSlot fnDeclMap resolved env e of
-      Left err -> Left err
-      Right (Left slot) -> Right (Left slot)
-      Right (Right ty) -> Right (Right (Just (TPtr ty)))
-    go (Deref e) =
-      go e `chainSlot` \t -> case t of
-        Just (TPtr inner) -> Right (Right (Just inner))
-        Just other -> Left ("type mismatch: expected pointer, found " ++ typeName other)
-        Nothing -> Left "type mismatch: cannot dereference an untyped literal"
-    go (Call "main" _) = Left "cannot call main"
-    go (Call name _) = case Map.lookup name fnDeclMap of
-      Nothing -> Left ("undeclared function: " ++ name)
-      Just _ -> case Map.lookup (ReturnSlot name) resolved of
-        Just ty -> Right (Right (Just ty))
-        Nothing -> Right (Left (ReturnSlot name))
-    combine a b =
-      go a `chainSlot` \ta ->
-        go b `chainSlot` \tb ->
-          case unifyMaybeType ta tb of
-            Left err -> Left err
-            Right u -> Right (Right u)
-    combineBool a b = combine a b `chainSlot` \_ -> Right (Right (Just TBool))
-
--- (対象スロット, その証拠) のリスト。プログラム全体を1回走査してまとめて集める
-type Evidence = [(Slot, Either Slot (Maybe Type))]
-
--- 式ツリー中のあらゆる位置に現れるCallノードを見つけ、各実引数式についてParamSlotへの証拠を集める
--- （宣言済みの仮引数の個数を超える位置はスキップする。実際の引数個数不一致はFnSigs確定後に検出される）
-callEvidence :: Map String FnDecl -> ResolvedSlots -> LocalEnv -> Expr -> Either String Evidence
-callEvidence fnDeclMap resolved env expr = do
-  -- pTraceShowM ("callEvidence実行", expr)
-  go expr
-  where
-    go (Lit _) = Right []
-    go (LitTyped _ _) = Right []
-    go (BoolLit _) = Right []
-    go UnitLit = Right []
-    go (Var _) = Right []
-    go (Neg e) = go e
-    go (Not e) = go e
-    go (Add a b) = combine a b
-    go (Sub a b) = combine a b
-    go (Mul a b) = combine a b
-    go (Div a b) = combine a b
-    go (Eq a b) = combine a b
-    go (Neq a b) = combine a b
-    go (Lt a b) = combine a b
-    go (Le a b) = combine a b
-    go (Gt a b) = combine a b
-    go (Ge a b) = combine a b
-    go (Cast e _) = go e
-    go (AddrOf e) = go e
-    go (Deref e) = go e
-    go (ArrayLit es) = concat <$> mapM go es
-    go (ArrayRepeat e _) = go e
-    go (Index a b) = combine a b
-    go (Call name args) = do
-      nested <- concat <$> mapM go args -- 再帰的に型情報を取得（ネストした型情報）
-      -- pTraceShowM ("nested", nested)
-      paramEv <- -- 既知の型情報(fnDeclMap,resolved,env)から取得
-        mapM
-          (\(i, arg) -> (,) (ParamSlot name i) <$> resolveExprType fnDeclMap resolved env arg)
-          (zip [0 ..] args)
-      -- pTraceShowM ("paramEv", paramEv)
-      pure (nested ++ paramEv) -- 再帰的に取得 ＋＋ 既知の情報から取得
-    combine a b = (++) <$> go a <*> go b
-
--- 関数本体の本文を辿り、(対象スロット, 証拠) を集める。compileStmtsFrom と同じ形
--- （スコープのpush/pop、SBlock/SIf/SWhileの再帰）だが、命令列の代わりに証拠を集める点だけが異なる
-collectEvidenceStmts ::
-  Map String FnDecl -> ResolvedSlots -> String -> LocalEnv -> [Stmt] -> Either String (LocalEnv, Evidence)
-collectEvidenceStmts fnDeclMap resolved curFn localenv stmts = do
-  -- pTraceShowM ("collectEvidenceStmts実行", curFn)
-  go localenv stmts
-  where
-    go env [] = Right (env, [])
-    go env (stmt : rest) = do
-      (env', ev1) <- step env stmt
-      (env'', ev2) <- go env' rest
-      pure (env'', ev1 ++ ev2)
-
-    step env (SLet name ty expr) = do
-      ev <- callEvidence fnDeclMap resolved env expr
-      -- pTraceShowM ("ev", ev)
-      pure (setLocal name (Right ty) env, ev)
-    step env (SLetInferred name expr) = do
-      ev <- callEvidence fnDeclMap resolved env expr
-      -- pTraceShowM ("ev", ev)
-      status <- case resolveExprType fnDeclMap resolved env expr of
-        Left err -> Left err
-        Right (Left slot) -> Right (Left slot)
-        Right (Right (Just ty)) -> Right (Right ty)
-        Right (Right Nothing) -> Right (Right (TyInt Signed W64))
-      pure (setLocal name status env, ev)
-    step env (SAssign _ expr) = do
-      ev <- callEvidence fnDeclMap resolved env expr
-      -- pTraceShowM ("ev", ev)
-      pure (env, ev)
-    step env (SAssignPlace lhs expr) = do
-      lhsEv <- callEvidence fnDeclMap resolved env lhs
-      ev <- callEvidence fnDeclMap resolved env expr
-      pure (env, lhsEv ++ ev)
-    step env (SBlock inner) = do
-      (_, ev) <- collectEvidenceStmts fnDeclMap resolved curFn (Map.empty : env) inner
-      pure (env, ev)
-    step env (SIf branches maybeElse) = do
-      branchEv <-
-        concat
-          <$> mapM
-            ( \(cond, body) -> do
-                condEv <- callEvidence fnDeclMap resolved env cond
-                -- pTraceShowM ("condEv", condEv)
-                (_, bodyEv) <- collectEvidenceStmts fnDeclMap resolved curFn (Map.empty : env) body
-                pure (condEv ++ bodyEv)
-            )
-            branches
-      elseEv <- case maybeElse of
-        Nothing -> Right []
-        Just elseStmts -> snd <$> collectEvidenceStmts fnDeclMap resolved curFn (Map.empty : env) elseStmts
-      pure (env, branchEv ++ elseEv)
-    step env (SWhile cond body) = do
-      condEv <- callEvidence fnDeclMap resolved env cond
-      -- pTraceShowM ("condEv", condEv)
-      (_, bodyEv) <- collectEvidenceStmts fnDeclMap resolved curFn (Map.empty : env) body
-      pure (env, condEv ++ bodyEv)
-    step env SBreak = Right (env, [])
-    step env SContinue = Right (env, [])
-    step env (SReturn expr) = do
-      ev <- callEvidence fnDeclMap resolved env expr
-      -- pTraceShowM ("ev", ev)
-      r <- resolveExprType fnDeclMap resolved env expr
-      pure (env, ev ++ [(ReturnSlot curFn, r)])
-    step env (SExpr expr) = do
-      ev <- callEvidence fnDeclMap resolved env expr
-      pure (env, ev)
-
--- 仮引数をLocalEnvの初期スコープへ変換する（型注釈済みならその型、省略済みならこれまでの解決状況を反映する）
-paramLocalScope :: ResolvedSlots -> String -> [(String, Maybe Type)] -> Map String (Either Slot Type)
-paramLocalScope resolved fnName params =
-  -- pTraceShow ("paramLocalScope実行", fnName) $
-  Map.fromList
-    [ (name, status)
-    | (i, (name, mty)) <- zip [0 ..] params,
-      let slot = ParamSlot fnName i
-          status = case mty of
-            Just ty -> Right ty
-            Nothing -> maybe (Left slot) Right (Map.lookup slot resolved)
-    ]
-
--- プログラム全体（mainを含む全fn本体）を1回走査し、現在のResolvedSlotsに対する証拠を集める
-programEvidence :: Map String FnDecl -> ResolvedSlots -> [FnDecl] -> Either String Evidence
-programEvidence fnDeclMap resolved fnDecls =
-  concat <$> mapM (fnDeclEvidence fnDeclMap resolved) fnDecls -- 全ての関数から証拠を取得
-
--- １つの関数に対して仮引数、本文、末尾式から証拠を集める
-fnDeclEvidence :: Map String FnDecl -> ResolvedSlots -> FnDecl -> Either String [(Slot, Either Slot (Maybe Type))]
-fnDeclEvidence fnDeclMap resolved (FnDecl name params _ (body, tailE)) = do
-  -- pTraceShowM ("fnDeclEvidence実行", name)
-  let env0 = [paramLocalScope resolved name params] -- 仮引数からLocalEnvを作成
-  (env1, bodyEv) <- collectEvidenceStmts fnDeclMap resolved name env0 body -- 関数の本文から(LocalEnv、証拠)を収集
-  tailCallEv <- callEvidence fnDeclMap resolved env1 tailE -- 末尾式内のCallから実引数(ParamSlot)の証拠を取得
-  tailRet <- resolveExprType fnDeclMap resolved env1 tailE -- 末尾式から戻り値(ReturnSlot)の証拠を取得
-  -- pTraceShowM ("env0", env0)
-  -- pTraceShowM ("env1", env1)
-  -- pTraceShowM ("bodyEv", bodyEv)
-  -- pTraceShowM ("tailCallEv", tailCallEv)
-  -- pTraceShowM ("tailRet", tailRet)
-  pure (bodyEv ++ tailCallEv ++ [(ReturnSlot name, tailRet)]) -- 本文、末尾式内の実引数、末尾式の戻り値からの証拠を連結して返却
-
 -- 構造検証: 重複定義・最大引数数・mainの存在と引数なし（型の中身は見ない）
 validateFnShapes :: [FnDecl] -> Either String ()
 validateFnShapes fnDecls = do
@@ -827,76 +545,14 @@ validateFnShapes fnDecls = do
       | name == "main" && not (null params) = Left "main function must not take parameters"
       | otherwise = Right (Map.insert name () seen)
 
--- 各fnの型注釈が省略された箇所をSlotとして列挙し、注釈済みの箇所は即座にResolvedSlotsへ投入する
-initialSlots :: [FnDecl] -> (ResolvedSlots, [Slot])
-initialSlots fnDecls = (Map.fromList resolved, unresolved)
-  where
-    entries =
-      [ (slot, mty)
-      | FnDecl name params mret _ <- fnDecls,
-        (slot, mty) <- zip (map (ParamSlot name) [0 ..]) (map snd params) ++ [(ReturnSlot name, mret)]
-      ]
-    resolved = [(slot, ty) | (slot, Just ty) <- entries]
-    unresolved = [slot | (slot, Nothing) <- entries]
-
--- 未解決スロット集合が空になるまで、全プログラムを繰り返し走査して解決を進める。
--- 1個のスロットについて、自分自身待ちの証拠は無視する（通常の自己再帰が誤って循環と
--- 判定されるのを防ぐ）。1ラウンドで1つも前進しなければ、残りは（自己ループ以外の）
--- 未解決スロット同士で行き詰まっている＝循環と判定してエラーとする
-resolveSlots ::
-  Map String FnDecl -> [FnDecl] -> ResolvedSlots -> [Slot] -> Either String ResolvedSlots
-resolveSlots _ _ resolved [] = Right resolved -- 未解決スロットが空になったら終了
-resolveSlots fnDeclMap fnDecls resolved pending = do
-  evidence <- programEvidence fnDeclMap resolved fnDecls -- 全プログラム（mainを含む全関数）から証拠を集める
-  results <- mapM (resolveOne evidence) pending -- 未解決スロットを解決
-  -- pTraceShowM ("evidence", evidence)
-  -- pTraceShowM ("results", results)
-  let advanced = [(slot, ty) | (slot, Right ty) <- zip pending results]
-      stillPending = [slot | (slot, Left _) <- zip pending results]
-  if null advanced -- 解決されたスロットがない場合
-    then case [(slot, slot') | (slot, Left slot') <- zip pending results] of
-      [] -> error "resolveSlots: unreachable — null advanced but pending is non-empty implies at least one Left"
-      ((blockedSlot, blockedOn) : _) ->
-        Left
-          ( "circular type inference: "
-              ++ describeSlot blockedSlot
-              ++ " -> "
-              ++ describeSlot blockedOn
-              ++ " (add an explicit type annotation to break the cycle)"
-          )
-    else resolveSlots fnDeclMap fnDecls (Map.union (Map.fromList advanced) resolved) stillPending
-
--- Evidenceから対象スロット == slotかつ自分自身待ち（Left slot）ではないものだけをcandidatesとして抜き出す
--- candidatesの中にLeft blocker（他のスロット待ち）が1つでも残っていれば、slotはまだblocker待ちとしてRight (Left blocker)を返す（＝今ラウンドでは前進しない）
--- 残りが全部Right mtyなら、それらをunifyMaybeTypeで1つの型に単一化する。証拠が1つも無ければi64にデフォルトする
-resolveOne :: (Eq a) => [(a, Either a (Maybe Type))] -> a -> Either String (Either a Type)
-resolveOne evidence slot = do
-  let candidates = [c | (s, c) <- evidence, s == slot, c /= Left slot]
-  case [s' | Left s' <- candidates] of
-    (blocker : _) -> Right (Left blocker)
-    [] -> do
-      u <- foldM unifyMaybeType Nothing [mty | Right mty <- candidates]
-      Right (Right (maybe (TyInt Signed W64) id u))
-
--- 全fn定義から（型注釈省略を含めて）FnSigsを一括解決する（本体のコンパイルより前に行う1パス目）。
--- 呼び出し規約・スタックスロット割り付けが必要とする具体的なTypeを、注釈または
--- 呼び出し箇所の実引数・自身のreturn/末尾式からの推論のいずれかで確定させる
-resolveFnSigs :: [FnDecl] -> Either String FnSigs
-resolveFnSigs fnDecls = do
+-- 全fn定義からFnSigsを一括で作る（本体のコンパイルより前に行う1パス目）。
+-- シグネチャは宣言だけで確定する（仮引数の型注釈は必須、'->' 省略は ()）ため、関数本体や呼び出し箇所は見ない。
+-- 他のソースのfnも宣言さえあれば呼び出せるようにするための前提（複数ソースからのビルド）
+buildFnSigs :: [FnDecl] -> Either String FnSigs
+buildFnSigs fnDecls = do
   validateFnShapes fnDecls
-  let fnDeclMap = Map.fromList [(name, d) | d@(FnDecl name _ _ _) <- fnDecls]
-      (initResolved, pending) = initialSlots fnDecls -- 全ての関数から解決済みスロット、未解決スロットを取得
-  resolved <- resolveSlots fnDeclMap fnDecls initResolved pending
-  -- pTraceShowM ("initResolved", initResolved)
-  -- pTraceShowM ("pending", pending)
-  -- pTraceShowM ("resolved", resolved)
-  let paramType name (i, (_, mty)) = maybe (resolved Map.! ParamSlot name i) id mty
-      retType name mty = maybe (resolved Map.! ReturnSlot name) id mty
-      sigs =
-        [ (name, (map (paramType name) (zip [0 ..] params), retType name mret))
-        | FnDecl name params mret _ <- fnDecls
-        ]
-  -- 配列はローカル変数専用のため、仮引数・戻り値の型には使えない（注釈・推論のいずれの場合も検査する）
+  let sigs = [(name, (map snd params, retTy)) | FnDecl name params retTy _ <- fnDecls]
+  -- 配列はローカル変数専用のため、仮引数・戻り値の型には使えない
   mapM_
     ( \(name, (paramTys, retTy)) ->
         when (any isArrayType (retTy : paramTys)) $

@@ -6,7 +6,7 @@ GHCi 上で1ステップずつ評価しながら内部状態を観察するた�
 ## ファイル
 
 - `init.hs` — GHCi 起動後に読み込むスクリプト。`Parser`/`CodeGen`/`Compiler` を
-  ソースから `:l` して非公開識別子（`initialSlots` など）まで参照可能にし、
+  ソースから `:l` して非公開識別子（`buildFnSigs` など）まで参照可能にし、
   検証したい `source`（simplang ソース文字列）を各パイプライン段階の関数に順に適用する
   一連の束縛（`tokens` → `parsed` → `compld` → `asmblr`）を定義する。
 
@@ -48,13 +48,11 @@ GHCi 上で1ステップずつ評価しながら内部状態を観察するた�
    `:script script/init.hs` を再度実行すればよい（`:r` はソースファイルの
    再ロードのみで `init.hs` 自体は再実行されないため注意）。
 
-5. `Compiler.hs` 内の `pTraceShowM (...)` / `pTraceShow (...)` 呼び出し
-   （`resolveFnSigs` の固定点ループまわりに多数配置されている）はコメントアウトを
-   外すと有効化され、`programEvidence` / `fnDeclEvidence` / `resolveSlots` などの
-   再帰的な型推論処理が1ラウンド進むごとの中間状態（`env0`/`env1`/`evidence`/
-   `resolved`/`pending` 等）が `Debug.Pretty.Simple` 経由で pretty-print される。
-   型推論の挙動を1ステップずつ追いたい場合はこれらのコメントアウトを外してから
-   上記の手順で `init.hs` を読み込む。不要な出力が邪魔な場合は再度コメントアウトする。
+5. `Compiler.hs` 内のコメントアウトされた `pTraceShowM (...)` / `pTraceShow (...)` 呼び出しは、
+   コメントアウトを外すと有効化され、中間状態（`env0`/`env1` 等）が `Debug.Pretty.Simple` 経由で
+   pretty-print される。不要な出力が邪魔な場合は再度コメントアウトする。
+   （step015〜step022 にあった fn シグネチャの型推論の固定点ループ `resolveFnSigs` は、step023 で
+   シグネチャの型注釈が必須になったため削除した）
 
 ## プログラム本体（`app/Main.hs` の `main`）への引数指定
 
