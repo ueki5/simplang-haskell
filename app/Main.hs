@@ -1,26 +1,23 @@
 module Main where
 
-import CodeGen (codegen)
-import Compiler (compile)
+import Driver (BuildOpts (..), Mode (..), build)
 import Options.Applicative
-import Parser (parse, tokenize)
-import System.Directory (createDirectoryIfMissing)
 import System.Exit (exitFailure)
-import System.FilePath (takeBaseName, (</>))
-import System.Process (callProcess)
 
-data Options = Options
-  { sourceFile :: FilePath,
-    outputFile :: Maybe FilePath,
-    asmFile :: Maybe FilePath
-  }
-
-optionsParser :: Parser Options
+optionsParser :: Parser BuildOpts
 optionsParser =
-  Options
-    <$> argument str (metavar "FILE" <> help "Source file to compile")
-    <*> optional (option str (long "output" <> short 'o' <> metavar "FILE" <> help "Output file name (default: FILE without extension)"))
-    <*> optional (option str (long "assembly" <> short 'S' <> metavar "FILE" <> help "Save assembly source to FILE"))
+  BuildOpts
+    <$> some (argument str (metavar "FILES..." <> help "Input files (.sl / .s / .o, all of the same kind)"))
+    <*> option str (short 'o' <> metavar "OUTPUT" <> help "Output file name")
+    <*> modeParser
+    <*> optional (option str (short 'd' <> metavar "OUTDIR" <> help "Directory for intermediate files (kept after the build; default: system temporary directory, removed after the build)"))
+
+-- -S と -c は排他。どちらも無ければリンクまで行う
+modeParser :: Parser Mode
+modeParser =
+  flag' AsmOnly (short 'S' <> help "Compile only; output an assembly file (single input)")
+    <|> flag' ObjOnly (short 'c' <> help "Compile and assemble; output an object file (single input)")
+    <|> pure Link
 
 main :: IO ()
 main = do
@@ -32,15 +29,7 @@ main = do
             <> progDesc "A simple programming language compiler written in Haskell"
             <> header "simplang-haskell - x86-64 native code generator"
         )
-  source <- readFile (sourceFile opts)
-  let outDir = "output"
-      baseName = takeBaseName (sourceFile opts)
-      outPath = maybe (outDir </> baseName) id (outputFile opts)
-      asmPath = maybe (outDir </> (baseName ++ ".s")) id (asmFile opts)
-  case tokenize source >>= parse >>= compile of
+  result <- build opts
+  case result of
     Left err -> putStrLn ("Error: " ++ err) >> exitFailure
-    Right (fns, finalType, instrs) -> do
-      let asm = codegen fns finalType instrs
-      _ <- createDirectoryIfMissing True outDir
-      writeFile asmPath asm
-      callProcess "gcc" [asmPath, "-g", "-o", outPath]
+    Right () -> pure ()

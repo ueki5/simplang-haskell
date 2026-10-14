@@ -1,4 +1,4 @@
-module CodeGen (codegen) where
+module CodeGen (codegen, codegenModule) where
 
 import Compiler (Instr (..))
 import Data.List (mapAccumL)
@@ -12,24 +12,31 @@ import Parser (Signedness (..), Type (..), Width (..))
 -- -- print/putStrLn: IOモナド内
 -- import Debug.Trace (trace)
 
--- main以外の各fn（(名前, 命令列)）＋main（戻り値の型, 命令列）からアセンブリ全体を組み立てる。
--- .text/.globl main はファイル全体で一度だけ、各fnラベルはその後に、mainはmain:として
--- 最後に並べる（GASのラベル解決は出現順に依存しないため順序自体に意味はない）
+-- 単一ソースで完結するプログラム（mainあり）のアセンブリを組み立てる
 codegen :: [(String, [Instr])] -> Type -> [Instr] -> String
-codegen fns finalType mainInstrs =
+codegen fns finalType mainInstrs = codegenModule fns (Just (finalType, mainInstrs))
+
+-- main以外の各fn（(名前, 命令列)）＋mainがあれば（戻り値の型, 命令列）から1ソース分のアセンブリ全体を組み立てる。
+-- 各fnは他のオブジェクトファイルから呼べるよう .globl で公開する（mainも同様、mainが無いソースもある）。
+-- .text はファイル全体で一度だけ、各fnラベルはその後に、mainはmain:として
+-- 最後に並べる（GASのラベル解決は出現順に依存しないため順序自体に意味はない）
+codegenModule :: [(String, [Instr])] -> Maybe (Type, [Instr]) -> String
+codegenModule fns mainPart =
   unlines $
-    ["    .section .text", "    .globl main"]
+    ["    .section .text"]
       ++ concatMap genFn fns
-      ++ genMain
+      ++ maybe [] genMain mainPart
       ++ commonTail
  where
   genFn (name, instrs) =
-    (name ++ ":")
+    ("    .globl " ++ name)
+      : (name ++ ":")
       : prologueBody (frameSize instrs)
       ++ genBody instrs
       ++ epilogueRet
-  genMain =
-    "main:"
+  genMain (finalType, mainInstrs) =
+    "    .globl main"
+      : "main:"
       : prologueBody (frameSize mainInstrs)
       ++ genBody mainInstrs
       ++ epilogue finalType
