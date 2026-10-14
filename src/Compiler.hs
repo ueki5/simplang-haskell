@@ -1,4 +1,4 @@
-module Compiler (Instr (..), compile, run) where
+module Compiler (Instr (..), FnSigs, compile, compileModule, buildFnSigs, run) where
 
 import Control.Monad (foldM, when, zipWithM)
 import Control.Monad.Trans.Class (lift)
@@ -7,7 +7,7 @@ import Data.Int (Int32)
 import Data.Word (Word32, Word64)
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Parser (Expr (..), FnDecl (..), Program, Signedness (..), Stmt (..), Type (..), Width (..), intRepr)
+import Parser (Expr (..), FnDecl (..), Program (..), Signedness (..), Stmt (..), Type (..), Width (..), intRepr)
 
 -- -- Debug Printサンプル（pTraceShow: 純粋関数内, pTraceShowM: モナド内）
 -- import Debug.Pretty.Simple (pTraceShow, pTraceShowM)
@@ -174,23 +174,44 @@ type FnSigs = Map String ([Type], Type)
 maxParams :: Int
 maxParams = 6
 
--- [FnDecl]（Program）から命令を抽出する。
+-- 単一ソースで完結するプログラム（import しない）をコンパイルする。main は必須。
+-- 戻り値は (main以外のfnの命令列, mainの戻り値型, mainの命令列)
+compile :: Program -> Either String ([(String, [Instr])], Type, [Instr])
+compile (Program _ fnDecls) = do
+  validateFnShapes fnDecls
+  when (null [() | FnDecl "main" _ _ _ <- fnDecls]) $ Left "missing function: main"
+  (fns, mainPart) <- compileModule Map.empty fnDecls
+  case mainPart of
+    Just (mainType, mainInstrs) -> Right (fns, mainType, mainInstrs)
+    Nothing -> Left "missing function: main"
+
+-- 1ソース分の fn 定義列から命令を抽出する（複数ソースからのビルドの単位）。
+-- importedSigs は import したソースに定義された fn のシグネチャで、自ソースの fn と同様に呼び出せる
+-- （本体は別のオブジェクトファイルにあり、リンク時に解決される）。自ソースの fn と同名ならエラー。
 -- 各fnの本体は他の関数を一切参照しない独立スコープでコンパイルされ、
 -- ラベル採番用のカウンタ（CompileM）は全fnを通じて単一のものを共有する
 -- （同名ラベルの重複はアセンブル時に壊れるため）。
--- 戻り値は (main以外のfnの命令列, mainの戻り値型, mainの命令列)。mainは戻り値を表示して
--- 終了する特別な末尾（codegen側のepilogue）を持つため、他のfnとは分けて返す
-compile :: Program -> Either String ([(String, [Instr])], Type, [Instr])
-compile fnDecls = do
-  fnSigs <- buildFnSigs fnDecls
-  evalStateT (compileProgram fnSigs fnDecls) 0
+-- 戻り値は (main以外のfnの命令列, mainがあれば (mainの戻り値型, mainの命令列))。mainは戻り値を表示して
+-- 終了する特別な末尾（codegen側のepilogue）を持つため、他のfnとは分けて返す。
+-- main の有無はここでは検査しない（リンクする全ソースでちょうど1つあればよく、それはドライバが検査する）
+compileModule :: FnSigs -> [FnDecl] -> Either String ([(String, [Instr])], Maybe (Type, [Instr]))
+compileModule importedSigs0 fnDecls = do
+  ownSigs <- buildFnSigs fnDecls
+  -- import先の main は取り込まない（呼び出し不可であり、自ソースの main とも衝突させない）
+  let importedSigs = Map.delete "main" importedSigs0
+  case Map.keys (Map.intersection ownSigs importedSigs) of
+    (name : _) -> Left ("function already declared in imported file: " ++ name)
+    [] -> Right ()
+  evalStateT (compileProgram (Map.union ownSigs importedSigs) fnDecls) 0
 
-compileProgram :: FnSigs -> [FnDecl] -> CompileM ([(String, [Instr])], Type, [Instr])
+compileProgram :: FnSigs -> [FnDecl] -> CompileM ([(String, [Instr])], Maybe (Type, [Instr]))
 compileProgram fnSigs fnDecls = do
   fns <- mapM (compileFnDecl fnSigs) fnDecls
-  let mainInstrs = maybe [] id (lookup "main" fns)
-      (_, mainType) = fnSigs Map.! "main"
-  pure ([fn | fn@(name, _) <- fns, name /= "main"], mainType, mainInstrs)
+  let mainPart = do
+        mainInstrs <- lookup "main" fns
+        (_, mainType) <- Map.lookup "main" fnSigs
+        Just (mainType, mainInstrs)
+  pure ([fn | fn@(name, _) <- fns, name /= "main"], mainPart)
 
 -- if の分岐ラベル採番用のカウンタを持ち回るモナド。
 -- Env/cursor はブロックやif分岐を抜けるたびに「呼び出し前の値へ巻き戻す」必要がある一方、
@@ -531,11 +552,11 @@ addressOf fnSigs env (Deref e) = do
     other -> Left ("type mismatch: expected pointer, found " ++ typeName other)
 addressOf _ _ e = Left ("invalid operand for &: not an lvalue: " ++ show e)
 
--- 構造検証: 重複定義・最大引数数・mainの存在と引数なし（型の中身は見ない）
+-- 構造検証: 重複定義・最大引数数・mainの引数なし（型の中身は見ない。mainの存在は検査しない）
 validateFnShapes :: [FnDecl] -> Either String ()
 validateFnShapes fnDecls = do
-  seen <- foldM addSig Map.empty fnDecls
-  when (not (Map.member "main" seen)) $ Left "missing function: main"
+  _ <- foldM addSig Map.empty fnDecls
+  pure ()
   where
     addSig :: Map String () -> FnDecl -> Either String (Map String ())
     addSig seen (FnDecl name params _ _)

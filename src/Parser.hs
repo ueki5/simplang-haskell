@@ -1,4 +1,4 @@
-module Parser (Token (..), Expr (..), Stmt (..), FnDecl (..), Width (..), Signedness (..), Type (..), Program, intRepr, tokenize, parse) where
+module Parser (Token (..), Expr (..), Stmt (..), FnDecl (..), Width (..), Signedness (..), Type (..), Program (..), intRepr, tokenize, parse) where
 
 import Data.Char (isAlpha, isAlphaNum, isDigit, isSpace)
 import Data.List (stripPrefix)
@@ -19,6 +19,9 @@ data Token
   | TFalse
   | TFn
   | TReturn
+  | TImport
+  | -- 文字列リテラル `"..."`（import のパス指定にのみ使う。エスケープは無い）
+    TString String
   | TArrow
   | TComma
   | TColon
@@ -108,8 +111,13 @@ type Body = ([Stmt], Expr)
 data FnDecl = FnDecl String [(String, Type)] Type Body
   deriving (Show, Eq)
 
--- fn定義の列（main を含む。トップレベルにはfn定義しか書けない）
-type Program = [FnDecl]
+-- 1ソースファイル分のプログラム: 先頭の import の列（importを書いたソースからの相対パス）と fn 定義の列。
+-- main は任意（単体コンパイルでは無くてもよく、リンクする全ソースでちょうど1つあればよい）
+data Program = Program
+  { progImports :: [FilePath]
+  , progFns :: [FnDecl]
+  }
+  deriving (Show, Eq)
 
 -- 整数演算・変数のビット幅（codegenのレジスタ幅）
 data Width = W32 | W64 deriving (Show, Eq)
@@ -161,7 +169,12 @@ tokenize (c : cs)
             "fn" -> (TFn :) <$> tokenize rest
             "return" -> (TReturn :) <$> tokenize rest
             "as" -> (TAs :) <$> tokenize rest
+            "import" -> (TImport :) <$> tokenize rest
             _ -> (TIdent ident :) <$> tokenize rest
+  | c == '"' =
+      case break (\ch -> ch == '"' || ch == '\n') cs of
+        (str, '"' : rest) -> (TString str :) <$> tokenize rest
+        _ -> Left "unterminated string literal"
   | c == '+' = (TPlus :) <$> tokenize cs
   | c == '-' = (TMinus :) <$> tokenize cs
   | c == '*' = (TStar :) <$> tokenize cs
@@ -199,7 +212,8 @@ matchIntSuffix s
 
 -- Parser
 --
--- program    ::= fn-decl*（main を含む。トップレベルに文・式は書けない）
+-- program    ::= import-decl* fn-decl*（トップレベルに文・式は書けない。import はfn定義より前にのみ書ける）
+-- import-decl ::= 'import' STRING ';'
 -- fn-decl    ::= 'fn' IDENT '(' (IDENT ':' type (',' IDENT ':' type)*)? ')' ('->' type)? '{' stmt* expr? '}'
 --              （末尾式を省略した場合は () とする）
 -- stmt       ::= let-stmt | assign-stmt | place-assign-stmt | expr-stmt | block-stmt | if-stmt | while-stmt | break-stmt | continue-stmt | return-stmt
@@ -229,13 +243,29 @@ matchIntSuffix s
 
 type ParseResult a = Either String (a, [Token])
 
--- program ::= fn-decl*
+-- program ::= import-decl* fn-decl*
 parse :: [Token] -> Either String Program
-parse [] = Right []
-parse (TFn : rest) = do
+parse tokens = do
+  (imports, rest) <- parseImports tokens
+  Program imports <$> parseFnDecls rest
+
+-- import-decl ::= 'import' STRING ';'
+parseImports :: [Token] -> ParseResult [FilePath]
+parseImports (TImport : TString path : TSemicolon : rest) = do
+  (paths, rest') <- parseImports rest
+  Right (path : paths, rest')
+parseImports (TImport : TString _ : _) = Left "expected ';' after import"
+parseImports (TImport : _) = Left "expected string literal after import"
+parseImports tokens = Right ([], tokens)
+
+-- fn-decl*
+parseFnDecls :: [Token] -> Either String [FnDecl]
+parseFnDecls [] = Right []
+parseFnDecls (TFn : rest) = do
   (fnDecl, rest') <- parseFnDecl rest
-  (fnDecl :) <$> parse rest'
-parse (t : _) = Left ("expected 'fn' at top level, got: " ++ show t)
+  (fnDecl :) <$> parseFnDecls rest'
+parseFnDecls (TImport : _) = Left "import must appear before function definitions"
+parseFnDecls (t : _) = Left ("expected 'fn' at top level, got: " ++ show t)
 
 -- fn定義（先頭の'fn'は呼び出し側で消費済み）
 parseFnDecl :: [Token] -> ParseResult FnDecl

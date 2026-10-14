@@ -1,14 +1,19 @@
 module Main where
 
-import Compiler (Instr (..), compile, run)
+import Compiler (Instr (..), compile, compileModule, run)
 import Data.Either (isLeft, isRight)
-import Parser (Expr (..), FnDecl (..), Program, Signedness (..), Stmt (..), Token (..), Type (..), Width (..), parse, tokenize)
+import Parser (Expr (..), FnDecl (..), Program (..), Signedness (..), Stmt (..), Token (..), Type (..), Width (..), parse, tokenize)
+import Control.Exception (bracket)
+import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
-import System.FilePath ((</>))
+import System.FilePath (takeDirectory, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readProcess, readProcessWithExitCode)
 import Test.Hspec
-import CodeGen (codegen)
+import CodeGen (codegen, codegenModule)
+import qualified Data.Map as Map
+import Driver (BuildOpts (BuildOpts), Mode (..), build)
+import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
 
 main :: IO ()
 main = hspec $ do
@@ -1724,9 +1729,9 @@ main = hspec $ do
     let parseProgram src = tokenize src >>= parse
     it "トップレベルはfn定義の列" $
       parseProgram "fn f() -> i64 { 1 }\nfn main() -> i64 { f() }"
-        `shouldBe` Right [FnDecl "f" [] (TyInt Signed W64) ([], Lit 1), FnDecl "main" [] (TyInt Signed W64) ([], Call "f" [])]
+        `shouldBe` Right (Program [] [FnDecl "f" [] (TyInt Signed W64) ([], Lit 1), FnDecl "main" [] (TyInt Signed W64) ([], Call "f" [])])
     it "空のプログラムはfn定義0個（mainの有無はcompile側で検査）" $
-      parseProgram "" `shouldBe` Right []
+      parseProgram "" `shouldBe` Right (Program [] [])
     it "トップレベルの文はエラー" $
       parseProgram "let x = 1;\nfn main() { x }" `shouldBe` Left "expected 'fn' at top level, got: TLet"
     it "トップレベルの式はエラー" $
@@ -1790,9 +1795,150 @@ main = hspec $ do
       result <- compileSourceAndRun "fn main() -> &[i64; 2] {\nlet a = [1, 2];\nif a[0] == 1 {\nreturn &a;\n}\n&a\n}"
       take 2 result `shouldBe` "0x"
 
+  describe "import（tokenize/parse）" $ do
+    let parseProgram src = tokenize src >>= parse
+    it "import予約語と文字列リテラルを変換する" $
+      tokenize "import \"lib/util.sl\";" `shouldBe` Right [TImport, TString "lib/util.sl", TSemicolon]
+    it "閉じられていない文字列リテラルはエラー" $
+      tokenize "import \"lib/util.sl;" `shouldBe` Left "unterminated string literal"
+    it "文字列リテラルの途中の改行はエラー" $
+      tokenize "import \"lib\n\";" `shouldBe` Left "unterminated string literal"
+    it "importの列とfn定義の列をパースする" $
+      parseProgram "import \"a.sl\";\nimport \"lib/b.sl\";\nfn main() {}"
+        `shouldBe` Right (Program ["a.sl", "lib/b.sl"] [FnDecl "main" [] TUnit ([], UnitLit)])
+    it "importの後に;が無いとエラー" $
+      parseProgram "import \"a.sl\"\nfn main() {}" `shouldBe` Left "expected ';' after import"
+    it "importのパスが文字列リテラルでないとエラー" $
+      parseProgram "import a;" `shouldBe` Left "expected string literal after import"
+    it "fn定義の後のimportはエラー" $
+      parseProgram "fn main() {}\nimport \"a.sl\";" `shouldBe` Left "import must appear before function definitions"
+
+  describe "import したfnの呼び出し（compileModule）" $ do
+    let importedSigs = Map.fromList [("add", ([TyInt Signed W64, TyInt Signed W64], TyInt Signed W64))]
+        compileWith sigs src = tokenize src >>= parse >>= compileModule sigs . progFns
+    it "importしたfnを呼び出せる" $
+      (\(_, mainPart) -> fmap fst mainPart) <$> compileWith importedSigs "fn main() -> i64 { add(1, 2) }"
+        `shouldBe` Right (Just (TyInt Signed W64))
+    it "importしたfnの呼び出しもシグネチャで型を検査する" $
+      compileWith importedSigs "fn main() -> i32 { add(1, 2) }" `shouldBe` Left "type mismatch: expected i32, found i64"
+    it "importしていないfnの呼び出しはエラー" $
+      compileWith Map.empty "fn main() -> i64 { add(1, 2) }" `shouldBe` Left "undeclared function: add"
+    it "自ソースのfnとimportしたfnが同名だとエラー" $
+      compileWith importedSigs "fn add(a: i64, b: i64) -> i64 { a }\nfn main() {}"
+        `shouldBe` Left "function already declared in imported file: add"
+    it "import先のmainは取り込まない" $
+      compileWith (Map.fromList [("main", ([], TUnit))]) "fn main() {}" `shouldSatisfy` isRight
+    it "mainが無くてもコンパイルできる" $
+      (\(fns, mainPart) -> (map fst fns, fmap fst mainPart)) <$> compileWith Map.empty "fn f() -> i64 { 1 }"
+        `shouldBe` Right (["f"], Nothing)
+
+  describe "codegenModule" $ do
+    it "各fnを.globlで公開する" $
+      codegenModule [("add", [Push 1])] Nothing `shouldContain` ".globl add"
+    it "mainが無ければmainを出力しない" $
+      codegenModule [("add", [Push 1])] Nothing `shouldNotContain` "main"
+    it "mainがあれば.globl mainとmain:を出力する" $
+      codegenModule [] (Just (TUnit, [])) `shouldContain` ".globl main\nmain:"
+
+  describe "複数ソースからのビルド（Driver）" $ do
+    it "importしたソースを再帰的にコンパイルしてリンクする" $
+      withSources multiSources $ \dir -> do
+        result <- build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link (Just (dir </> "out")))
+        result `shouldBe` Right ()
+        readProcess (dir </> "prog") [] "" `shouldReturn` "10\n"
+    it "-dを指定すると中間ファイルを残す" $
+      withSources multiSources $ \dir -> do
+        _ <- build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link (Just (dir </> "out")))
+        files <- listDirectory (dir </> "out")
+        all (`elem` files) ["main.s", "main.o", "util.s", "util.o", "math.s", "math.o"] `shouldBe` True
+    it "-dを指定しなければテンポラリディレクトリの中間ファイルを削除する" $
+      withSources multiSources $ \dir -> do
+        let tmp = dir </> "tmp"
+        createDirectoryIfMissing True tmp
+        result <- withTmpDir tmp (build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing))
+        result `shouldBe` Right ()
+        listDirectory tmp `shouldReturn` []
+        readProcess (dir </> "prog") [] "" `shouldReturn` "10\n"
+    it "エラーで終わった場合も中間ファイルを削除する" $
+      withSources [("main.sl", "import \"util.sl\";\nfn main() -> i64 { 1 }"), ("util.sl", "fn f() -> i64 { true }")] $ \dir -> do
+        let tmp = dir </> "tmp"
+        createDirectoryIfMissing True tmp
+        result <- withTmpDir tmp (build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing))
+        result `shouldSatisfy` isLeft
+        listDirectory tmp `shouldReturn` []
+    it "-S → -c（.s入力）→ .oのリンクを段階的に行う" $
+      withSources multiSources $ \dir -> do
+        let step opts = build opts `shouldReturn` Right ()
+        step (BuildOpts [dir </> "lib/math.sl"] (dir </> "math.s") AsmOnly Nothing)
+        step (BuildOpts [dir </> "math.s"] (dir </> "math.o") ObjOnly Nothing)
+        step (BuildOpts [dir </> "lib/util.sl"] (dir </> "util.o") ObjOnly Nothing)
+        step (BuildOpts [dir </> "main.sl"] (dir </> "main.o") ObjOnly Nothing)
+        step (BuildOpts [dir </> "math.o", dir </> "util.o", dir </> "main.o"] (dir </> "prog") Link Nothing)
+        readProcess (dir </> "prog") [] "" `shouldReturn` "10\n"
+    it "-Sはmainの無いソースもコンパイルできる" $
+      withSources multiSources $ \dir -> do
+        build (BuildOpts [dir </> "lib/util.sl"] (dir </> "util.s") AsmOnly Nothing) `shouldReturn` Right ()
+        doesFileExist (dir </> "util.s") `shouldReturn` True
+    it "importのimport先のfnは呼び出せない（再帰的に取り込まない）" $
+      withSources (("main.sl", "import \"lib/util.sl\";\nfn main() -> i64 { mul(2, 3) }") : drop 1 multiSources) $ \dir -> do
+        result <- build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing)
+        result `shouldBe` Left (dir </> "main.sl" ++ ": undeclared function: mul")
+    it "importが循環していてもビルドできる" $
+      withSources
+        [ ("main.sl", "import \"a.sl\";\nfn main() -> i64 { f(3) }")
+        , ("a.sl", "import \"main.sl\";\nimport \"b.sl\";\nfn f(n: i64) -> i64 { g(n) }")
+        , ("b.sl", "import \"a.sl\";\nfn g(n: i64) -> i64 { if n > 0 { return f(n - 1) + 1; }\n0 }")
+        ]
+        $ \dir -> do
+          build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Right ()
+          readProcess (dir </> "prog") [] "" `shouldReturn` "3\n"
+    it "importしたソース同士で同名のfnがあるとエラー" $
+      withSources
+        [ ("main.sl", "import \"a.sl\";\nimport \"b.sl\";\nfn main() {}")
+        , ("a.sl", "fn f() {}")
+        , ("b.sl", "fn f() {}")
+        ]
+        $ \dir -> do
+          result <- build (BuildOpts [dir </> "main.sl"] (dir </> "main.s") AsmOnly Nothing)
+          result `shouldBe` Left (dir </> "main.sl: function f is defined in both " ++ dir </> "a.sl and " ++ dir </> "b.sl")
+    it "存在しないファイルのimportはエラー" $
+      withSources [("main.sl", "import \"nothing.sl\";\nfn main() {}")] $ \dir -> do
+        result <- build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing)
+        result `shouldBe` Left (dir </> "main.sl: imported file not found: nothing.sl")
+    it "リンクする全ソースでmainが無いとエラー" $
+      withSources multiSources $ \dir ->
+        build (BuildOpts [dir </> "lib/util.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Left "missing function: main"
+    it "リンクする全ソースでmainが複数あるとエラー" $
+      withSources [("a.sl", "fn main() {}"), ("b.sl", "fn main() {}")] $ \dir -> do
+        result <- build (BuildOpts [dir </> "a.sl", dir </> "b.sl"] (dir </> "prog") Link Nothing)
+        result `shouldBe` Left ("function main is defined in multiple files: " ++ dir </> "a.sl " ++ dir </> "b.sl")
+    it "リンクする全ソースでfnが重複するとエラー" $
+      withSources [("a.sl", "fn main() {}\nfn f() {}"), ("b.sl", "fn f() {}")] $ \dir -> do
+        result <- build (BuildOpts [dir </> "a.sl", dir </> "b.sl"] (dir </> "prog") Link Nothing)
+        result `shouldBe` Left ("function f is defined in both " ++ dir </> "a.sl and " ++ dir </> "b.sl")
+    it "別ディレクトリの同名ソースは中間ファイル名が衝突するのでエラー" $
+      withSources [("main.sl", "import \"x/u.sl\";\nimport \"y/u.sl\";\nfn main() {}"), ("x/u.sl", "fn f() {}"), ("y/u.sl", "fn g() {}")] $ \dir -> do
+        result <- build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing)
+        result `shouldBe` Left ("intermediate file name conflict: " ++ dir </> "x/u.sl and " ++ dir </> "y/u.sl")
+    it "入力ファイルの種類が混在するとエラー" $
+      build (BuildOpts ["a.sl", "b.s"] "prog" Link Nothing)
+        `shouldReturn` Left "input files of different kinds (.sl/.s/.o) cannot be mixed"
+    it "未知の拡張子はエラー" $
+      build (BuildOpts ["a.c"] "prog" Link Nothing) `shouldReturn` Left "unknown input file type (expected .sl/.s/.o): a.c"
+    it "-S/-cに複数の入力を指定するとエラー" $
+      build (BuildOpts ["a.sl", "b.sl"] "a.s" AsmOnly Nothing) `shouldReturn` Left "-S/-c accept only one input file"
+    it "-Sの入力がソースでないとエラー" $
+      build (BuildOpts ["a.s"] "b.s" AsmOnly Nothing) `shouldReturn` Left "-S requires a source file (.sl)"
+    it "-cの入力がオブジェクトだとエラー" $
+      build (BuildOpts ["a.o"] "b.o" ObjOnly Nothing)
+        `shouldReturn` Left "-c requires a source file (.sl) or an assembly file (.s)"
+    it "存在しない入力ファイルはエラー" $
+      withSystemTempDirectory "hs024" $ \dir ->
+        build (BuildOpts [dir </> "none.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Left ("no such file: " ++ dir </> "none.sl")
+
 -- パース結果を (main以外のfn定義, mainの文の列, mainの末尾式) に分解する（main が無ければテスト失敗）
 splitMain :: Program -> ([FnDecl], [Stmt], Expr)
-splitMain prog =
+splitMain (Program _ prog) =
   case [body | FnDecl "main" _ _ body <- prog] of
     [(stmts, e)] -> ([d | d@(FnDecl name _ _ _) <- prog, name /= "main"], stmts, e)
     _ -> error "splitMain: expected exactly one main"
@@ -1806,7 +1952,7 @@ compileAndRun retTy expr =
   withSystemTempDirectory "hs006" $ \tmpDir -> do
     let asmPath = tmpDir </> "out.s"
         binPath = tmpDir </> "out"
-    case compile [FnDecl "main" [] retTy ([], expr)] of
+    case compile (Program [] [FnDecl "main" [] retTy ([], expr)]) of
       Left err -> error ("compile failed: " ++ err)
       Right (fns, finalType, instrs) -> do
         writeFile asmPath (codegen fns finalType instrs)
@@ -1835,3 +1981,31 @@ compileSourceAndRunExit :: String -> IO (ExitCode, String)
 compileSourceAndRunExit = buildAndRun $ \binPath -> do
   (code, out, _err) <- readProcessWithExitCode binPath [] ""
   return (code, takeWhile (/= '\n') out)
+
+-- 複数ソースのビルドのテスト用: main.sl → lib/util.sl → lib/math.sl の順に import する（main の値は 10）
+multiSources :: [(FilePath, String)]
+multiSources =
+  [ ("main.sl", "import \"lib/util.sl\";\nfn main() -> i64 { add(sq(3), 1) }")
+  , ("lib/util.sl", "import \"math.sl\";\nfn add(a: i64, b: i64) -> i64 { a + b }\nfn sq(x: i64) -> i64 { mul(x, x) }")
+  , ("lib/math.sl", "fn mul(a: i64, b: i64) -> i64 { a * b }")
+  ]
+
+-- 一時ディレクトリにソース群を書き出してから action を実行する
+withSources :: [(FilePath, String)] -> (FilePath -> IO a) -> IO a
+withSources files action =
+  withSystemTempDirectory "hs024" $ \dir -> do
+    mapM_
+      ( \(path, src) -> do
+          createDirectoryIfMissing True (takeDirectory (dir </> path))
+          writeFile (dir </> path) src
+      )
+      files
+    action dir
+
+-- システムのテンポラリディレクトリ（TMPDIR）を一時的に差し替えて action を実行する
+withTmpDir :: FilePath -> IO a -> IO a
+withTmpDir tmp action =
+  bracket
+    (lookupEnv "TMPDIR" <* setEnv "TMPDIR" tmp)
+    (maybe (unsetEnv "TMPDIR") (setEnv "TMPDIR"))
+    (const action)
