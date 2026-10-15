@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同じブランチ・PR への新しい push があれば、古い実行は取り消す
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # GHC のバージョンは cabal.project の with-compiler を唯一の情報源とする
+      - name: Read GHC version from cabal.project
+        id: ghc
+        run: |
+          version=$(sed -n 's/^with-compiler:[[:space:]]*ghc-//p' cabal.project)
+          test -n "$version" || { echo "::error::with-compiler not found in cabal.project"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # cabal-install の下限は .cabal の cabal-version が決めるため、最新版を使う
+      - uses: haskell-actions/setup@v2
+        id: setup
+        with:
+          ghc-version: ${{ steps.ghc.outputs.version }}
+          cabal-version: latest
+
+      - name: Generate build plan
+        run: |
+          cabal update
+          cabal build all --enable-tests --dry-run
+
+      # 依存パッケージのビルド結果（cabal store）を、ビルドプランのハッシュをキーにキャッシュする
+      - name: Restore cabal store
+        uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: ${{ steps.setup.outputs.cabal-store }}
+          key: cabal-store-${{ runner.os }}-ghc-${{ steps.ghc.outputs.version }}-${{ hashFiles('dist-newstyle/cache/plan.json') }}
+          restore-keys: cabal-store-${{ runner.os }}-ghc-${{ steps.ghc.outputs.version }}-
+
+      - name: Build dependencies
+        run: cabal build all --enable-tests --only-dependencies
+
+      # 依存パッケージのビルド直後に保存し、本体のビルドやテストが失敗してもキャッシュを残す
+      - name: Save cabal store
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.setup.outputs.cabal-store }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      - name: Build
+        run: cabal build all --enable-tests
+
+      # 結合テストはランナーに入っている gcc でアセンブル・リンクして実行する
+      - name: Test
+        run: cabal test all --test-show-details=direct
