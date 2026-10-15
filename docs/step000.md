@@ -1,5 +1,7 @@
 # simplang-haskell アプリケーション仕様
 
+> **注記**: 本書は最初期（四則演算のみ）の仕様。現在の仕様は `docs/language.md`・`docs/architecture.md`・`docs/cli.md` を参照。
+
 算術式を入力として x86-64 ネイティブバイナリを生成するコンパイラ。
 Haskell で実装されており、GCC をリンカとして利用する。
 

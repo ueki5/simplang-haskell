@@ -1,5 +1,7 @@
 # to_i64/to_i32 単項演算子の導入における設計上の考慮点
 
+> **注記**: `to_i64`/`to_i32` は step017 で撤回し、キャスト `as` に置き換えた（`docs/step017.md`）。
+
 `docs/step003.md` で `bool` 型と比較演算子を追加した際、`compileExprTyped :: Env -> Type -> Expr -> Either String [Instr]` の「期待する型（`expected`）を式木全体に一様伝播させる」という前提が `Eq`/`Neq`（被演算子の型が `expected` とは独立に決まる）によって初めて崩れた。今回追加する `to_i64`/`to_i32` は、この非対称性がさらに単純な形で再び現れるケースである。
 
 ## 0. 方針として確定した事項
