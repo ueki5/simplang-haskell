@@ -164,6 +164,14 @@ data Instr  = Push Int | IAdd Width | ... | ICall String Int | IPop   -- スタ�
 
 結合テスト・Driver のテストは `withSystemTempDirectory` で一時ディレクトリを管理する。
 
+### CI
+
+GitHub Actions（`.github/workflows/ci.yml`）が、`main` への push・PR・手動実行のたびに `ubuntu-latest` 上でビルドとテストを実行する。
+
+- GHC のバージョンは `cabal.project` の `with-compiler` から読み取る（CI 側には書かない。GHC を上げるときは `cabal.project` だけを変える）。cabal-install は最新版
+- 依存パッケージのビルド結果（cabal store）を、GHC のバージョンとビルドプラン（`plan.json`）のハッシュをキーにキャッシュする
+- 結合テストはランナーに入っている gcc で実行する
+
 ## 10. 依存パッケージ
 
 | パッケージ | 用途 |

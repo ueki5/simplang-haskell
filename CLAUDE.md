@@ -28,7 +28,7 @@ cabal run simplang-haskell -- FILES... -o OUTPUT [-S|-c] [-d OUTDIR]   # 実行
    - `1. 考慮点`：検討した論点・代替案と、その結論の理由
    - 構文・AST / コンパイラ・コード生成 / 移行（既存のテスト・サンプルへの影響）など、変更範囲に応じた節
    - `スコープ外（将来の課題）`：見送った事項
-3. **実装とテスト**：`test/Spec.hs` にテストを追加する。新しい構文・型には、parse・compile・意味論エラー・結合テスト（gcc で実行して出力を検証）を揃える。`cabal test` がすべて通ること
+3. **実装とテスト**：`test/Spec.hs` にテストを追加する。新しい構文・型には、parse・compile・意味論エラー・結合テスト（gcc で実行して出力を検証）を揃える。`cabal test` がすべて通ること。PR では GitHub Actions の CI（`.github/workflows/ci.yml`）が通ることも確認する
 4. **ドキュメントの更新**（実装と同じコミットに含める）
    - `docs/language.md` / `docs/architecture.md` / `docs/cli.md` を変更後の状態に合わせる
    - `docs/backlog.md`：見送った課題を追記し、実現した課題は「実現済み」へ移す
