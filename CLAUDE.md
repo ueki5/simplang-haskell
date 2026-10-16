@@ -15,6 +15,7 @@ Rust に似た小さな言語（simplang）を x86-64 アセンブリへコン�
 cabal build                                                    # ビルド
 cabal test                                                     # テスト（Hspec。結合テストは gcc を使う）
 cabal run simplang-haskell -- FILES... -o OUTPUT [-S|-c] [-d OUTDIR]   # 実行
+ormolu --mode inplace $(git ls-files '*.hs')                   # 整形（devShell の ormolu。初回は direnv allow）
 ```
 
 ## 作業の進め方
@@ -53,6 +54,7 @@ cabal run simplang-haskell -- FILES... -o OUTPUT [-S|-c] [-d OUTDIR]   # 実行
 
 - 既存のコードに合わせる：コメントは日本語、エラーメッセージは英語の小文字始まり（`type mismatch: expected i64, found i32` の形式）
 - `-Wall` の警告を出さない
+- コードは ormolu で整形する。Claude Code が書いた `.hs` は hook が自動で整形する（仕組みと版の変え方は `docs/architecture.md` の「開発環境と整形」）
 - 整数型の判定・命令選択は `TyInt` へ直接マッチせず `intRepr` を経由する
 - `test/Spec.hs` の `describe` は「機能名（段階）」の形で日本語で書く（例：`配列・usize（意味論エラー）`、`compile + codegen + gcc（配列の結合テスト）`）
 - 一時ファイルを使うテストは `withSystemTempDirectory` で一時ディレクトリを管理する

@@ -43,3 +43,4 @@
 | [step024](step024.md) | 複数ソースファイルからのビルド（`import`・`-S`/`-c`/リンク） |
 | [step025](step025.md) | ドキュメント構成の見直し（全体像を docs へ移し、CLAUDE.md を作業規約に限定） |
 | [step026](step026.md) | GitHub Actions による CI の導入 |
+| [step027](step027.md) | ormolu によるコード整形の導入（エディタ・Claude Code・CI で版を揃える） |

@@ -171,6 +171,7 @@ GitHub Actions（`.github/workflows/ci.yml`）が、`main` への push・PR・�
 - GHC のバージョンは `cabal.project` の `with-compiler` から読み取る（CI 側には書かない。GHC を上げるときは `cabal.project` だけを変える）。cabal-install は最新版
 - 依存パッケージのビルド結果（cabal store）を、GHC のバージョンとビルドプラン（`plan.json`）のハッシュをキーにキャッシュする
 - 結合テストはランナーに入っている gcc で実行する
+- 別のジョブ（`format`）で Nix を入れ、devShell の ormolu で整形を検査する（`ormolu --mode check`）。ormolu の版は ci.yml に書かず `flake.lock` から決まる
 
 ## 10. 依存パッケージ
 
@@ -182,3 +183,33 @@ GitHub Actions（`.github/workflows/ci.yml`）が、`main` への push・PR・�
 | `containers` | `Env`・`FnSigs` の `Map` |
 | `transformers` | `StateT`（ラベル番号）、`ExceptT`（ドライバのエラー伝播） |
 | `hspec` / `temporary` | テスト専用 |
+
+## 11. 開発環境と整形
+
+GHC・cabal・HLS は ghcup で管理する（GHC の版は `cabal.project` の `with-compiler`）。
+コードの整形は ormolu で行い、その版は `flake.nix` の devShell（`ormolu` だけを含む）と `flake.lock` で固定する。
+
+| 使う場面 | 整形の仕組み |
+|---|---|
+| エディタ（nvim・VS Code） | HLS の設定 `haskell.plugin.ormolu.config.external = true` で、HLS 内蔵ではなく PATH の `ormolu` を使わせ、保存時に整形する（設定は各自のエディタ側で行う） |
+| Claude Code | `.claude/settings.json` の PostToolUse hook（`Write`・`Edit`）が `.claude/hooks/ormolu.sh` を実行し、書いた `.hs` を整形する。ormolu は `direnv exec` で devShell から取る。見つからなければ利用者にエラーを示し、構文エラーで整形できなければ内容を Claude に返す |
+| CI | `format` ジョブで `nix develop --command ormolu --mode check`（9. テストの CI の節） |
+
+- 初回は、プロジェクトで `direnv allow` を実行する（`.envrc` の `use flake` により、nix-direnv が devShell の PATH を載せる）。VS Code は direnv 拡張（`mkhl.direnv`）で PATH を受け取る
+- 全ファイルの整形：`ormolu --mode inplace $(git ls-files '*.hs')`
+- 整形だけのコミットは `.git-blame-ignore-revs` に登録し、`git blame` が飛ばすようにする（ローカルでは `git config blame.ignoreRevsFile .git-blame-ignore-revs`）
+
+### ormolu の版を変えるとき
+
+`flake.nix` / `flake.lock` だけを変える（hook・エディタの設定・ci.yml は変えない）。
+
+| 変えたい版 | 方法 |
+|---|---|
+| nixpkgs の最新の版 | `nix flake update` |
+| nixpkgs にある別の版（`haskellPackages.ormolu_0_7_4_0` など） | `flake.nix` で `pkgs.ormolu` を差し替える |
+| nixpkgs に無い版 | その版を含む nixpkgs のリビジョンを別の入力として固定する、または `haskellPackages.callHackage` で Hackage からビルドする |
+
+1. `flake.nix` / `flake.lock` の更新をコミットする
+2. 全 `.hs` を整形し直し、整形だけのコミットを作る
+3. 2 のハッシュを `.git-blame-ignore-revs` に追記する
+4. 起動中のエディタは古い PATH を持ち続けるため、再起動する
