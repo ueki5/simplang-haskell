@@ -114,8 +114,8 @@ data FnDecl = FnDecl String [(String, Type)] Type Body
 -- 1ソースファイル分のプログラム: 先頭の import の列（importを書いたソースからの相対パス）と fn 定義の列。
 -- main は任意（単体コンパイルでは無くてもよく、リンクする全ソースでちょうど1つあればよい）
 data Program = Program
-  { progImports :: [FilePath]
-  , progFns :: [FnDecl]
+  { progImports :: [FilePath],
+    progFns :: [FnDecl]
   }
   deriving (Show, Eq)
 
@@ -206,9 +206,9 @@ matchIntSuffix s
   | Just rest <- stripPrefix "u32" s, boundary rest = Just (TyInt Unsigned W32, rest)
   | Just rest <- stripPrefix "usize" s, boundary rest = Just (TUsize, rest)
   | otherwise = Nothing
- where
-  boundary (ch : _) = not (isAlphaNum ch || ch == '_')
-  boundary [] = True
+  where
+    boundary (ch : _) = not (isAlphaNum ch || ch == '_')
+    boundary [] = True
 
 -- Parser
 --

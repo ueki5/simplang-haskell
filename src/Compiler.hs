@@ -4,9 +4,9 @@ import Control.Monad (foldM, when, zipWithM)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.State (StateT, evalStateT, get, put)
 import Data.Int (Int32)
-import Data.Word (Word32, Word64)
 import Data.Map (Map)
 import qualified Data.Map as Map
+import Data.Word (Word32, Word64)
 import Parser (Expr (..), FnDecl (..), Program (..), Signedness (..), Stmt (..), Type (..), Width (..), intRepr)
 
 -- -- Debug Printサンプル（pTraceShow: 純粋関数内, pTraceShowM: モナド内）

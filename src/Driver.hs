@@ -20,10 +20,10 @@ import System.Process (readProcessWithExitCode)
 data Mode = AsmOnly | ObjOnly | Link deriving (Show, Eq)
 
 data BuildOpts = BuildOpts
-  { inputs :: [FilePath]
-  , output :: FilePath
-  , mode :: Mode
-  , -- 中間ファイルの出力先（-d）。Nothing ならシステムのテンポラリディレクトリに作り、終了時に削除する
+  { inputs :: [FilePath],
+    output :: FilePath,
+    mode :: Mode,
+    -- 中間ファイルの出力先（-d）。Nothing ならシステムのテンポラリディレクトリに作り、終了時に削除する
     outDir :: Maybe FilePath
   }
   deriving (Show, Eq)
@@ -35,9 +35,9 @@ type BuildM = ExceptT String IO
 
 -- ソースの読み込み結果（表示用のパス, 重複判定用の正規化パス, プログラム）
 data Module = Module
-  { modPath :: FilePath
-  , modCanonical :: FilePath
-  , modProgram :: Program
+  { modPath :: FilePath,
+    modCanonical :: FilePath,
+    modProgram :: Program
   }
 
 -- 入力ファイル群をビルドする。中間ファイルは出力ディレクトリに「basename + 拡張子」で作り、
@@ -49,10 +49,10 @@ build opts = do
   let keep = isJust (outDir opts)
       cleanup = unless keep $ readIORef created >>= mapM_ removeIfExists
   (runExceptT (buildWith opts dir created) `finally` cleanup)
- where
-  removeIfExists path = do
-    exists <- doesFileExist path
-    when exists (removeFile path)
+  where
+    removeIfExists path = do
+      exists <- doesFileExist path
+      when exists (removeFile path)
 
 buildWith :: BuildOpts -> FilePath -> IORef [FilePath] -> BuildM ()
 buildWith opts dir created = do
@@ -114,12 +114,12 @@ classifyInputs m paths = do
     (AsmOnly, _) -> Left "-S requires a source file (.sl)"
     (ObjOnly, Obj) -> Left "-c requires a source file (.sl) or an assembly file (.s)"
     _ -> Right kind
- where
-  classify path = case takeExtension path of
-    ".sl" -> Right Source
-    ".s" -> Right Asm
-    ".o" -> Right Obj
-    _ -> Left ("unknown input file type (expected .sl/.s/.o): " ++ path)
+  where
+    classify path = case takeExtension path of
+      ".sl" -> Right Source
+      ".s" -> Right Asm
+      ".o" -> Right Obj
+      _ -> Left ("unknown input file type (expected .sl/.s/.o): " ++ path)
 
 -- 中間ファイルの名前は元のディレクトリを考慮しない（basenameのみ）ため、別ディレクトリの同名ファイルは衝突する
 checkIntermediates :: [(FilePath, FilePath)] -> BuildM ()
@@ -129,10 +129,10 @@ checkIntermediates units = do
     pure (c, src)
   _ <- foldM addUnit Map.empty canon
   pure ()
- where
-  addUnit seen (c, src) = case Map.lookup c seen of
-    Just other | other /= src -> throwE ("intermediate file name conflict: " ++ other ++ " and " ++ src)
-    _ -> pure (Map.insert c src seen)
+  where
+    addUnit seen (c, src) = case Map.lookup c seen of
+      Just other | other /= src -> throwE ("intermediate file name conflict: " ++ other ++ " and " ++ src)
+      _ -> pure (Map.insert c src seen)
 
 -- 1ソースをコンパイルしてアセンブリを返す。直接 import したソースのfnのシグネチャだけを取り込む
 compileSource :: FilePath -> BuildM String
@@ -174,28 +174,28 @@ importedSigs m = do
     pure (modPath im, Map.delete "main" sigs)
   owners <- foldM addSigs Map.empty sigsPerFile
   pure (Map.map snd owners)
- where
-  addSigs owners (path, sigs) =
-    foldM
-      ( \acc (name, sig) -> case Map.lookup name acc of
-          Just (other, _) -> throwE (modPath m ++ ": function " ++ name ++ " is defined in both " ++ other ++ " and " ++ path)
-          Nothing -> pure (Map.insert name (path, sig) acc)
-      )
-      owners
-      (Map.toList sigs)
+  where
+    addSigs owners (path, sigs) =
+      foldM
+        ( \acc (name, sig) -> case Map.lookup name acc of
+            Just (other, _) -> throwE (modPath m ++ ": function " ++ name ++ " is defined in both " ++ other ++ " and " ++ path)
+            Nothing -> pure (Map.insert name (path, sig) acc)
+        )
+        owners
+        (Map.toList sigs)
 
 -- コンパイル〜リンク一括処理の対象となるソースを、入力から import を再帰的にたどって集める
 -- （同じファイルは1回だけ。importが循環していても、共有するのはシグネチャだけなので問題ない）
 collectSources :: [FilePath] -> BuildM [Module]
 collectSources roots = reverse <$> foldM visit [] roots
- where
-  visit acc path = do
-    m <- loadModule path
-    if any ((== modCanonical m) . modCanonical) acc
-      then pure acc
-      else do
-        imports <- resolveImports m
-        foldM visit (m : acc) imports
+  where
+    visit acc path = do
+      m <- loadModule path
+      if any ((== modCanonical m) . modCanonical) acc
+        then pure acc
+        else do
+          imports <- resolveImports m
+          foldM visit (m : acc) imports
 
 -- リンクする全ソースを通した検査: fn名の重複（リンカより分かりやすいメッセージにする）と main がちょうど1つあること
 checkLinkUnits :: [Module] -> BuildM ()
@@ -206,18 +206,18 @@ checkLinkUnits mods = do
     [] -> throwE "missing function: main"
     [_] -> pure ()
     _ -> throwE ("function main is defined in multiple files: " ++ unwords mains)
- where
-  fnNames m = nub [name | FnDecl name _ _ _ <- progFns (modProgram m)]
-  addFns owners m =
-    foldM
-      ( \acc name -> case Map.lookup name acc of
-          Just other
-            | name == "main" -> pure acc
-            | otherwise -> throwE ("function " ++ name ++ " is defined in both " ++ other ++ " and " ++ modPath m)
-          Nothing -> pure (Map.insert name (modPath m) acc)
-      )
-      owners
-      (fnNames m)
+  where
+    fnNames m = nub [name | FnDecl name _ _ _ <- progFns (modProgram m)]
+    addFns owners m =
+      foldM
+        ( \acc name -> case Map.lookup name acc of
+            Just other
+              | name == "main" -> pure acc
+              | otherwise -> throwE ("function " ++ name ++ " is defined in both " ++ other ++ " and " ++ modPath m)
+            Nothing -> pure (Map.insert name (modPath m) acc)
+        )
+        owners
+        (fnNames m)
 
 assemble :: FilePath -> FilePath -> BuildM ()
 assemble asmPath objPath = gcc ["-c", asmPath, "-g", "-o", objPath]
@@ -248,10 +248,10 @@ io action = do
     Left e -> throwE (show (e :: IOException))
     Right a -> pure a
 
-dedupeBy :: Eq k => (a -> k) -> [a] -> [a]
+dedupeBy :: (Eq k) => (a -> k) -> [a] -> [a]
 dedupeBy key = go []
- where
-  go _ [] = []
-  go seen (x : xs)
-    | key x `elem` seen = go seen xs
-    | otherwise = x : go (key x : seen) xs
+  where
+    go _ [] = []
+    go seen (x : xs)
+      | key x `elem` seen = go seen xs
+      | otherwise = x : go (key x : seen) xs

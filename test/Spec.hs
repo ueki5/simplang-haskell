@@ -1,19 +1,19 @@
 module Main where
 
+import CodeGen (codegen, codegenModule)
 import Compiler (Instr (..), compile, compileModule, run)
-import Data.Either (isLeft, isRight)
-import Parser (Expr (..), FnDecl (..), Program (..), Signedness (..), Stmt (..), Token (..), Type (..), Width (..), parse, tokenize)
 import Control.Exception (bracket)
+import Data.Either (isLeft, isRight)
+import qualified Data.Map as Map
+import Driver (BuildOpts (BuildOpts), Mode (..), build)
+import Parser (Expr (..), FnDecl (..), Program (..), Signedness (..), Stmt (..), Token (..), Type (..), Width (..), parse, tokenize)
+import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readProcess, readProcessWithExitCode)
 import Test.Hspec
-import CodeGen (codegen, codegenModule)
-import qualified Data.Map as Map
-import Driver (BuildOpts (BuildOpts), Mode (..), build)
-import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
 
 main :: IO ()
 main = hspec $ do
@@ -148,14 +148,28 @@ main = hspec $ do
         `shouldBe` Right ([], [SLet "x" TBool (BoolLit True)], Var "x")
     it "let宣言（&i64、アドレス取得）" $
       parseMain
-        [ TLet, TIdent "a", TColon, TIdent "i64", TAssign, TInt 0, TSemicolon
-        , TLet, TIdent "b", TColon, TAmp, TIdent "i64", TAssign, TAmp, TIdent "a", TSemicolon
-        , TIdent "b"
+        [ TLet,
+          TIdent "a",
+          TColon,
+          TIdent "i64",
+          TAssign,
+          TInt 0,
+          TSemicolon,
+          TLet,
+          TIdent "b",
+          TColon,
+          TAmp,
+          TIdent "i64",
+          TAssign,
+          TAmp,
+          TIdent "a",
+          TSemicolon,
+          TIdent "b"
         ]
         `shouldBe` Right
-          ( []
-          , [SLet "a" (TyInt Signed W64) (Lit 0), SLet "b" (TPtr (TyInt Signed W64)) (AddrOf (Var "a"))]
-          , Var "b"
+          ( [],
+            [SLet "a" (TyInt Signed W64) (Lit 0), SLet "b" (TPtr (TyInt Signed W64)) (AddrOf (Var "a"))],
+            Var "b"
           )
     it "let宣言（&&i64、ポインタのポインタ）" $
       parseMain [TLet, TIdent "b", TColon, TAmp, TAmp, TIdent "i64", TAssign, TIdent "b", TSemicolon, TIdent "b"]
@@ -181,9 +195,18 @@ main = hspec $ do
       parseMain [TAmp, TStar, TIdent "p"] `shouldBe` Right ([], [], AddrOf (Deref (Var "p")))
     it "代入文" $
       parseMain
-        [ TLet, TIdent "x", TColon, TIdent "i64", TAssign, TInt 1, TSemicolon
-        , TIdent "x", TAssign, TInt 2, TSemicolon
-        , TIdent "x"
+        [ TLet,
+          TIdent "x",
+          TColon,
+          TIdent "i64",
+          TAssign,
+          TInt 1,
+          TSemicolon,
+          TIdent "x",
+          TAssign,
+          TInt 2,
+          TSemicolon,
+          TIdent "x"
         ]
         `shouldBe` Right ([], [SLet "x" (TyInt Signed W64) (Lit 1), SAssign "x" (Lit 2)], Var "x")
     it "let宣言（型注釈省略）: コロンが無ければSLetInferredとしてパースする" $
@@ -194,9 +217,19 @@ main = hspec $ do
         `shouldBe` Right ([], [SLetInferred "x" (LitTyped 1 (TyInt Signed W32))], Var "x")
     it "let宣言（型注釈あり・省略）が混在しても両方正しくパースされる" $
       parseMain
-        [ TLet, TIdent "a", TColon, TIdent "i32", TAssign, TInt 1, TSemicolon
-        , TLet, TIdent "b", TAssign, TIdent "a", TSemicolon
-        , TIdent "b"
+        [ TLet,
+          TIdent "a",
+          TColon,
+          TIdent "i32",
+          TAssign,
+          TInt 1,
+          TSemicolon,
+          TLet,
+          TIdent "b",
+          TAssign,
+          TIdent "a",
+          TSemicolon,
+          TIdent "b"
         ]
         `shouldBe` Right
           ([], [SLet "a" (TyInt Signed W32) (Lit 1), SLetInferred "b" (Var "a")], Var "b")
@@ -298,10 +331,16 @@ main = hspec $ do
         `shouldBe` Right ([], [SBlock []], Lit 5)
     it "ブロック内にlet文を含む" $
       parseMain
-        [ TLBrace
-        , TLet, TIdent "x", TColon, TIdent "i64", TAssign, TInt 1, TSemicolon
-        , TRBrace
-        , TInt 2
+        [ TLBrace,
+          TLet,
+          TIdent "x",
+          TColon,
+          TIdent "i64",
+          TAssign,
+          TInt 1,
+          TSemicolon,
+          TRBrace,
+          TInt 2
         ]
         `shouldBe` Right ([], [SBlock [SLet "x" (TyInt Signed W64) (Lit 1)]], Lit 2)
     it "ネストしたブロック" $
@@ -317,23 +356,44 @@ main = hspec $ do
         `shouldBe` Right ([], [SIf [(BoolLit True, [])] (Just [])], Lit 1)
     it "if-else if-else文（複数のelse if）" $
       parseMain
-        [ TIf, TTrue, TLBrace, TRBrace
-        , TElse, TIf, TFalse, TLBrace, TRBrace
-        , TElse, TIf, TTrue, TLBrace, TRBrace
-        , TElse, TLBrace, TRBrace
-        , TInt 1
+        [ TIf,
+          TTrue,
+          TLBrace,
+          TRBrace,
+          TElse,
+          TIf,
+          TFalse,
+          TLBrace,
+          TRBrace,
+          TElse,
+          TIf,
+          TTrue,
+          TLBrace,
+          TRBrace,
+          TElse,
+          TLBrace,
+          TRBrace,
+          TInt 1
         ]
         `shouldBe` Right
-          ( []
-          , [SIf [(BoolLit True, []), (BoolLit False, []), (BoolLit True, [])] (Just [])]
-          , Lit 1
+          ( [],
+            [SIf [(BoolLit True, []), (BoolLit False, []), (BoolLit True, [])] (Just [])],
+            Lit 1
           )
     it "if文の本体にlet文を含む" $
       parseMain
-        [ TIf, TTrue, TLBrace
-        , TLet, TIdent "x", TColon, TIdent "i64", TAssign, TInt 1, TSemicolon
-        , TRBrace
-        , TInt 2
+        [ TIf,
+          TTrue,
+          TLBrace,
+          TLet,
+          TIdent "x",
+          TColon,
+          TIdent "i64",
+          TAssign,
+          TInt 1,
+          TSemicolon,
+          TRBrace,
+          TInt 2
         ]
         `shouldBe` Right ([], [SIf [(BoolLit True, [SLet "x" (TyInt Signed W64) (Lit 1)])] Nothing], Lit 2)
     it "if文はブロック文としてネストできる" $
@@ -352,11 +412,20 @@ main = hspec $ do
         `shouldBe` Right ([], [SWhile (BoolLit True) []], Lit 1)
     it "while文の本体にlet文とbreak文を含む" $
       parseMain
-        [ TWhile, TTrue, TLBrace
-        , TLet, TIdent "x", TColon, TIdent "i64", TAssign, TInt 1, TSemicolon
-        , TBreak, TSemicolon
-        , TRBrace
-        , TInt 2
+        [ TWhile,
+          TTrue,
+          TLBrace,
+          TLet,
+          TIdent "x",
+          TColon,
+          TIdent "i64",
+          TAssign,
+          TInt 1,
+          TSemicolon,
+          TBreak,
+          TSemicolon,
+          TRBrace,
+          TInt 2
         ]
         `shouldBe` Right ([], [SWhile (BoolLit True) [SLet "x" (TyInt Signed W64) (Lit 1), SBreak]], Lit 2)
     it "continue文" $
@@ -390,32 +459,32 @@ main = hspec $ do
                 [("a", TyInt Signed W64), ("b", TyInt Signed W32), ("c", TBool)]
                 (TyInt Signed W64)
                 ([], Var "a")
-            ]
-          , []
-          , Lit 2
+            ],
+            [],
+            Lit 2
           )
     it "fn本体は文の列＋末尾式を持てる" $
       parseSrc "fn f() -> i64 {\nlet x: i64 = 1;\nx\n}\nfn main() -> i64 {\n2\n}"
         `shouldBe` Right
-          ( [FnDecl "f" [] (TyInt Signed W64) ([SLet "x" (TyInt Signed W64) (Lit 1)], Var "x")]
-          , []
-          , Lit 2
+          ( [FnDecl "f" [] (TyInt Signed W64) ([SLet "x" (TyInt Signed W64) (Lit 1)], Var "x")],
+            [],
+            Lit 2
           )
     it "fn定義は複数並べられる" $
       parseSrc "fn f() -> i64 {\n1\n}\nfn g() -> i64 {\n2\n}\nfn main() -> i64 {\n3\n}"
         `shouldBe` Right
-          ( [ FnDecl "f" [] (TyInt Signed W64) ([], Lit 1)
-            , FnDecl "g" [] (TyInt Signed W64) ([], Lit 2)
-            ]
-          , []
-          , Lit 3
+          ( [ FnDecl "f" [] (TyInt Signed W64) ([], Lit 1),
+              FnDecl "g" [] (TyInt Signed W64) ([], Lit 2)
+            ],
+            [],
+            Lit 3
           )
     it "fn定義はmainの前後どちらにも書ける" $
       parseSrc "fn main() -> i64 {\nlet a: i64 = 1;\nlet b: i64 = 2;\na + b\n}\nfn f() -> i64 {\n1\n}"
         `shouldBe` Right
-          ( [FnDecl "f" [] (TyInt Signed W64) ([], Lit 1)]
-          , [SLet "a" (TyInt Signed W64) (Lit 1), SLet "b" (TyInt Signed W64) (Lit 2)]
-          , Add (Var "a") (Var "b")
+          ( [FnDecl "f" [] (TyInt Signed W64) ([], Lit 1)],
+            [SLet "a" (TyInt Signed W64) (Lit 1), SLet "b" (TyInt Signed W64) (Lit 2)],
+            Add (Var "a") (Var "b")
           )
     it "fn本体の末尾式を省略すると () に脱糖する（型の不一致はcompile側で検出）" $
       parseSrc "fn f() -> i64 {\nlet x: i64 = 1;\n}\nfn main() -> i64 {\n2\n}"
@@ -442,9 +511,9 @@ main = hspec $ do
     it "return文（値付き）" $
       parseSrc "fn f() -> i64 {\nreturn 1;\n2\n}\nfn main() -> i64 {\n3\n}"
         `shouldBe` Right
-          ( [FnDecl "f" [] (TyInt Signed W64) ([SReturn (Lit 1)], Lit 2)]
-          , []
-          , Lit 3
+          ( [FnDecl "f" [] (TyInt Signed W64) ([SReturn (Lit 1)], Lit 2)],
+            [],
+            Lit 3
           )
     it "値の無いreturn文は return () に脱糖する（型の不一致はcompile側で検出）" $
       parseSrc "fn f() -> i64 {\nreturn;\n1\n}\nfn main() -> i64 {\n2\n}"
@@ -779,16 +848,16 @@ main = hspec $ do
     it "let宣言（型注釈省略）: &lvalueからポインタ型が推論される" $
       compileSource "fn main() -> i32 {\nlet a: i32 = 1;\nlet p = &a;\n*p\n}"
         `shouldBe` Right
-          ( []
-          , TyInt Signed W32
-          , [Push 1, Store W32 (-4), LoadAddr (-4), Store W64 (-12), Load W64 (-12), LoadInd W32, Label ".Lfn_end0"]
+          ( [],
+            TyInt Signed W32,
+            [Push 1, Store W32 (-4), LoadAddr (-4), Store W64 (-12), Load W64 (-12), LoadInd W32, Label ".Lfn_end0"]
           )
     it "let宣言（型注釈省略）: 関数呼び出しの戻り値型が推論される" $
       compileSource "fn f() -> i32 {\n1\n}\nfn main() -> i32 {\nlet x = f();\nx\n}"
         `shouldBe` Right
-          ( [("f", [Push 1, Label ".Lfn_end0"])]
-          , TyInt Signed W32
-          , [ICall "f" 0, Store W32 (-4), Load W32 (-4), Label ".Lfn_end1"]
+          ( [("f", [Push 1, Label ".Lfn_end0"])],
+            TyInt Signed W32,
+            [ICall "f" 0, Store W32 (-4), Load W32 (-4), Label ".Lfn_end1"]
           )
     it "let宣言（型注釈省略）: 無型リテラルとboolの算術演算は型不一致エラー（inferMaybeTypeの単一化はi32/i64のみ検出しないが、後続のcompileExprTypedで検出される）" $
       compileSource "fn main() -> bool {\nlet x = 5 + true;\nx\n}"
@@ -1152,8 +1221,9 @@ main = hspec $ do
       result <- compileSourceAndRun "fn main() -> i64 {\nlet x: i64 = 1;\n{\nlet x: i64 = 99;\n}\nx\n}"
       result `shouldBe` "1"
     it "兄弟ブロックはそれぞれ独立にローカル変数を持てる（同名変数の再利用を含む）" $ do
-      result <- compileSourceAndRun
-        "fn main() -> i64 {\nlet sum: i64 = 0;\n{\nlet y: i64 = 1;\nsum = sum + y;\n}\n{\nlet y: i64 = 2;\nsum = sum + y;\n}\nsum\n}"
+      result <-
+        compileSourceAndRun
+          "fn main() -> i64 {\nlet sum: i64 = 0;\n{\nlet y: i64 = 1;\nsum = sum + y;\n}\n{\nlet y: i64 = 2;\nsum = sum + y;\n}\nsum\n}"
       result `shouldBe` "3"
     it "空ブロックは合法で何もしない" $ do
       result <- compileSourceAndRun "fn main() -> i64 {\nlet x: i64 = 1;\n{}\nx\n}"
@@ -1179,75 +1249,90 @@ main = hspec $ do
       result <- compileSourceAndRun "fn main() -> i32 {\nlet x: i32 = 3;\nlet y: i32 = 0;\nif x < 5 {\ny = 1;\n} else {\ny = 2;\n}\ny\n}"
       result `shouldBe` "1"
     it "else ifで最初に真になった分岐だけを実行する" $ do
-      result <- compileSourceAndRun
-        "fn main() -> i64 {\nlet x: i64 = 2;\nlet y: i64 = 0;\nif x == 1 {\ny = 1;\n} else if x == 2 {\ny = 2;\n} else if x == 2 {\ny = 3;\n} else {\ny = 4;\n}\ny\n}"
+      result <-
+        compileSourceAndRun
+          "fn main() -> i64 {\nlet x: i64 = 2;\nlet y: i64 = 0;\nif x == 1 {\ny = 1;\n} else if x == 2 {\ny = 2;\n} else if x == 2 {\ny = 3;\n} else {\ny = 4;\n}\ny\n}"
       result `shouldBe` "2"
     it "else ifが全て偽ならelse本体を実行する" $ do
-      result <- compileSourceAndRun
-        "fn main() -> i64 {\nlet x: i64 = 9;\nlet y: i64 = 0;\nif x == 1 {\ny = 1;\n} else if x == 2 {\ny = 2;\n} else {\ny = 3;\n}\ny\n}"
+      result <-
+        compileSourceAndRun
+          "fn main() -> i64 {\nlet x: i64 = 9;\nlet y: i64 = 0;\nif x == 1 {\ny = 1;\n} else if x == 2 {\ny = 2;\n} else {\ny = 3;\n}\ny\n}"
       result `shouldBe` "3"
     it "else ifが全て偽でelseも無ければ何も実行しない" $ do
-      result <- compileSourceAndRun
-        "fn main() -> i64 {\nlet x: i64 = 9;\nlet y: i64 = 0;\nif x == 1 {\ny = 1;\n} else if x == 2 {\ny = 2;\n}\ny\n}"
+      result <-
+        compileSourceAndRun
+          "fn main() -> i64 {\nlet x: i64 = 9;\nlet y: i64 = 0;\nif x == 1 {\ny = 1;\n} else if x == 2 {\ny = 2;\n}\ny\n}"
       result `shouldBe` "0"
     it "ifをネストできる" $ do
-      result <- compileSourceAndRun
-        "fn main() -> i64 {\nlet x: i64 = 1;\nif x == 1 {\nif x == 1 {\nx = 42;\n}\n}\nx\n}"
+      result <-
+        compileSourceAndRun
+          "fn main() -> i64 {\nlet x: i64 = 1;\nif x == 1 {\nif x == 1 {\nx = 42;\n}\n}\nx\n}"
       result `shouldBe` "42"
     it "ブロック内にifをネストできる" $ do
       result <- compileSourceAndRun "fn main() -> i64 {\nlet x: i64 = 1;\n{\nif x == 1 {\nx = 42;\n}\n}\nx\n}"
       result `shouldBe` "42"
     it "then節とelse節はそれぞれ独立したローカル変数を持てる（同名変数の再利用を含む）" $ do
-      result <- compileSourceAndRun
-        "fn main() -> i64 {\nlet sum: i64 = 0;\nif true {\nlet y: i64 = 1;\nsum = sum + y;\n} else {\nlet y: i64 = 99;\nsum = sum + y;\n}\nsum\n}"
+      result <-
+        compileSourceAndRun
+          "fn main() -> i64 {\nlet sum: i64 = 0;\nif true {\nlet y: i64 = 1;\nsum = sum + y;\n} else {\nlet y: i64 = 99;\nsum = sum + y;\n}\nsum\n}"
       result `shouldBe` "1"
     it "if本体を抜けるとその中で宣言した変数は不可視になる（シャドーイングも含めた回帰確認）" $ do
-      result <- compileSourceAndRun
-        "fn main() -> i64 {\nlet x: i64 = 1;\nif true {\nlet x: i64 = 99;\nx = 2;\n}\nx\n}"
+      result <-
+        compileSourceAndRun
+          "fn main() -> i64 {\nlet x: i64 = 1;\nif true {\nlet x: i64 = 99;\nx = 2;\n}\nx\n}"
       result `shouldBe` "1"
     it "複数のifが連続しても互いに独立して動作する" $ do
-      result <- compileSourceAndRun
-        "fn main() -> i64 {\nlet a: i64 = 0;\nlet b: i64 = 0;\nif true {\na = 1;\n} else {\na = 2;\n}\nif false {\nb = 1;\n} else {\nb = 2;\n}\na + b\n}"
+      result <-
+        compileSourceAndRun
+          "fn main() -> i64 {\nlet a: i64 = 0;\nlet b: i64 = 0;\nif true {\na = 1;\n} else {\na = 2;\n}\nif false {\nb = 1;\n} else {\nb = 2;\n}\na + b\n}"
       result `shouldBe` "3"
 
   describe "compile + codegen + gcc（while文の結合テスト）" $ do
     it "基本的なカウントダウンループを実行する" $ do
-      result <- compileSourceAndRun
-        "fn main() -> i64 {\nlet x: i64 = 3;\nlet sum: i64 = 0;\nwhile x != 0 {\nsum = sum + x;\nx = x - 1;\n}\nsum\n}"
+      result <-
+        compileSourceAndRun
+          "fn main() -> i64 {\nlet x: i64 = 3;\nlet sum: i64 = 0;\nwhile x != 0 {\nsum = sum + x;\nx = x - 1;\n}\nsum\n}"
       result `shouldBe` "6"
     it "条件が最初から偽なら本体を一度も実行しない" $ do
       result <- compileSourceAndRun "fn main() -> i64 {\nlet x: i64 = 0;\nwhile x != 0 {\nx = 1;\n}\nx\n}"
       result `shouldBe` "0"
     it "breakでループを早期終了する" $ do
-      result <- compileSourceAndRun
-        "fn main() -> i64 {\nlet x: i64 = 0;\nwhile true {\nx = x + 1;\nif x == 3 {\nbreak;\n}\n}\nx\n}"
+      result <-
+        compileSourceAndRun
+          "fn main() -> i64 {\nlet x: i64 = 0;\nwhile true {\nx = x + 1;\nif x == 3 {\nbreak;\n}\n}\nx\n}"
       result `shouldBe` "3"
     it "continueで本体の残りをスキップし条件を再評価する" $ do
-      result <- compileSourceAndRun
-        "fn main() -> i64 {\nlet x: i64 = 0;\nlet sum: i64 = 0;\nwhile x != 5 {\nx = x + 1;\nif x == 3 {\ncontinue;\n}\nsum = sum + x;\n}\nsum\n}"
+      result <-
+        compileSourceAndRun
+          "fn main() -> i64 {\nlet x: i64 = 0;\nlet sum: i64 = 0;\nwhile x != 5 {\nx = x + 1;\nif x == 3 {\ncontinue;\n}\nsum = sum + x;\n}\nsum\n}"
       result `shouldBe` "12"
     it "whileをネストできる（内側のbreakは外側に影響しない）" $ do
-      result <- compileSourceAndRun
-        "fn main() -> i64 {\nlet i: i64 = 0;\nlet count: i64 = 0;\nwhile i != 3 {\nlet j: i64 = 0;\nwhile j != 5 {\nif j == 2 {\nbreak;\n}\ncount = count + 1;\nj = j + 1;\n}\ni = i + 1;\n}\ncount\n}"
+      result <-
+        compileSourceAndRun
+          "fn main() -> i64 {\nlet i: i64 = 0;\nlet count: i64 = 0;\nwhile i != 3 {\nlet j: i64 = 0;\nwhile j != 5 {\nif j == 2 {\nbreak;\n}\ncount = count + 1;\nj = j + 1;\n}\ni = i + 1;\n}\ncount\n}"
       result `shouldBe` "6"
     it "whileのネストで内側のcontinueは外側ループに影響しない" $ do
-      result <- compileSourceAndRun
-        "fn main() -> i64 {\nlet i: i64 = 0;\nlet count: i64 = 0;\nwhile i != 2 {\nlet j: i64 = 0;\nwhile j != 3 {\nj = j + 1;\nif j == 2 {\ncontinue;\n}\ncount = count + 1;\n}\ni = i + 1;\n}\ncount\n}"
+      result <-
+        compileSourceAndRun
+          "fn main() -> i64 {\nlet i: i64 = 0;\nlet count: i64 = 0;\nwhile i != 2 {\nlet j: i64 = 0;\nwhile j != 3 {\nj = j + 1;\nif j == 2 {\ncontinue;\n}\ncount = count + 1;\n}\ni = i + 1;\n}\ncount\n}"
       result `shouldBe` "4"
     it "while本体を抜けるとその中で宣言した変数は不可視になる（毎イテレーション巻き戻る）" $ do
-      result <- compileSourceAndRun
-        "fn main() -> i64 {\nlet x: i64 = 0;\nlet i: i64 = 0;\nwhile i != 3 {\nlet y: i64 = 100;\ny = y + 1;\ni = i + 1;\n}\nx\n}"
+      result <-
+        compileSourceAndRun
+          "fn main() -> i64 {\nlet x: i64 = 0;\nlet i: i64 = 0;\nwhile i != 3 {\nlet y: i64 = 100;\ny = y + 1;\ni = i + 1;\n}\nx\n}"
       result `shouldBe` "0"
     it "ブロック内にwhileをネストできる" $ do
       result <- compileSourceAndRun "fn main() -> i64 {\nlet x: i64 = 0;\n{\nwhile x != 3 {\nx = x + 1;\n}\n}\nx\n}"
       result `shouldBe` "3"
     it "複数のwhileが連続しても互いに独立して動作する（ラベルの一意性の間接的な確認）" $ do
-      result <- compileSourceAndRun
-        "fn main() -> i64 {\nlet a: i64 = 0;\nwhile a != 2 {\na = a + 1;\n}\nlet b: i64 = 0;\nwhile b != 3 {\nb = b + 1;\n}\na + b\n}"
+      result <-
+        compileSourceAndRun
+          "fn main() -> i64 {\nlet a: i64 = 0;\nwhile a != 2 {\na = a + 1;\n}\nlet b: i64 = 0;\nwhile b != 3 {\nb = b + 1;\n}\na + b\n}"
       result `shouldBe` "5"
     it "小なり演算子をwhileの条件式に使える（sample/src008.sl相当）" $ do
-      result <- compileSourceAndRun
-        "fn main() -> i64 {\nlet a: i64 = 0;\nlet sum: i64 = 0;\nwhile a < 10 {\nsum = sum + a;\na = a + 1;\n}\nsum\n}"
+      result <-
+        compileSourceAndRun
+          "fn main() -> i64 {\nlet a: i64 = 0;\nlet sum: i64 = 0;\nwhile a < 10 {\nsum = sum + a;\na = a + 1;\n}\nsum\n}"
       result `shouldBe` "45"
 
   describe "compile + codegen + gcc（fn定義・呼び出しの結合テスト）" $ do
@@ -1261,31 +1346,37 @@ main = hspec $ do
       result <- compileSourceAndRun "fn isPositive(x: i64) -> bool {\nx > 0\n}\nfn main() -> bool {\nisPositive(5)\n}"
       result `shouldBe` "true"
     it "早期returnを評価する" $ do
-      result <- compileSourceAndRun
-        "fn abs(x: i64) -> i64 {\nif x < 0 {\nreturn 0 - x;\n}\nx\n}\nfn main() -> i64 {\nabs(0 - 5)\n}"
+      result <-
+        compileSourceAndRun
+          "fn abs(x: i64) -> i64 {\nif x < 0 {\nreturn 0 - x;\n}\nx\n}\nfn main() -> i64 {\nabs(0 - 5)\n}"
       result `shouldBe` "5"
     it "自己再帰（階乗）を評価する" $ do
-      result <- compileSourceAndRun
-        "fn fact(n: i64) -> i64 {\nif n <= 1 {\nreturn 1;\n}\nn * fact(n - 1)\n}\nfn main() -> i64 {\nfact(10)\n}"
+      result <-
+        compileSourceAndRun
+          "fn fact(n: i64) -> i64 {\nif n <= 1 {\nreturn 1;\n}\nn * fact(n - 1)\n}\nfn main() -> i64 {\nfact(10)\n}"
       result `shouldBe` "3628800"
     it "宣言順に依存しない相互再帰を評価する" $ do
-      result <- compileSourceAndRun
-        "fn is_even(n: i64) -> bool {\nif n == 0 {\nreturn true;\n}\nis_odd(n - 1)\n}\nfn is_odd(n: i64) -> bool {\nif n == 0 {\nreturn false;\n}\nis_even(n - 1)\n}\nfn main() -> bool {\nis_even(10)\n}"
+      result <-
+        compileSourceAndRun
+          "fn is_even(n: i64) -> bool {\nif n == 0 {\nreturn true;\n}\nis_odd(n - 1)\n}\nfn is_odd(n: i64) -> bool {\nif n == 0 {\nreturn false;\n}\nis_even(n - 1)\n}\nfn main() -> bool {\nis_even(10)\n}"
       result `shouldBe` "true"
     it "6個の引数（レジスタ渡しの上限）を持つ関数を評価する" $ do
-      result <- compileSourceAndRun
-        "fn sum6(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64 {\na + b + c + d + e + f\n}\nfn main() -> i64 {\nsum6(1, 2, 3, 4, 5, 6)\n}"
+      result <-
+        compileSourceAndRun
+          "fn sum6(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64 {\na + b + c + d + e + f\n}\nfn main() -> i64 {\nsum6(1, 2, 3, 4, 5, 6)\n}"
       result `shouldBe` "21"
     it "呼び出しは他の呼び出しの引数として入れ子にできる" $ do
-      result <- compileSourceAndRun
-        "fn inc(x: i64) -> i64 {\nx + 1\n}\nfn main() -> i64 {\ninc(inc(inc(0)))\n}"
+      result <-
+        compileSourceAndRun
+          "fn inc(x: i64) -> i64 {\nx + 1\n}\nfn main() -> i64 {\ninc(inc(inc(0)))\n}"
       result `shouldBe` "3"
     it "式の途中（奇数深さ）でのユーザー関数呼び出しでもスタックアライメントが崩れない" $ do
       result <- compileSourceAndRun "fn foo(x: i64) -> i64 {\nx * 2\n}\nfn main() -> i64 {\n1 + 2 + foo(3)\n}"
       result `shouldBe` "9"
     it "mainより後に定義した関数を呼び出せる（実行結果の確認）" $ do
-      result <- compileSourceAndRun
-        "fn double(x: i64) -> i64 {\nx * 2\n}\nfn main() -> i64 {\nlet a: i64 = 1;\nlet b: i64 = double(a);\ntriple(b)\n}\nfn triple(x: i64) -> i64 {\nx * 3\n}"
+      result <-
+        compileSourceAndRun
+          "fn double(x: i64) -> i64 {\nx * 2\n}\nfn main() -> i64 {\nlet a: i64 = 1;\nlet b: i64 = double(a);\ntriple(b)\n}\nfn triple(x: i64) -> i64 {\nx * 3\n}"
       result `shouldBe` "6"
   describe "compile + codegen + gcc（ポインタ型の結合テスト）" $ do
     it "&で取得したアドレスを*で読み戻す（仕様例）" $ do
@@ -1371,29 +1462,63 @@ main = hspec $ do
     it "配列リテラルは要素ごとに静的オフセットへストアし、a[i]はアドレス計算＋範囲検査＋LoadInd" $
       compileSource "fn main() -> i32 {\nlet a: [i32; 2] = [1, 2];\na[1]\n}"
         `shouldBe` Right
-          ( []
-          , TyInt Signed W32
-          , [ Push 1, Store W32 (-8), Push 2, Store W32 (-4)
-            , LoadAddr (-8), Push 1, IBoundsCheck 2, Push 4, IMul W64, IAdd W64, LoadInd W32, Label ".Lfn_end0"
+          ( [],
+            TyInt Signed W32,
+            [ Push 1,
+              Store W32 (-8),
+              Push 2,
+              Store W32 (-4),
+              LoadAddr (-8),
+              Push 1,
+              IBoundsCheck 2,
+              Push 4,
+              IMul W64,
+              IAdd W64,
+              LoadInd W32,
+              Label ".Lfn_end0"
             ]
           )
     it "[e; N] は e を1回だけ評価し、残りの要素へコピーする（u32は読み出し後にゼロ拡張）" $
       compileSource "fn main() -> u32 {\nlet a = [5u32; 3];\na[0]\n}"
         `shouldBe` Right
-          ( []
-          , TyInt Unsigned W32
-          , [ Push 5, Store W32 (-12), Load W32 (-12), Store W32 (-8), Load W32 (-12), Store W32 (-4)
-            , LoadAddr (-12), Push 0, IBoundsCheck 3, Push 4, IMul W64, IAdd W64, LoadInd W32, IZext32, Label ".Lfn_end0"
+          ( [],
+            TyInt Unsigned W32,
+            [ Push 5,
+              Store W32 (-12),
+              Load W32 (-12),
+              Store W32 (-8),
+              Load W32 (-12),
+              Store W32 (-4),
+              LoadAddr (-12),
+              Push 0,
+              IBoundsCheck 3,
+              Push 4,
+              IMul W64,
+              IAdd W64,
+              LoadInd W32,
+              IZext32,
+              Label ".Lfn_end0"
             ]
           )
     it "要素への代入はアドレス計算＋値＋StoreInd" $
       compileSource "fn main() -> i64 {\nlet a = [1, 2];\na[0] = 3;\n0\n}"
         `shouldBe` Right
-          ( []
-          , TyInt Signed W64
-          , [ Push 1, Store W64 (-16), Push 2, Store W64 (-8)
-            , LoadAddr (-16), Push 0, IBoundsCheck 2, Push 8, IMul W64, IAdd W64, Push 3, StoreInd W64
-            , Push 0, Label ".Lfn_end0"
+          ( [],
+            TyInt Signed W64,
+            [ Push 1,
+              Store W64 (-16),
+              Push 2,
+              Store W64 (-8),
+              LoadAddr (-16),
+              Push 0,
+              IBoundsCheck 2,
+              Push 8,
+              IMul W64,
+              IAdd W64,
+              Push 3,
+              StoreInd W64,
+              Push 0,
+              Label ".Lfn_end0"
             ]
           )
     it "usizeの演算はu64と同じ命令列" $
@@ -1632,12 +1757,12 @@ main = hspec $ do
     it "() 型注釈（&() / [(); N] も可）" $
       parseSrc "fn main() {\nlet u: () = ();\nlet p: &() = &u;\nlet a: [(); 2] = [(), ()];\nu\n}"
         `shouldBe` Right
-          ( []
-          , [ SLet "u" TUnit UnitLit
-            , SLet "p" (TPtr TUnit) (AddrOf (Var "u"))
-            , SLet "a" (TArray TUnit 2) (ArrayLit [UnitLit, UnitLit])
-            ]
-          , Var "u"
+          ( [],
+            [ SLet "u" TUnit UnitLit,
+              SLet "p" (TPtr TUnit) (AddrOf (Var "u")),
+              SLet "a" (TArray TUnit 2) (ArrayLit [UnitLit, UnitLit])
+            ],
+            Var "u"
           )
     it "末尾式を省略したfnは末尾式 () に脱糖する" $
       parseSrc "fn f() {\nlet x = 1;\n}\nfn main() -> i64 {\n2\n}"
@@ -1883,24 +2008,24 @@ main = hspec $ do
       withSources (("main.sl", "import \"lib/util.sl\";\nfn main() -> i64 { mul(2, 3) }") : drop 1 multiSources) $ \dir -> do
         result <- build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing)
         result `shouldBe` Left (dir </> "main.sl" ++ ": undeclared function: mul")
-    it "importが循環していてもビルドできる" $
-      withSources
-        [ ("main.sl", "import \"a.sl\";\nfn main() -> i64 { f(3) }")
-        , ("a.sl", "import \"main.sl\";\nimport \"b.sl\";\nfn f(n: i64) -> i64 { g(n) }")
-        , ("b.sl", "import \"a.sl\";\nfn g(n: i64) -> i64 { if n > 0 { return f(n - 1) + 1; }\n0 }")
+    it "importが循環していてもビルドできる"
+      $ withSources
+        [ ("main.sl", "import \"a.sl\";\nfn main() -> i64 { f(3) }"),
+          ("a.sl", "import \"main.sl\";\nimport \"b.sl\";\nfn f(n: i64) -> i64 { g(n) }"),
+          ("b.sl", "import \"a.sl\";\nfn g(n: i64) -> i64 { if n > 0 { return f(n - 1) + 1; }\n0 }")
         ]
-        $ \dir -> do
-          build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Right ()
-          readProcess (dir </> "prog") [] "" `shouldReturn` "3\n"
-    it "importしたソース同士で同名のfnがあるとエラー" $
-      withSources
-        [ ("main.sl", "import \"a.sl\";\nimport \"b.sl\";\nfn main() {}")
-        , ("a.sl", "fn f() {}")
-        , ("b.sl", "fn f() {}")
+      $ \dir -> do
+        build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Right ()
+        readProcess (dir </> "prog") [] "" `shouldReturn` "3\n"
+    it "importしたソース同士で同名のfnがあるとエラー"
+      $ withSources
+        [ ("main.sl", "import \"a.sl\";\nimport \"b.sl\";\nfn main() {}"),
+          ("a.sl", "fn f() {}"),
+          ("b.sl", "fn f() {}")
         ]
-        $ \dir -> do
-          result <- build (BuildOpts [dir </> "main.sl"] (dir </> "main.s") AsmOnly Nothing)
-          result `shouldBe` Left (dir </> "main.sl: function f is defined in both " ++ dir </> "a.sl and " ++ dir </> "b.sl")
+      $ \dir -> do
+        result <- build (BuildOpts [dir </> "main.sl"] (dir </> "main.s") AsmOnly Nothing)
+        result `shouldBe` Left (dir </> "main.sl: function f is defined in both " ++ dir </> "a.sl and " ++ dir </> "b.sl")
     it "存在しないファイルのimportはエラー" $
       withSources [("main.sl", "import \"nothing.sl\";\nfn main() {}")] $ \dir -> do
         result <- build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing)
@@ -1985,9 +2110,9 @@ compileSourceAndRunExit = buildAndRun $ \binPath -> do
 -- 複数ソースのビルドのテスト用: main.sl → lib/util.sl → lib/math.sl の順に import する（main の値は 10）
 multiSources :: [(FilePath, String)]
 multiSources =
-  [ ("main.sl", "import \"lib/util.sl\";\nfn main() -> i64 { add(sq(3), 1) }")
-  , ("lib/util.sl", "import \"math.sl\";\nfn add(a: i64, b: i64) -> i64 { a + b }\nfn sq(x: i64) -> i64 { mul(x, x) }")
-  , ("lib/math.sl", "fn mul(a: i64, b: i64) -> i64 { a * b }")
+  [ ("main.sl", "import \"lib/util.sl\";\nfn main() -> i64 { add(sq(3), 1) }"),
+    ("lib/util.sl", "import \"math.sl\";\nfn add(a: i64, b: i64) -> i64 { a + b }\nfn sq(x: i64) -> i64 { mul(x, x) }"),
+    ("lib/math.sl", "fn mul(a: i64, b: i64) -> i64 { a * b }")
   ]
 
 -- 一時ディレクトリにソース群を書き出してから action を実行する
