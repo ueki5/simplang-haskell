@@ -71,7 +71,8 @@
 | 変更されたソースだけを再コンパイルする差分ビルド | step024 | 中 | |
 | VM（`run`）の分岐・関数呼び出しへの対応（`JmpIfZero`/`Jmp`/`Label`/`StoreArg`/`ICall`） | step006, 007, 009 | 中 | 現在、if/while/関数を含むプログラムは gcc を使う結合テストでしか検証できない |
 | CI で `-Werror`（警告をエラーとして扱う） | step026 | 小 | 現在は警告 0 件で、`-Wall` は `.cabal` で有効 |
-| HLint・フォーマッタ（fourmolu / ormolu）の導入と CI での検査 | step026 | 小 | フォーマッタは導入時に全ファイルの整形差分が出る |
+| HLint の導入と CI での検査 | step026 | 小 | |
+| `.cabal` ファイルの整形（`cabal-gild` など） | step027 | 小 | |
 | `main` のブランチ保護（CI の成功をマージの条件にする） | step026 | 小 | GitHub の画面での設定 |
 | 複数の GHC バージョン・OS での CI | step026 | 小〜中 | 現在は `cabal.project` の GHC と `ubuntu-latest` のみ |
 
@@ -87,3 +88,4 @@
 | ダングリングポインタの検出（簡易検査のみ。残りは 1.5） | step012 | step020 |
 | ユニット型（値を返さない関数）と式文 | step009 | step021 |
 | 複数ソースからのビルド（`import`、ソースごとのコンパイル、`-S`/`-c`/リンク） | step023 | step024 |
+| フォーマッタ（ormolu）の導入と CI での検査 | step026 | step027 |

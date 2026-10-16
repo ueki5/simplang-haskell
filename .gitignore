@@ -10,3 +10,5 @@ output/
 scratch/
 .vscode/
 
+.direnv/
+.claude/settings.local.json

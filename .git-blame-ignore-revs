@@ -1,0 +1,5 @@
+# git blame で飛ばす、整形だけのコミット（docs/architecture.md「開発環境と整形」）
+# ローカルでは git config blame.ignoreRevsFile .git-blame-ignore-revs で有効にする
+
+# step027：ormolu で全ソースを整形
+425fbf91128b16016849695f92f52ca565ad8183

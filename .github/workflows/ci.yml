@@ -12,6 +12,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ormolu の版は flake.lock を唯一の情報源とし、ローカル（エディタ・Claude Code の hook）と同じ devShell の ormolu で検査する
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+
+      - name: Check formatting
+        run: nix develop --command ormolu --mode check $(git ls-files '*.hs')
+
   build-and-test:
     runs-on: ubuntu-latest
     steps:
