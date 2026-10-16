@@ -197,7 +197,7 @@ GHC・cabal・HLS は ghcup で管理する（GHC の版は `cabal.project` の 
 
 - 初回は、プロジェクトで `direnv allow` を実行する（`.envrc` の `use flake` により、nix-direnv が devShell の PATH を載せる）。VS Code は direnv 拡張（`mkhl.direnv`）で PATH を受け取る
 - 全ファイルの整形：`ormolu --mode inplace $(git ls-files '*.hs')`
-- 整形だけのコミットは `.git-blame-ignore-revs` に登録し、`git blame` が飛ばすようにする（ローカルでは `git config blame.ignoreRevsFile .git-blame-ignore-revs`）
+- 整形だけのコミットは `.git-blame-ignore-revs` に登録し、`git blame` が飛ばすようにする。GitHub の Blame 画面はこのファイルを自動で読むが、ローカルの git は読まないため、clone ごとに一度 `git config blame.ignoreRevsFile ':(optional).git-blame-ignore-revs'` を設定する。`:(optional)` を付けないと、このファイルが無いコミット（step027 より前）で `git blame` がエラーになる
 
 ### ormolu の版を変えるとき
 
