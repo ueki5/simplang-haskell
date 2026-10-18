@@ -1,4 +1,4 @@
-module Compiler (Instr (..), FnSigs, compile, compileModule, buildFnSigs, run) where
+module Compiler (Instr (..), FnSigs, Loc (..), Globals, StaticData, CompiledModule (..), compile, compileModule, buildFnSigs, buildGlobals, run) where
 
 import Control.Monad (foldM, when, zipWithM)
 import Control.Monad.Trans.Class (lift)
@@ -7,7 +7,7 @@ import Data.Int (Int32)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Word (Word32, Word64)
-import Parser (Expr (..), FnDecl (..), Program (..), Signedness (..), Stmt (..), Type (..), Width (..), intRepr)
+import Parser (Expr (..), FnDecl (..), GlobalDecl (..), GlobalKind (..), Program (..), Signedness (..), Stmt (..), Type (..), Width (..), intRepr)
 
 -- -- Debug Printサンプル（pTraceShow: 純粋関数内, pTraceShowM: モナド内）
 -- import Debug.Pretty.Simple (pTraceShow, pTraceShowM)
@@ -71,12 +71,23 @@ data Instr
     ICall String Int
   | -- 操作スタック先頭を捨てる（式文の値の破棄 用）
     IPop
+  | -- static の値を指定幅で（64bit正規化済みで）読み出して push する（RIP相対アドレッシング）
+    LoadGlobal Width String
+  | -- 操作スタック先頭をpopし、指定幅で static へストアする
+    StoreGlobal Width String
+  | -- static の実効アドレスを計算しpushする（&STATIC・static配列の添字アクセス 用）
+    LoadGlobalAddr String
   deriving (Show, Eq)
 
 -- Code generator
 
--- 変数名 -> (%rbp相対オフセット, 型)。スコープのスタック（先頭が最内側）
-type Env = [Map String (Int, Type)]
+-- 名前が指す場所: ローカル変数・仮引数（%rbp相対オフセット）、static（シンボル名）、const（評価済みの値）
+data Loc = LLocal Int | LStatic String | LConst Int
+  deriving (Show, Eq)
+
+-- 変数名 -> (場所, 型)。スコープのスタック（先頭が最内側）。
+-- fn本体では最も外側（末尾）のスコープが const/static を集めたグローバルのスコープになる
+type Env = [Map String (Loc, Type)]
 
 -- スコープのスタック（[Map String v]、先頭が最内側）に対する共通ロジック
 
@@ -100,7 +111,7 @@ insertInScope name v (scope : rest) = Map.insert name v scope : rest
 insertInScope _ _ [] = []
 
 -- 先頭スコープから順に変数を探す（外側のスコープも参照できる）
-lookupVar :: String -> Env -> Maybe (Int, Type)
+lookupVar :: String -> Env -> Maybe (Loc, Type)
 lookupVar = lookupInScopes
 
 -- 先頭スコープ（現在のブロック）にのみ宣言されているかを判定する（シャドーイング判定用）
@@ -108,8 +119,16 @@ declaredLocally :: String -> Env -> Bool
 declaredLocally = memberInScope
 
 -- 先頭スコープにのみ変数を追加する
-insertVar :: String -> (Int, Type) -> Env -> Env
+insertVar :: String -> (Loc, Type) -> Env -> Env
 insertVar = insertInScope
+
+-- let・仮引数で const/static と同名の変数を宣言しようとしていればエラー（Rustと同じく覆い隠しを禁止する）。
+-- グローバルのスコープは Env の最も外側（末尾）にある
+checkNotGlobal :: String -> Env -> Either String ()
+checkNotGlobal _ [] = Right ()
+checkNotGlobal name env
+  | Map.member name (last env) = Left ("cannot shadow global: " ++ name)
+  | otherwise = Right ()
 
 -- 型ごとのスタック占有バイト数（物理格納幅）
 widthBytes :: Width -> Int
@@ -174,39 +193,70 @@ type FnSigs = Map String ([Type], Type)
 maxParams :: Int
 maxParams = 6
 
+-- グローバルの表: 名前 -> (場所, 型)。const は評価済みの値（LConst）、static はシンボル名（LStatic）を持つ。
+-- FnSigs と同じく、全fnの本体をコンパイルする前に構築するコンパイル中不変のテーブル
+type Globals = Map String (Loc, Type)
+
+-- static の静的領域上の初期値: (シンボル名, 要素1個分の格納幅, 値の列（スカラーなら1個、配列なら要素数分）)
+type StaticData = (String, Width, [Int])
+
+-- 1ソース分のコンパイル結果
+data CompiledModule = CompiledModule
+  { -- 自ソースで定義した static の初期値
+    cmStatics :: [StaticData],
+    -- main以外のfnの命令列
+    cmFns :: [(String, [Instr])],
+    -- mainがあれば (mainの戻り値型, mainの命令列)
+    cmMain :: Maybe (Type, [Instr])
+  }
+  deriving (Show, Eq)
+
 -- 単一ソースで完結するプログラム（import しない）をコンパイルする。main は必須。
--- 戻り値は (main以外のfnの命令列, mainの戻り値型, mainの命令列)
+-- 戻り値は (main以外のfnの命令列, mainの戻り値型, mainの命令列)。命令列を検査するテスト用で、
+-- static の初期値は返さない（アセンブリまで組み立てるには compileModule と codegenModule を使う）
 compile :: Program -> Either String ([(String, [Instr])], Type, [Instr])
-compile (Program _ fnDecls) = do
-  validateFnShapes fnDecls
-  when (null [() | FnDecl "main" _ _ _ <- fnDecls]) $ Left "missing function: main"
-  (fns, mainPart) <- compileModule Map.empty fnDecls
-  case mainPart of
-    Just (mainType, mainInstrs) -> Right (fns, mainType, mainInstrs)
+compile prog = do
+  validateFnShapes (progFns prog)
+  when (null [() | FnDecl "main" _ _ _ <- progFns prog]) $ Left "missing function: main"
+  m <- compileModule Map.empty Map.empty prog
+  case cmMain m of
+    Just (mainType, mainInstrs) -> Right (cmFns m, mainType, mainInstrs)
     Nothing -> Left "missing function: main"
 
--- 1ソース分の fn 定義列から命令を抽出する（複数ソースからのビルドの単位）。
--- importedSigs は import したソースに定義された fn のシグネチャで、自ソースの fn と同様に呼び出せる
--- （本体は別のオブジェクトファイルにあり、リンク時に解決される）。自ソースの fn と同名ならエラー。
+-- 1ソース分の const/static・fn 定義から命令を抽出する（複数ソースからのビルドの単位）。
+-- importedSigs/importedGlobals は import したソースに定義された fn のシグネチャと const/static で、
+-- 自ソースの定義と同様に参照できる（fn の本体や static の実体は別のオブジェクトファイルにあり、
+-- リンク時に解決される）。自ソースの定義と同名ならエラー。
 -- 各fnの本体は他の関数を一切参照しない独立スコープでコンパイルされ、
 -- ラベル採番用のカウンタ（CompileM）は全fnを通じて単一のものを共有する
 -- （同名ラベルの重複はアセンブル時に壊れるため）。
--- 戻り値は (main以外のfnの命令列, mainがあれば (mainの戻り値型, mainの命令列))。mainは戻り値を表示して
--- 終了する特別な末尾（codegen側のepilogue）を持つため、他のfnとは分けて返す。
+-- mainは戻り値を表示して終了する特別な末尾（codegen側のepilogue）を持つため、他のfnとは分けて返す。
 -- main の有無はここでは検査しない（リンクする全ソースでちょうど1つあればよく、それはドライバが検査する）
-compileModule :: FnSigs -> [FnDecl] -> Either String ([(String, [Instr])], Maybe (Type, [Instr]))
-compileModule importedSigs0 fnDecls = do
+compileModule :: FnSigs -> Globals -> Program -> Either String CompiledModule
+compileModule importedSigs0 importedGlobals prog = do
+  let fnDecls = progFns prog
   ownSigs <- buildFnSigs fnDecls
+  (ownGlobals, statics) <- buildGlobals (progGlobals prog)
+  -- fn・const・static は同じ名前空間を共有する
+  case Map.keys (Map.intersection ownSigs ownGlobals) of
+    (name : _) -> Left ("name already declared: " ++ name)
+    [] -> Right ()
   -- import先の main は取り込まない（呼び出し不可であり、自ソースの main とも衝突させない）
   let importedSigs = Map.delete "main" importedSigs0
   case Map.keys (Map.intersection ownSigs importedSigs) of
     (name : _) -> Left ("function already declared in imported file: " ++ name)
     [] -> Right ()
-  evalStateT (compileProgram (Map.union ownSigs importedSigs) fnDecls) 0
+  let ownNames = Map.union (Map.map (const ()) ownSigs) (Map.map (const ()) ownGlobals)
+      importedNames = Map.union (Map.map (const ()) importedSigs) (Map.map (const ()) importedGlobals)
+  case Map.keys (Map.intersection ownNames importedNames) of
+    (name : _) -> Left ("name already declared in imported file: " ++ name)
+    [] -> Right ()
+  (fns, mainPart) <- evalStateT (compileProgram (Map.union ownSigs importedSigs) (Map.union ownGlobals importedGlobals) fnDecls) 0
+  Right (CompiledModule statics fns mainPart)
 
-compileProgram :: FnSigs -> [FnDecl] -> CompileM ([(String, [Instr])], Maybe (Type, [Instr]))
-compileProgram fnSigs fnDecls = do
-  fns <- mapM (compileFnDecl fnSigs) fnDecls
+compileProgram :: FnSigs -> Globals -> [FnDecl] -> CompileM ([(String, [Instr])], Maybe (Type, [Instr]))
+compileProgram fnSigs globals fnDecls = do
+  fns <- mapM (compileFnDecl fnSigs globals) fnDecls
   let mainPart = do
         mainInstrs <- lookup "main" fns
         (_, mainType) <- Map.lookup "main" fnSigs
@@ -252,31 +302,38 @@ compileStmtsFrom fnSigs initEnv initCursor loopCtx returnCtx stmts = foldM step 
     step (env, cursor, acc) (SLet name ty expr) = do
       -- 変数の二重定義をチェック（同一ブロック内の再宣言のみ対象。外側との同名はシャドーイングとして許可）
       when (declaredLocally name env) $ lift (Left ("variable already declared: " ++ name))
+      lift (checkNotGlobal name env)
       -- 新しく登録する変数のスタック上のアドレスを、型の占有バイト数分だけ詰めて計算
       let off = cursor - stackBytes ty
       -- 式の表現から命令を抽出（宣言された型を期待型として渡す）＋変数のストア
       instrs <- lift (compileLetInit fnSigs env ty off expr)
       -- 変数とアドレスのマップ, 命令＋追加命令
-      pure (insertVar name (off, ty) env, off, acc ++ instrs)
+      pure (insertVar name (LLocal off, ty) env, off, acc ++ instrs)
     -- let xxx = ...（型注釈省略。inferTypeで推論し、最後まで未確定ならi64をデフォルトとする）
     step (env, cursor, acc) (SLetInferred name expr) = do
       when (declaredLocally name env) $ lift (Left ("variable already declared: " ++ name))
+      lift (checkNotGlobal name env)
       ty <- lift (inferType fnSigs env expr)
       let off = cursor - stackBytes ty
       instrs <- lift (compileLetInit fnSigs env ty off expr)
-      pure (insertVar name (off, ty) env, off, acc ++ instrs)
+      pure (insertVar name (LLocal off, ty) env, off, acc ++ instrs)
     -- xxx = ...
     step (env, cursor, acc) (SAssign name expr) = do
       -- 変数の定義をチェック（外側スコープの変数への書き込みも許可）
-      (off, ty) <- lift (maybe (Left ("undeclared variable: " ++ name)) Right (lookupVar name env))
+      (loc, ty) <- lift (maybe (Left ("undeclared variable: " ++ name)) Right (lookupVar name env))
       -- 配列全体への代入は不可（要素ごとに代入する）
       case ty of
         TArray _ _ -> lift (Left ("cannot assign to array " ++ name ++ "; assign to elements instead"))
         _ -> pure ()
+      -- ストア先は場所によって切り替える（const はメモリを持たないため代入できない）
+      storeInstr <- lift $ case loc of
+        LLocal off -> Right (Store (storageWidth ty) off)
+        LStatic sym -> Right (StoreGlobal (storageWidth ty) sym)
+        LConst _ -> Left ("cannot assign to constant: " ++ name)
       -- 式の表現から命令を抽出（既存の変数の型を期待型として渡す）
       instrs <- lift (compileExprTyped fnSigs env ty expr)
       -- 変数とアドレスのマップはそのまま, 命令＋追加命令＋変数のストア
-      pure (env, cursor, acc ++ instrs ++ [Store (storageWidth ty) off])
+      pure (env, cursor, acc ++ instrs ++ [storeInstr])
     -- a[i] = ... / p[i] = ... / *p = ...（場所式のアドレスを計算し、その型を期待型として値をコンパイルしてから間接ストアする）
     step (env, cursor, acc) (SAssignPlace lhs expr) = do
       case lhs of
@@ -385,8 +442,8 @@ compileWhile fnSigs env cursor returnCtx cond body = do
 
 -- 仮引数を let と同じ規則でスタックスロットに割り付ける（宣言順どおりに詰める）。
 -- 戻り値: (宣言順の(名前, オフセット, 型)のリスト, 変換後のEnv用スコープ, 最終cursor)
-allocParams :: [(String, Type)] -> ([(String, Int, Type)], Map String (Int, Type), Int)
-allocParams params = (reverse revAssigned, Map.fromList [(n, (o, t)) | (n, o, t) <- revAssigned], cursor)
+allocParams :: [(String, Type)] -> ([(String, Int, Type)], Map String (Loc, Type), Int)
+allocParams params = (reverse revAssigned, Map.fromList [(n, (LLocal o, t)) | (n, o, t) <- revAssigned], cursor)
   where
     (revAssigned, cursor) = foldl step ([], 0) params
     step (acc, c) (name, ty) =
@@ -394,13 +451,14 @@ allocParams params = (reverse revAssigned, Map.fromList [(n, (o, t)) | (n, o, t)
        in ((name, off, ty) : acc, off)
 
 -- 関数本体のコンパイル。パラメータのみを含む独立スコープ（他の関数の変数は
--- 一切参照できない）から開始し、パラメータはプロローグ直後にレジスタからスタックへスピルする
--- （StoreArg）。早期returnと末尾式のフォールスルーは同じ関数末尾ラベルへ合流する
-compileFnDecl :: FnSigs -> FnDecl -> CompileM (String, [Instr])
-compileFnDecl fnSigs (FnDecl name params retTy (stmts, tailExpr)) = do
+-- 一切参照できない。その外側にグローバルのスコープだけがある）から開始し、パラメータはプロローグ直後に
+-- レジスタからスタックへスピルする（StoreArg）。早期returnと末尾式のフォールスルーは同じ関数末尾ラベルへ合流する
+compileFnDecl :: FnSigs -> Globals -> FnDecl -> CompileM (String, [Instr])
+compileFnDecl fnSigs globals (FnDecl name params retTy (stmts, tailExpr)) = do
   endLabel <- freshLabel "fn_end"
+  lift (mapM_ (\(p, _) -> checkNotGlobal p [globals]) params)
   let (assigned, paramEnv, paramCursor) = allocParams params
-      env0 = [paramEnv]
+      env0 = [paramEnv, globals]
       spillInstrs = [StoreArg i (storageWidth ty) off | (i, (_, off, ty)) <- zip [0 ..] assigned]
       returnCtx = Just (name, retTy, endLabel)
   (env1, _cursor1, stmtInstrs) <- compileStmtsFrom fnSigs env0 paramCursor Nothing returnCtx stmts
@@ -420,8 +478,8 @@ checkNoLocalRef :: String -> Env -> Expr -> Either String ()
 checkNoLocalRef "main" _ _ = Right ()
 checkNoLocalRef _ env (AddrOf place) =
   case place of
-    Var name | Just _ <- lookupVar name env -> localRef name
-    Index (Var name) _ | Just (_, TArray _ _) <- lookupVar name env -> localRef name
+    Var name | Just (LLocal _, _) <- lookupVar name env -> localRef name
+    Index (Var name) _ | Just (LLocal _, TArray _ _) <- lookupVar name env -> localRef name
     _ -> Right ()
   where
     localRef name = Left ("cannot return reference to local variable: " ++ name)
@@ -540,7 +598,10 @@ addressOf :: FnSigs -> Env -> Expr -> Either String (Type, [Instr])
 addressOf _ env (Var name) =
   case lookupVar name env of
     Nothing -> Left ("undeclared variable: " ++ name)
-    Just (off, ty) -> Right (ty, [LoadAddr off])
+    Just (LLocal off, ty) -> Right (ty, [LoadAddr off])
+    Just (LStatic sym, ty) -> Right (ty, [LoadGlobalAddr sym])
+    -- const はメモリを持たないため、アドレスを取れない
+    Just (LConst _, _) -> Left ("cannot take address of constant: " ++ name)
 -- &a[i] は要素の実効アドレス
 addressOf fnSigs env (Index base idx) = indexAddr fnSigs env base idx
 addressOf fnSigs env (Deref e) = do
@@ -585,6 +646,134 @@ buildFnSigs fnDecls = do
     isArrayType (TArray _ _) = True
     isArrayType _ = False
 
+-- 1ソース分の const/static の定義からグローバルの表と static の初期値を作る。
+-- 型を検査し、初期値（定数式）をコンパイル時に評価する。定数式から参照できるのは同じソースの const だけで
+-- （import したソースの const は参照できない）、宣言順によらず参照できるよう依存する const を先に評価する
+buildGlobals :: [GlobalDecl] -> Either String (Globals, [StaticData])
+buildGlobals decls = do
+  _ <- foldM addName Map.empty decls
+  mapM_ checkGlobalType decls
+  let constDecls = Map.fromList [(name, (ty, e)) | GlobalDecl GConst name ty e <- decls]
+      staticNames = [name | GlobalDecl GStatic name _ _ <- decls]
+  consts <- foldM (evalConst constDecls staticNames []) Map.empty (Map.keys constDecls)
+  statics <- mapM (evalStatic consts staticNames) [(name, ty, e) | GlobalDecl GStatic name ty e <- decls]
+  let globals =
+        Map.union
+          (Map.map (\(v, ty) -> (LConst v, ty)) consts)
+          (Map.fromList [(name, (LStatic name, ty)) | GlobalDecl GStatic name ty _ <- decls])
+  Right (globals, statics)
+  where
+    addName seen (GlobalDecl _ name _ _)
+      | Map.member name seen = Left ("name already declared: " ++ name)
+      | otherwise = Right (Map.insert name () seen)
+    -- const はメモリを持たず値を Push 1つで埋め込むためスカラーのみ。static はスカラーとその配列
+    -- （ポインタは初期値にできる定数が無いため不可）
+    isScalar ty = isIntType ty || ty == TBool || ty == TUnit
+    checkGlobalType (GlobalDecl GConst name ty _)
+      | isScalar ty = Right ()
+      | otherwise = Left ("invalid type for constant: " ++ name)
+    checkGlobalType (GlobalDecl GStatic name ty _) = case ty of
+      TArray elemTy _ | isScalar elemTy -> Right ()
+      _ | isScalar ty -> Right ()
+      _ -> Left ("invalid type for static: " ++ name)
+
+-- const name を（依存する const を先に評価してから）評価し、評価済みの表へ加える。
+-- visiting は評価中の const の列で、そこへ戻ってきたら循環とする
+evalConst :: Map String (Type, Expr) -> [String] -> [String] -> Map String (Int, Type) -> String -> Either String (Map String (Int, Type))
+evalConst constDecls staticNames visiting done name
+  | Map.member name done = Right done
+  | name `elem` visiting = Left ("cycle in constant definitions: " ++ name)
+  | otherwise = case Map.lookup name constDecls of
+      -- const 以外の名前（未宣言の変数など）は評価時の compileExprTyped がエラーにする
+      Nothing -> Right done
+      Just (ty, e) -> do
+        checkConstExpr staticNames name e
+        done' <- foldM (evalConst constDecls staticNames (name : visiting)) done (exprVars e)
+        v <- evalConstExpr done' name ty e
+        Right (Map.insert name (v, ty) done')
+
+-- static の初期値を評価する（配列は要素ごと。[e; N] は e を1回評価して N 個並べる）
+evalStatic :: Map String (Int, Type) -> [String] -> (String, Type, Expr) -> Either String StaticData
+evalStatic consts staticNames (name, ty, e) = case ty of
+  TArray elemTy len -> do
+    vs <- case e of
+      ArrayLit es
+        | length es /= len -> lengthMismatch len (length es)
+        | otherwise -> mapM (evalElem elemTy) es
+      ArrayRepeat e1 k
+        | k /= len -> lengthMismatch len k
+        | otherwise -> replicate len <$> evalElem elemTy e1
+      _ -> Left "array must be initialized with an array literal"
+    Right (name, storageWidth elemTy, vs)
+  _ -> do
+    v <- evalElem ty e
+    Right (name, storageWidth ty, [v])
+  where
+    evalElem elemTy e1 = do
+      checkConstExpr staticNames name e1
+      evalConstExpr consts name elemTy e1
+    lengthMismatch len found =
+      Left ("array length mismatch: expected " ++ show len ++ ", found " ++ show found)
+
+-- 定数式として書ける式（リテラル・変数参照・単項/二項演算・キャスト）だけで構成されているかを検査する。
+-- static は実行時に値が変わるため参照できない
+checkConstExpr :: [String] -> String -> Expr -> Either String ()
+checkConstExpr staticNames name = go
+  where
+    go (Lit _) = Right ()
+    go (LitTyped _ _) = Right ()
+    go (BoolLit _) = Right ()
+    go UnitLit = Right ()
+    go (Var v)
+      | v `elem` staticNames = notConst
+      | otherwise = Right ()
+    go (Neg e) = go e
+    go (Not e) = go e
+    go (Cast e _) = go e
+    go (Add a b) = go a >> go b
+    go (Sub a b) = go a >> go b
+    go (Mul a b) = go a >> go b
+    go (Div a b) = go a >> go b
+    go (Eq a b) = go a >> go b
+    go (Neq a b) = go a >> go b
+    go (Lt a b) = go a >> go b
+    go (Le a b) = go a >> go b
+    go (Gt a b) = go a >> go b
+    go (Ge a b) = go a >> go b
+    go _ = notConst
+    notConst = Left ("initializer of " ++ name ++ " is not a constant expression")
+
+-- 定数式が参照する変数名（checkConstExpr を通った式のみを対象とする）
+exprVars :: Expr -> [String]
+exprVars (Var v) = [v]
+exprVars (Neg e) = exprVars e
+exprVars (Not e) = exprVars e
+exprVars (Cast e _) = exprVars e
+exprVars (Add a b) = exprVars a ++ exprVars b
+exprVars (Sub a b) = exprVars a ++ exprVars b
+exprVars (Mul a b) = exprVars a ++ exprVars b
+exprVars (Div a b) = exprVars a ++ exprVars b
+exprVars (Eq a b) = exprVars a ++ exprVars b
+exprVars (Neq a b) = exprVars a ++ exprVars b
+exprVars (Lt a b) = exprVars a ++ exprVars b
+exprVars (Le a b) = exprVars a ++ exprVars b
+exprVars (Gt a b) = exprVars a ++ exprVars b
+exprVars (Ge a b) = exprVars a ++ exprVars b
+exprVars _ = []
+
+-- 定数式を、評価済みの const だけを含む Env で通常の式と同じくコンパイルし（型検査も同じ規則）、
+-- VM で実行して値を得る。結果は型の正規形（i32 は符号拡張、u32 はゼロ拡張）へ揃える
+evalConstExpr :: Map String (Int, Type) -> String -> Type -> Expr -> Either String Int
+evalConstExpr consts name ty e = do
+  instrs <- compileExprTyped Map.empty [Map.map (\(v, t) -> (LConst v, t)) consts] ty e
+  case run instrs of
+    Left "division by zero" -> Left ("division by zero in constant expression: " ++ name)
+    Left err -> Left err
+    Right v -> Right $ case intRepr ty of
+      Just (Signed, W32) -> trunc W32 v
+      Just (Unsigned, W32) -> zext32 v
+      _ -> v
+
 -- 期待する型（expected）を一様に伝播させながら命令を抽出する。
 -- Var の実際の型が expected と食い違えば型不一致エラーとする。
 -- 算術演算・整数リテラルは整数型（intRepr が Just を返す型）専用、Not/BoolLit/Eq/Neq は TBool 専用であり、
@@ -611,10 +800,14 @@ compileExprTyped _ env expected (Var name) =
   case lookupVar name env of
     Nothing -> Left ("undeclared variable: " ++ name)
     Just (_, TArray _ _) -> Left ("array cannot be used as a value: " ++ name)
-    Just (off, ty)
+    Just (loc, ty)
       | ty /= expected ->
           Left ("type mismatch: expected " ++ typeName expected ++ ", found " ++ typeName ty)
-      | otherwise -> Right (Load (storageWidth ty) off : loadFixup ty)
+      | otherwise -> Right $ case loc of
+          LLocal off -> Load (storageWidth ty) off : loadFixup ty
+          LStatic sym -> LoadGlobal (storageWidth ty) sym : loadFixup ty
+          -- const は評価済み（型の正規形へ揃え済み）の値をそのまま積む
+          LConst v -> [Push v]
 -- [let ]xxx = expr + expr; / - / *（加減乗は符号の有無で下位ビットが変わらないため命令を共用し、u32のみ正規化し直す）
 compileExprTyped fnSigs env expected (Add l r) = compileArith fnSigs env expected l r (\sg w -> IAdd w : arithFixup sg w)
 compileExprTyped fnSigs env expected (Sub l r) = compileArith fnSigs env expected l r (\sg w -> ISub w : arithFixup sg w)
@@ -753,12 +946,13 @@ indexAddr fnSigs env base idx = do
     literalIndex _ = Nothing
 
 -- 添字アクセスの基底となる配列の (要素型, 要素数, 先頭アドレスを積む命令列) を返す。
---   a      （配列のローカル変数）    → LoadAddr で変数自身のアドレス
+--   a      （配列のローカル変数）    → LoadAddr で変数自身のアドレス（static の配列なら LoadGlobalAddr）
 --   ( *p ) （p: &[T; N]）            → p の値がそのまま先頭アドレス
 --   p      （&[T; N] 型の任意の式）  → 自動デリファレンス（式の値がそのまま先頭アドレス）
 arrayBase :: FnSigs -> Env -> Expr -> Either String (Type, Int, [Instr])
 arrayBase _ env (Var name)
-  | Just (off, TArray elemTy len) <- lookupVar name env = Right (elemTy, len, [LoadAddr off])
+  | Just (LLocal off, TArray elemTy len) <- lookupVar name env = Right (elemTy, len, [LoadAddr off])
+  | Just (LStatic sym, TArray elemTy len) <- lookupVar name env = Right (elemTy, len, [LoadGlobalAddr sym])
 arrayBase fnSigs env base = do
   mty <- inferMaybeType fnSigs env base
   case (base, mty) of
@@ -807,7 +1001,7 @@ castInstrs _ W64 _ W64 = []
 
 -- Virtual machine
 
--- テストでのみ使用
+-- テストと、const/static の初期値（定数式）の評価で使用する
 run :: [Instr] -> Either String Int
 run instrs = go instrs [] Map.empty
   where

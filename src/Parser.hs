@@ -1,4 +1,4 @@
-module Parser (Token (..), Expr (..), Stmt (..), FnDecl (..), Width (..), Signedness (..), Type (..), Program (..), intRepr, tokenize, parse) where
+module Parser (Token (..), Expr (..), Stmt (..), FnDecl (..), GlobalKind (..), GlobalDecl (..), Width (..), Signedness (..), Type (..), Program (..), intRepr, tokenize, parse) where
 
 import Data.Char (isAlpha, isAlphaNum, isDigit, isSpace)
 import Data.List (stripPrefix)
@@ -20,6 +20,8 @@ data Token
   | TFn
   | TReturn
   | TImport
+  | TConst
+  | TStatic
   | -- 文字列リテラル `"..."`（import のパス指定にのみ使う。エスケープは無い）
     TString String
   | TArrow
@@ -111,10 +113,20 @@ type Body = ([Stmt], Expr)
 data FnDecl = FnDecl String [(String, Type)] Type Body
   deriving (Show, Eq)
 
--- 1ソースファイル分のプログラム: 先頭の import の列（importを書いたソースからの相対パス）と fn 定義の列。
+-- トップレベルの const（コンパイル時定数）と static（静的領域に置くグローバル変数）の区別
+data GlobalKind = GConst | GStatic
+  deriving (Show, Eq)
+
+-- const/static の定義: 種類, 名前, 型（注釈は必須）, 初期値（定数式であることはcompile側で検査する）
+data GlobalDecl = GlobalDecl GlobalKind String Type Expr
+  deriving (Show, Eq)
+
+-- 1ソースファイル分のプログラム: 先頭の import の列（importを書いたソースからの相対パス）と、
+-- const/static の定義の列、fn 定義の列（const/static と fn は混在して書けるが、宣言順に意味は無い）。
 -- main は任意（単体コンパイルでは無くてもよく、リンクする全ソースでちょうど1つあればよい）
 data Program = Program
   { progImports :: [FilePath],
+    progGlobals :: [GlobalDecl],
     progFns :: [FnDecl]
   }
   deriving (Show, Eq)
@@ -170,6 +182,8 @@ tokenize (c : cs)
             "return" -> (TReturn :) <$> tokenize rest
             "as" -> (TAs :) <$> tokenize rest
             "import" -> (TImport :) <$> tokenize rest
+            "const" -> (TConst :) <$> tokenize rest
+            "static" -> (TStatic :) <$> tokenize rest
             _ -> (TIdent ident :) <$> tokenize rest
   | c == '"' =
       case break (\ch -> ch == '"' || ch == '\n') cs of
@@ -212,8 +226,11 @@ matchIntSuffix s
 
 -- Parser
 --
--- program    ::= import-decl* fn-decl*（トップレベルに文・式は書けない。import はfn定義より前にのみ書ける）
+-- program    ::= import-decl* item*（トップレベルに文・式は書けない。import は他の定義より前にのみ書ける）
 -- import-decl ::= 'import' STRING ';'
+-- item       ::= fn-decl | const-decl | static-decl
+-- const-decl ::= 'const' IDENT ':' type '=' expr ';'
+-- static-decl ::= 'static' IDENT ':' type '=' expr ';'
 -- fn-decl    ::= 'fn' IDENT '(' (IDENT ':' type (',' IDENT ':' type)*)? ')' ('->' type)? '{' stmt* expr? '}'
 --              （末尾式を省略した場合は () とする）
 -- stmt       ::= let-stmt | assign-stmt | place-assign-stmt | expr-stmt | block-stmt | if-stmt | while-stmt | break-stmt | continue-stmt | return-stmt
@@ -243,11 +260,12 @@ matchIntSuffix s
 
 type ParseResult a = Either String (a, [Token])
 
--- program ::= import-decl* fn-decl*
+-- program ::= import-decl* item*
 parse :: [Token] -> Either String Program
 parse tokens = do
   (imports, rest) <- parseImports tokens
-  Program imports <$> parseFnDecls rest
+  (globals, fns) <- parseItems rest
+  Right (Program imports globals fns)
 
 -- import-decl ::= 'import' STRING ';'
 parseImports :: [Token] -> ParseResult [FilePath]
@@ -258,14 +276,37 @@ parseImports (TImport : TString _ : _) = Left "expected ';' after import"
 parseImports (TImport : _) = Left "expected string literal after import"
 parseImports tokens = Right ([], tokens)
 
--- fn-decl*
-parseFnDecls :: [Token] -> Either String [FnDecl]
-parseFnDecls [] = Right []
-parseFnDecls (TFn : rest) = do
+-- item*（const/static の定義と fn 定義を、それぞれ出現順に集める）
+parseItems :: [Token] -> Either String ([GlobalDecl], [FnDecl])
+parseItems [] = Right ([], [])
+parseItems (TFn : rest) = do
   (fnDecl, rest') <- parseFnDecl rest
-  (fnDecl :) <$> parseFnDecls rest'
-parseFnDecls (TImport : _) = Left "import must appear before function definitions"
-parseFnDecls (t : _) = Left ("expected 'fn' at top level, got: " ++ show t)
+  (globals, fns) <- parseItems rest'
+  Right (globals, fnDecl : fns)
+parseItems (TConst : rest) = parseGlobalItem GConst "const" rest
+parseItems (TStatic : rest) = parseGlobalItem GStatic "static" rest
+parseItems (TImport : _) = Left "import must appear before other definitions"
+parseItems (t : _) = Left ("expected 'fn', 'const' or 'static' at top level, got: " ++ show t)
+
+parseGlobalItem :: GlobalKind -> String -> [Token] -> Either String ([GlobalDecl], [FnDecl])
+parseGlobalItem kind keyword tokens = do
+  (decl, rest) <- parseGlobalDecl kind keyword tokens
+  (globals, fns) <- parseItems rest
+  Right (decl : globals, fns)
+
+-- const-decl / static-decl（先頭の 'const'/'static' は呼び出し側で消費済み）。
+-- 型注釈は必須（fnのシグネチャと同じく、宣言だけで型を確定させる）
+parseGlobalDecl :: GlobalKind -> String -> [Token] -> ParseResult GlobalDecl
+parseGlobalDecl kind keyword tokens = do
+  (name, rest) <- expectIdent tokens
+  case rest of
+    (TColon : rest') -> do
+      (ty, rest'') <- parseTypeAnnotation rest'
+      rest3 <- expectToken TAssign rest''
+      (expr, rest4) <- parseExpr rest3
+      rest5 <- expectToken TSemicolon rest4
+      Right (GlobalDecl kind name ty expr, rest5)
+    _ -> Left ("expected ':' and type after " ++ keyword ++ " name: " ++ name)
 
 -- fn定義（先頭の'fn'は呼び出し側で消費済み）
 parseFnDecl :: [Token] -> ParseResult FnDecl

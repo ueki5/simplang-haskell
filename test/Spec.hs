@@ -1,12 +1,12 @@
 module Main where
 
 import CodeGen (codegen, codegenModule)
-import Compiler (Instr (..), compile, compileModule, run)
+import Compiler (CompiledModule (..), Instr (..), Loc (..), compile, compileModule, run)
 import Control.Exception (bracket)
 import Data.Either (isLeft, isRight)
 import qualified Data.Map as Map
 import Driver (BuildOpts (BuildOpts), Mode (..), build)
-import Parser (Expr (..), FnDecl (..), Program (..), Signedness (..), Stmt (..), Token (..), Type (..), Width (..), parse, tokenize)
+import Parser (Expr (..), FnDecl (..), GlobalDecl (..), GlobalKind (..), Program (..), Signedness (..), Stmt (..), Token (..), Type (..), Width (..), parse, tokenize)
 import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
@@ -1580,7 +1580,7 @@ main = hspec $ do
     it "StoreInd W32はmovlで間接ストアする" $
       codegen [] (TyInt Signed W64) [StoreInd W32] `shouldContain` "movl  %eax, (%rcx)"
     it "usizeの末尾式は%luで出力する" $
-      codegen [] TUsize [] `shouldContain` "leaq  fmtU64(%rip), %rdi"
+      codegen [] TUsize [] `shouldContain` "leaq  .LfmtU64(%rip), %rdi"
 
   describe "compile + codegen + gcc（配列の結合テスト）" $ do
     it "i32配列の合計をusizeのwhileループで求める" $ do
@@ -1854,13 +1854,13 @@ main = hspec $ do
     let parseProgram src = tokenize src >>= parse
     it "トップレベルはfn定義の列" $
       parseProgram "fn f() -> i64 { 1 }\nfn main() -> i64 { f() }"
-        `shouldBe` Right (Program [] [FnDecl "f" [] (TyInt Signed W64) ([], Lit 1), FnDecl "main" [] (TyInt Signed W64) ([], Call "f" [])])
+        `shouldBe` Right (Program [] [] [FnDecl "f" [] (TyInt Signed W64) ([], Lit 1), FnDecl "main" [] (TyInt Signed W64) ([], Call "f" [])])
     it "空のプログラムはfn定義0個（mainの有無はcompile側で検査）" $
-      parseProgram "" `shouldBe` Right (Program [] [])
+      parseProgram "" `shouldBe` Right (Program [] [] [])
     it "トップレベルの文はエラー" $
-      parseProgram "let x = 1;\nfn main() { x }" `shouldBe` Left "expected 'fn' at top level, got: TLet"
+      parseProgram "let x = 1;\nfn main() { x }" `shouldBe` Left "expected 'fn', 'const' or 'static' at top level, got: TLet"
     it "トップレベルの式はエラー" $
-      parseProgram "fn main() { 1 }\n2" `shouldBe` Left "expected 'fn' at top level, got: TInt 2"
+      parseProgram "fn main() { 1 }\n2" `shouldBe` Left "expected 'fn', 'const' or 'static' at top level, got: TInt 2"
 
   describe "明示的なmain（compile）" $ do
     let compileSource src = tokenize src >>= parse >>= compile
@@ -1930,19 +1930,19 @@ main = hspec $ do
       tokenize "import \"lib\n\";" `shouldBe` Left "unterminated string literal"
     it "importの列とfn定義の列をパースする" $
       parseProgram "import \"a.sl\";\nimport \"lib/b.sl\";\nfn main() {}"
-        `shouldBe` Right (Program ["a.sl", "lib/b.sl"] [FnDecl "main" [] TUnit ([], UnitLit)])
+        `shouldBe` Right (Program ["a.sl", "lib/b.sl"] [] [FnDecl "main" [] TUnit ([], UnitLit)])
     it "importの後に;が無いとエラー" $
       parseProgram "import \"a.sl\"\nfn main() {}" `shouldBe` Left "expected ';' after import"
     it "importのパスが文字列リテラルでないとエラー" $
       parseProgram "import a;" `shouldBe` Left "expected string literal after import"
     it "fn定義の後のimportはエラー" $
-      parseProgram "fn main() {}\nimport \"a.sl\";" `shouldBe` Left "import must appear before function definitions"
+      parseProgram "fn main() {}\nimport \"a.sl\";" `shouldBe` Left "import must appear before other definitions"
 
   describe "import したfnの呼び出し（compileModule）" $ do
     let importedSigs = Map.fromList [("add", ([TyInt Signed W64, TyInt Signed W64], TyInt Signed W64))]
-        compileWith sigs src = tokenize src >>= parse >>= compileModule sigs . progFns
+        compileWith sigs src = tokenize src >>= parse >>= compileModule sigs Map.empty
     it "importしたfnを呼び出せる" $
-      (\(_, mainPart) -> fmap fst mainPart) <$> compileWith importedSigs "fn main() -> i64 { add(1, 2) }"
+      fmap fst . cmMain <$> compileWith importedSigs "fn main() -> i64 { add(1, 2) }"
         `shouldBe` Right (Just (TyInt Signed W64))
     it "importしたfnの呼び出しもシグネチャで型を検査する" $
       compileWith importedSigs "fn main() -> i32 { add(1, 2) }" `shouldBe` Left "type mismatch: expected i32, found i64"
@@ -1954,16 +1954,16 @@ main = hspec $ do
     it "import先のmainは取り込まない" $
       compileWith (Map.fromList [("main", ([], TUnit))]) "fn main() {}" `shouldSatisfy` isRight
     it "mainが無くてもコンパイルできる" $
-      (\(fns, mainPart) -> (map fst fns, fmap fst mainPart)) <$> compileWith Map.empty "fn f() -> i64 { 1 }"
+      (\m -> (map fst (cmFns m), fmap fst (cmMain m))) <$> compileWith Map.empty "fn f() -> i64 { 1 }"
         `shouldBe` Right (["f"], Nothing)
 
   describe "codegenModule" $ do
     it "各fnを.globlで公開する" $
-      codegenModule [("add", [Push 1])] Nothing `shouldContain` ".globl add"
+      codegenModule [] [("add", [Push 1])] Nothing `shouldContain` ".globl add"
     it "mainが無ければmainを出力しない" $
-      codegenModule [("add", [Push 1])] Nothing `shouldNotContain` "main"
+      codegenModule [] [("add", [Push 1])] Nothing `shouldNotContain` "main"
     it "mainがあれば.globl mainとmain:を出力する" $
-      codegenModule [] (Just (TUnit, [])) `shouldContain` ".globl main\nmain:"
+      codegenModule [] [] (Just (TUnit, [])) `shouldContain` ".globl main\nmain:"
 
   describe "複数ソースからのビルド（Driver）" $ do
     it "importしたソースを再帰的にコンパイルしてリンクする" $
@@ -2061,9 +2061,214 @@ main = hspec $ do
       withSystemTempDirectory "hs024" $ \dir ->
         build (BuildOpts [dir </> "none.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Left ("no such file: " ++ dir </> "none.sl")
 
+  describe "定数・static（tokenize/parse）" $ do
+    let parseProgram src = tokenize src >>= parse
+    it "const/static予約語を変換する" $
+      tokenize "const static" `shouldBe` Right [TConst, TStatic]
+    it "const/staticで始まる識別子はTIdentのまま" $
+      tokenize "constant statics" `shouldBe` Right [TIdent "constant", TIdent "statics"]
+    it "constとstaticの定義をパースする" $
+      progGlobals <$> parseProgram "const N: usize = 5;\nstatic X: i64 = N as i64;"
+        `shouldBe` Right [GlobalDecl GConst "N" TUsize (Lit 5), GlobalDecl GStatic "X" (TyInt Signed W64) (Cast (Var "N") (TyInt Signed W64))]
+    it "fn定義と混在して書ける" $
+      (\p -> (length (progGlobals p), length (progFns p))) <$> parseProgram "import \"a.sl\";\nconst A: i64 = 1;\nfn main() {}\nstatic B: bool = true;\nfn f() {}"
+        `shouldBe` Right (2, 2)
+    it "staticの配列をパースする" $
+      progGlobals <$> parseProgram "static T: [i32; 2] = [0; 2];"
+        `shouldBe` Right [GlobalDecl GStatic "T" (TArray (TyInt Signed W32) 2) (ArrayRepeat (Lit 0) 2)]
+    it "型注釈の無いconstはエラー" $
+      parseProgram "const N = 5;" `shouldBe` Left "expected ':' and type after const name: N"
+    it "型注釈の無いstaticはエラー" $
+      parseProgram "static X = 5;" `shouldBe` Left "expected ':' and type after static name: X"
+    it "constの後のimportはエラー" $
+      parseProgram "const N: i64 = 1;\nimport \"a.sl\";" `shouldBe` Left "import must appear before other definitions"
+    it "初期値の後の;が無いとエラー" $
+      parseProgram "const N: i64 = 1\nfn main() {}" `shouldSatisfy` isLeft
+
+  describe "定数・static（compile）" $ do
+    let compileSource src = tokenize src >>= parse >>= compile
+        compileStatics src = cmStatics <$> (tokenize src >>= parse >>= compileModule Map.empty Map.empty)
+    it "constの参照は値のPushになる" $
+      compileSource "const N: i64 = 3;\nfn main() -> i64 { N }" `shouldBe` Right ([], TyInt Signed W64, [Push 3, Label ".Lfn_end0"])
+    it "constは定数式をコンパイル時に評価する" $
+      compileSource "const A: i64 = 5;\nconst B: i64 = (A + 1) * 2 - 10 / 3;\nfn main() -> i64 { B }"
+        `shouldBe` Right ([], TyInt Signed W64, [Push 9, Label ".Lfn_end0"])
+    it "後で宣言したconstも参照できる" $
+      compileSource "const B: i64 = A * 2;\nconst A: i64 = 5;\nfn main() -> i64 { B }"
+        `shouldBe` Right ([], TyInt Signed W64, [Push 10, Label ".Lfn_end0"])
+    it "constの演算は型の幅でラップする" $
+      compileSource "const C: i32 = 2147483647 + 1;\nfn main() -> i32 { C }"
+        `shouldBe` Right ([], TyInt Signed W32, [Push (-2147483648), Label ".Lfn_end0"])
+    it "boolのconst（比較・否定）" $
+      compileSource "const A: i64 = 3;\nconst B: bool = !(A < 2);\nfn main() -> bool { B }"
+        `shouldBe` Right ([], TBool, [Push 1, Label ".Lfn_end0"])
+    it "asを含む定数式" $
+      compileSource "const N: usize = 5;\nconst M: u32 = N as u32 - 6;\nfn main() -> u32 { M }"
+        `shouldBe` Right ([], TyInt Unsigned W32, [Push 4294967295, Label ".Lfn_end0"])
+    it "staticの読み出しはLoadGlobalになる" $
+      compileSource "static X: i64 = 1;\nfn main() -> i64 { X }" `shouldBe` Right ([], TyInt Signed W64, [LoadGlobal W64 "X", Label ".Lfn_end0"])
+    it "u32のstaticの読み出しはゼロ拡張する" $
+      compileSource "static X: u32 = 1;\nfn main() -> u32 { X }"
+        `shouldBe` Right ([], TyInt Unsigned W32, [LoadGlobal W32 "X", IZext32, Label ".Lfn_end0"])
+    it "staticへの代入はStoreGlobalになる" $
+      (\(_, _, is) -> is) <$> compileSource "static X: i32 = 1;\nfn main() { X = 2; }"
+        `shouldBe` Right [Push 2, StoreGlobal W32 "X", Push 0, Label ".Lfn_end0"]
+    it "staticの配列の添字アクセスはLoadGlobalAddrを基底にする" $
+      (\(_, _, is) -> take 1 is) <$> compileSource "static T: [i64; 2] = [1, 2];\nfn main() -> i64 { T[1] }"
+        `shouldBe` Right [LoadGlobalAddr "T"]
+    it "&staticはLoadGlobalAddrになる" $
+      (\(_, _, is) -> is) <$> compileSource "static X: i64 = 1;\nfn main() -> &i64 { &X }"
+        `shouldBe` Right [LoadGlobalAddr "X", Label ".Lfn_end0"]
+    it "&staticは関数から返せる" $
+      compileSource "static X: i64 = 1;\nfn f() -> &i64 { &X }\nfn main() -> i64 { *f() }" `shouldSatisfy` isRight
+    it "compileModuleはstaticの初期値を返す" $
+      compileStatics "const N: i32 = 2;\nstatic A: [i32; 3] = [1, -N, 3];\nstatic B: u32 = 4294967295;\nstatic C: bool = true;\nstatic D: [i64; 3] = [7; 3];"
+        `shouldBe` Right [("A", W32, [1, -2, 3]), ("B", W32, [4294967295]), ("C", W32, [1]), ("D", W64, [7, 7, 7])]
+    it "importしたconst/staticを参照できる" $
+      (tokenize "fn main() -> i64 { N + X }" >>= parse >>= compileModule Map.empty (Map.fromList [("N", (LConst 4, TyInt Signed W64)), ("X", (LStatic "X", TyInt Signed W64))]))
+        `shouldBe` Right (CompiledModule [] [] (Just (TyInt Signed W64, [Push 4, LoadGlobal W64 "X", IAdd W64, Label ".Lfn_end0"])))
+
+  describe "定数・static（意味論エラー）" $ do
+    let compileSource src = fmap (const ()) (tokenize src >>= parse >>= compile)
+        withImported globals src = fmap (const ()) (tokenize src >>= parse >>= compileModule Map.empty (Map.fromList globals))
+    it "constへの代入はエラー" $
+      compileSource "const N: i64 = 1;\nfn main() { N = 2; }" `shouldBe` Left "cannot assign to constant: N"
+    it "&constはエラー" $
+      compileSource "const N: i64 = 1;\nfn main() -> &i64 { &N }" `shouldBe` Left "cannot take address of constant: N"
+    it "定数式にstaticの参照を含むとエラー" $
+      compileSource "static X: i64 = 1;\nconst N: i64 = X + 1;\nfn main() {}" `shouldBe` Left "initializer of N is not a constant expression"
+    it "staticの初期値に他のstaticの参照を含むとエラー" $
+      compileSource "static X: i64 = 1;\nstatic Y: i64 = X;\nfn main() {}" `shouldBe` Left "initializer of Y is not a constant expression"
+    it "定数式にfnの呼び出しを含むとエラー" $
+      compileSource "fn f() -> i64 { 1 }\nconst N: i64 = f();\nfn main() {}" `shouldBe` Left "initializer of N is not a constant expression"
+    it "定数式に&を含むとエラー" $
+      compileSource "static X: i64 = 1;\nstatic Y: i64 = *&X;\nfn main() {}" `shouldBe` Left "initializer of Y is not a constant expression"
+    it "constの循環はエラー" $
+      compileSource "const A: i64 = B;\nconst B: i64 = A;\nfn main() {}" `shouldBe` Left "cycle in constant definitions: A"
+    it "自分自身を参照するconstはエラー" $
+      compileSource "const A: i64 = A + 1;\nfn main() {}" `shouldBe` Left "cycle in constant definitions: A"
+    it "定数式のゼロ除算はエラー" $
+      compileSource "const Z: i64 = 0;\nconst N: i64 = 1 / Z;\nfn main() {}" `shouldBe` Left "division by zero in constant expression: N"
+    it "staticの初期値のゼロ除算はエラー" $
+      compileSource "static X: [i64; 2] = [1, 1 / 0];\nfn main() {}" `shouldBe` Left "division by zero in constant expression: X"
+    it "未宣言の名前を参照するとエラー" $
+      compileSource "const N: i64 = M;\nfn main() {}" `shouldBe` Left "undeclared variable: M"
+    it "constの型と初期値の型が違うとエラー" $
+      compileSource "const N: i32 = 5i64;\nfn main() {}" `shouldBe` Left "type mismatch: expected i32, found i64"
+    it "constの参照も型を厳密に検査する" $
+      compileSource "const N: i32 = 5;\nfn main() -> i64 { N }" `shouldBe` Left "type mismatch: expected i64, found i32"
+    it "ポインタ型のconstはエラー" $
+      compileSource "const P: &i64 = 1;\nfn main() {}" `shouldBe` Left "invalid type for constant: P"
+    it "配列型のconstはエラー" $
+      compileSource "const A: [i64; 2] = [1, 2];\nfn main() {}" `shouldBe` Left "invalid type for constant: A"
+    it "ポインタ型のstaticはエラー" $
+      compileSource "static P: &i64 = 1;\nfn main() {}" `shouldBe` Left "invalid type for static: P"
+    it "staticの配列の要素数が違うとエラー" $
+      compileSource "static T: [i64; 3] = [1, 2];\nfn main() {}" `shouldBe` Left "array length mismatch: expected 3, found 2"
+    it "staticの配列を配列リテラル以外で初期化するとエラー" $
+      compileSource "static T: [i64; 3] = 1;\nfn main() {}" `shouldBe` Left "array must be initialized with an array literal"
+    it "staticの配列全体への代入はエラー" $
+      compileSource "static T: [i64; 1] = [1];\nfn main() { T = 2; }" `shouldBe` Left "cannot assign to array T; assign to elements instead"
+    it "staticの配列のリテラル添字はコンパイル時に範囲検査する" $
+      compileSource "static T: [i64; 2] = [1, 2];\nfn main() -> i64 { T[2] }" `shouldBe` Left "index out of bounds: the length is 2 but the index is 2"
+    it "const同士の重複はエラー" $
+      compileSource "const A: i64 = 1;\nconst A: i64 = 2;\nfn main() {}" `shouldBe` Left "name already declared: A"
+    it "constとstaticの重複はエラー" $
+      compileSource "const A: i64 = 1;\nstatic A: i64 = 2;\nfn main() {}" `shouldBe` Left "name already declared: A"
+    it "fnとstaticの重複はエラー" $
+      compileSource "static f: i64 = 1;\nfn f() {}\nfn main() {}" `shouldBe` Left "name already declared: f"
+    it "letでconstを覆い隠すとエラー" $
+      compileSource "const N: i64 = 1;\nfn main() { let N = 2; }" `shouldBe` Left "cannot shadow global: N"
+    it "ブロック内のletでstaticを覆い隠すとエラー" $
+      compileSource "static X: i64 = 1;\nfn main() { { let X: i64 = 2; } }" `shouldBe` Left "cannot shadow global: X"
+    it "仮引数でstaticを覆い隠すとエラー" $
+      compileSource "static X: i64 = 1;\nfn f(X: i64) {}\nfn main() {}" `shouldBe` Left "cannot shadow global: X"
+    it "importしたconstと自ソースの定義が同名だとエラー" $
+      withImported [("A", (LConst 1, TyInt Signed W64))] "static A: i64 = 1;\nfn main() {}" `shouldBe` Left "name already declared in imported file: A"
+    it "importしたstaticと自ソースのfnが同名だとエラー" $
+      withImported [("f", (LStatic "f", TyInt Signed W64))] "fn f() {}\nfn main() {}" `shouldBe` Left "name already declared in imported file: f"
+
+  describe "compile + codegen + gcc（定数・staticの結合テスト）" $ do
+    it "staticを複数のfnから読み書きする" $
+      compileSourceAndRun "static COUNT: i64 = 0;\nfn bump() { COUNT = COUNT + 1; }\nfn main() -> i64 { bump(); bump(); bump(); COUNT }"
+        `shouldReturn` "3"
+    it "step028の例（const・static・staticの配列）" $
+      compileSourceAndRun
+        "const N: usize = 5;\nconst LIMIT: i64 = N as i64 * 10 + 1;\nstatic COUNT: i64 = 0;\nstatic TABLE: [i64; 5] = [1, 2, 3, 4, 5];\nfn bump() { COUNT = COUNT + 1; }\nfn main() -> i64 {\nlet i = 0usize;\nwhile i < N { TABLE[i] = TABLE[i] * 2; bump(); i = i + 1; }\nTABLE[4] + COUNT + LIMIT\n}"
+        `shouldReturn` "66"
+    it "staticの配列を&で関数に渡す" $
+      compileSourceAndRun "static T: [i64; 3] = [1, 2, 3];\nfn sum(p: &[i64; 3]) -> i64 { p[0] + p[1] + p[2] }\nfn main() -> i64 { T[1] = 10; sum(&T) }"
+        `shouldReturn` "14"
+    it "static経由のポインタで書き換える" $
+      compileSourceAndRun "static X: i32 = 1;\nfn set(p: &i32, v: i32) { *p = v; }\nfn main() -> i32 { set(&X, -7); X }"
+        `shouldReturn` "-7"
+    it "負のi32とu32の最大値のstatic" $
+      compileSourceAndRun "static A: i32 = -5;\nstatic B: u32 = 4294967295;\nfn main() -> u64 { (A as i64 + 10) as u64 + B as u64 }"
+        `shouldReturn` "4294967300"
+    it "boolのstaticとconst" $
+      compileSourceAndRun "const T: bool = 1 < 2;\nstatic F: bool = false;\nfn main() -> bool { F = T; F }"
+        `shouldReturn` "true"
+    it "u32のstaticの演算結果を正規化する" $
+      compileSourceAndRun "static X: u32 = 0;\nfn main() -> u32 { X = X - 1u32; X / 2u32 }"
+        `shouldReturn` "2147483647"
+    it "staticの配列の範囲外アクセスは実行時エラー" $
+      compileSourceAndRunExit "static T: [i64; 2] = [1, 2];\nfn main() -> i64 { let i = 2usize; T[i] }"
+        `shouldReturn` (ExitFailure 1, "index out of bounds")
+    it "ランタイムのラベルと同名のstaticを定義できる" $
+      compileSourceAndRun "static errmsg: i64 = 5;\nstatic fmt64: i64 = 6;\nfn main() -> i64 { errmsg + fmt64 }"
+        `shouldReturn` "11"
+
+  describe "定数・static（Driver）" $ do
+    it "importしたソースのconst/staticを使う"
+      $ withSources
+        [ ("main.sl", "import \"lib.sl\";\nfn main() -> i64 { bump(); COUNT = COUNT + 1; COUNT * BASE }"),
+          ("lib.sl", "const BASE: i64 = 10;\nstatic COUNT: i64 = 0;\nfn bump() { COUNT = COUNT + BASE; }")
+        ]
+      $ \dir -> do
+        build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Right ()
+        readProcess (dir </> "prog") [] "" `shouldReturn` "110\n"
+    it "importのimport先のconstは参照できない"
+      $ withSources
+        [ ("main.sl", "import \"a.sl\";\nfn main() -> i64 { N }"),
+          ("a.sl", "import \"b.sl\";\nfn f() {}"),
+          ("b.sl", "const N: i64 = 1;")
+        ]
+      $ \dir -> do
+        result <- build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing)
+        result `shouldBe` Left (dir </> "main.sl: undeclared variable: N")
+    it "importしたソース同士で同名のconstとfnがあるとエラー"
+      $ withSources
+        [ ("main.sl", "import \"a.sl\";\nimport \"b.sl\";\nfn main() {}"),
+          ("a.sl", "const f: i64 = 1;"),
+          ("b.sl", "fn f() {}")
+        ]
+      $ \dir -> do
+        result <- build (BuildOpts [dir </> "main.sl"] (dir </> "main.s") AsmOnly Nothing)
+        result `shouldBe` Left (dir </> "main.sl: f is defined in both " ++ dir </> "a.sl and " ++ dir </> "b.sl")
+    it "importしたソースのconstの評価エラーはそのソース名を前置する"
+      $ withSources
+        [ ("main.sl", "import \"a.sl\";\nfn main() {}"),
+          ("a.sl", "const N: i64 = 1 / 0;")
+        ]
+      $ \dir -> do
+        result <- build (BuildOpts [dir </> "main.sl"] (dir </> "main.s") AsmOnly Nothing)
+        result `shouldBe` Left (dir </> "a.sl: division by zero in constant expression: N")
+    it "リンクする全ソースでstaticが重複するとエラー" $
+      withSources [("a.sl", "static X: i64 = 1;\nfn main() {}"), ("b.sl", "static X: i64 = 2;")] $ \dir -> do
+        result <- build (BuildOpts [dir </> "a.sl", dir </> "b.sl"] (dir </> "prog") Link Nothing)
+        result `shouldBe` Left ("X is defined in both " ++ dir </> "a.sl and " ++ dir </> "b.sl")
+    it "importしたconstと同名のconstを定義するとエラー" $
+      withSources [("a.sl", "import \"b.sl\";\nconst N: i64 = 1;\nfn main() -> i64 { N + f() }"), ("b.sl", "const N: i64 = 2;\nfn f() -> i64 { N }")] $ \dir -> do
+        result <- build (BuildOpts [dir </> "a.sl"] (dir </> "prog") Link Nothing)
+        result `shouldBe` Left (dir </> "a.sl: name already declared in imported file: N")
+    it "importで同時に見えなければconstは重複してもよい" $
+      withSources [("a.sl", "import \"b.sl\";\nconst N: i64 = 1;\nfn main() -> i64 { N + f() }"), ("b.sl", "import \"c.sl\";\nfn f() -> i64 { N }"), ("c.sl", "const N: i64 = 2;")] $ \dir -> do
+        build (BuildOpts [dir </> "a.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Right ()
+        readProcess (dir </> "prog") [] "" `shouldReturn` "3\n"
+
 -- パース結果を (main以外のfn定義, mainの文の列, mainの末尾式) に分解する（main が無ければテスト失敗）
 splitMain :: Program -> ([FnDecl], [Stmt], Expr)
-splitMain (Program _ prog) =
+splitMain (Program _ _ prog) =
   case [body | FnDecl "main" _ _ body <- prog] of
     [(stmts, e)] -> ([d | d@(FnDecl name _ _ _) <- prog, name /= "main"], stmts, e)
     _ -> error "splitMain: expected exactly one main"
@@ -2077,7 +2282,7 @@ compileAndRun retTy expr =
   withSystemTempDirectory "hs006" $ \tmpDir -> do
     let asmPath = tmpDir </> "out.s"
         binPath = tmpDir </> "out"
-    case compile (Program [] [FnDecl "main" [] retTy ([], expr)]) of
+    case compile (Program [] [] [FnDecl "main" [] retTy ([], expr)]) of
       Left err -> error ("compile failed: " ++ err)
       Right (fns, finalType, instrs) -> do
         writeFile asmPath (codegen fns finalType instrs)
@@ -2085,16 +2290,16 @@ compileAndRun retTy expr =
         output <- readProcess binPath [] ""
         return (takeWhile (/= '\n') output)
 
--- ソース文字列からフルパイプライン（tokenize/parse/compile）を通して実行する。
+-- ソース文字列からフルパイプライン（tokenize/parse/compileModule/codegenModule）を通して実行する。
 buildAndRun :: (FilePath -> IO a) -> String -> IO a
 buildAndRun runBinary src =
   withSystemTempDirectory "hs006" $ \tmpDir -> do
     let asmPath = tmpDir </> "out.s"
         binPath = tmpDir </> "out"
-    case tokenize src >>= parse >>= compile of
+    case tokenize src >>= parse >>= compileModule Map.empty Map.empty of
       Left err -> error ("compile failed: " ++ err)
-      Right (fns, finalType, instrs) -> do
-        writeFile asmPath (codegen fns finalType instrs)
+      Right m -> do
+        writeFile asmPath (codegenModule (cmStatics m) (cmFns m) (cmMain m))
         _ <- readProcess "gcc" [asmPath, "-o", binPath] ""
         runBinary binPath
 

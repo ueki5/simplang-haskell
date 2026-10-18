@@ -1,7 +1,7 @@
 module Driver (Mode (..), BuildOpts (..), build) where
 
 import CodeGen (codegenModule)
-import Compiler (FnSigs, buildFnSigs, compileModule)
+import Compiler (CompiledModule (..), FnSigs, Globals, buildFnSigs, buildGlobals, compileModule)
 import Control.Exception (IOException, finally, try)
 import Control.Monad (foldM, forM, forM_, unless, when)
 import Control.Monad.IO.Class (liftIO)
@@ -10,7 +10,7 @@ import Data.IORef (IORef, modifyIORef, newIORef, readIORef)
 import Data.List (nub)
 import qualified Data.Map as Map
 import Data.Maybe (isJust)
-import Parser (FnDecl (..), Program (..), parse, tokenize)
+import Parser (FnDecl (..), GlobalDecl (..), GlobalKind (..), Program (..), parse, tokenize)
 import System.Directory (canonicalizePath, createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, removeFile)
 import System.Exit (ExitCode (..))
 import System.FilePath (normalise, replaceExtension, takeBaseName, takeDirectory, takeExtension, (</>))
@@ -134,13 +134,13 @@ checkIntermediates units = do
       Just other | other /= src -> throwE ("intermediate file name conflict: " ++ other ++ " and " ++ src)
       _ -> pure (Map.insert c src seen)
 
--- 1ソースをコンパイルしてアセンブリを返す。直接 import したソースのfnのシグネチャだけを取り込む
+-- 1ソースをコンパイルしてアセンブリを返す。直接 import したソースのfnのシグネチャと const/static だけを取り込む
 compileSource :: FilePath -> BuildM String
 compileSource path = do
   m <- loadModule path
-  sigs <- importedSigs m
-  (fns, mainPart) <- inFile path (compileModule sigs (progFns (modProgram m)))
-  pure (codegenModule fns mainPart)
+  (sigs, globals) <- importedSigs m
+  cm <- inFile path (compileModule sigs globals (modProgram m))
+  pure (codegenModule (cmStatics cm) (cmFns cm) (cmMain cm))
 
 -- ソースを読み込んでパースする（エラーにはファイル名を前置する）
 loadModule :: FilePath -> BuildM Module
@@ -163,26 +163,33 @@ resolveImports m =
     unless exists $ throwE (modPath m ++ ": imported file not found: " ++ imp)
     pure path
 
--- 直接 import したソースに定義されたfnのシグネチャ（mainを除く）を集める。
--- importしたソース同士で同名のfnがあればエラー（importの再帰的な取り込みは行わない）
-importedSigs :: Module -> BuildM FnSigs
+-- 直接 import したソースに定義されたfnのシグネチャ（mainを除く）と const/static を集める。
+-- importしたソース同士で同名の定義があればエラー（importの再帰的な取り込みは行わない）
+importedSigs :: Module -> BuildM (FnSigs, Globals)
 importedSigs m = do
   paths <- resolveImports m
   imported <- dedupeBy modCanonical <$> mapM loadModule paths
-  sigsPerFile <- forM imported $ \im -> do
+  perFile <- forM imported $ \im -> do
     sigs <- inFile (modPath im) (buildFnSigs (progFns (modProgram im)))
-    pure (modPath im, Map.delete "main" sigs)
-  owners <- foldM addSigs Map.empty sigsPerFile
-  pure (Map.map snd owners)
+    (globals, _) <- inFile (modPath im) (buildGlobals (progGlobals (modProgram im)))
+    pure (modPath im, Map.delete "main" sigs, globals)
+  -- fn・const・static は同じ名前空間を共有するため、まとめて衝突を検査する
+  _ <- foldM addNames Map.empty [(path, [(n, True) | n <- Map.keys sigs] ++ [(n, False) | n <- Map.keys globals]) | (path, sigs, globals) <- perFile]
+  pure (Map.unions [sigs | (_, sigs, _) <- perFile], Map.unions [globals | (_, _, globals) <- perFile])
   where
-    addSigs owners (path, sigs) =
+    addNames owners (path, names) =
       foldM
-        ( \acc (name, sig) -> case Map.lookup name acc of
-            Just (other, _) -> throwE (modPath m ++ ": function " ++ name ++ " is defined in both " ++ other ++ " and " ++ path)
-            Nothing -> pure (Map.insert name (path, sig) acc)
+        ( \acc (name, isFn) -> case Map.lookup name acc of
+            Just (other, otherIsFn) -> throwE (modPath m ++ ": " ++ definedInBoth (isFn && otherIsFn) name other path)
+            Nothing -> pure (Map.insert name (path, isFn) acc)
         )
         owners
-        (Map.toList sigs)
+        names
+
+-- 同名の定義が2つのソースにあるときのメッセージ（fn同士なら従来どおり "function f ..."）
+definedInBoth :: Bool -> String -> FilePath -> FilePath -> String
+definedInBoth bothFns name a b =
+  (if bothFns then "function " else "") ++ name ++ " is defined in both " ++ a ++ " and " ++ b
 
 -- コンパイル〜リンク一括処理の対象となるソースを、入力から import を再帰的にたどって集める
 -- （同じファイルは1回だけ。importが循環していても、共有するのはシグネチャだけなので問題ない）
@@ -197,10 +204,11 @@ collectSources roots = reverse <$> foldM visit [] roots
           imports <- resolveImports m
           foldM visit (m : acc) imports
 
--- リンクする全ソースを通した検査: fn名の重複（リンカより分かりやすいメッセージにする）と main がちょうど1つあること
+-- リンクする全ソースを通した検査: fn名・static名（どちらもシンボルになる）の重複（リンカより分かりやすい
+-- メッセージにする）と main がちょうど1つあること。const はシンボルを持たないため対象外
 checkLinkUnits :: [Module] -> BuildM ()
 checkLinkUnits mods = do
-  _ <- foldM addFns Map.empty mods
+  _ <- foldM addSymbols Map.empty mods
   let mains = [modPath m | m <- mods, "main" `elem` fnNames m]
   case mains of
     [] -> throwE "missing function: main"
@@ -208,16 +216,17 @@ checkLinkUnits mods = do
     _ -> throwE ("function main is defined in multiple files: " ++ unwords mains)
   where
     fnNames m = nub [name | FnDecl name _ _ _ <- progFns (modProgram m)]
-    addFns owners m =
+    staticNames m = nub [name | GlobalDecl GStatic name _ _ <- progGlobals (modProgram m)]
+    addSymbols owners m =
       foldM
-        ( \acc name -> case Map.lookup name acc of
-            Just other
-              | name == "main" -> pure acc
-              | otherwise -> throwE ("function " ++ name ++ " is defined in both " ++ other ++ " and " ++ modPath m)
-            Nothing -> pure (Map.insert name (modPath m) acc)
+        ( \acc (name, isFn) -> case Map.lookup name acc of
+            Just (other, otherIsFn)
+              | name == "main" && isFn && otherIsFn -> pure acc
+              | otherwise -> throwE (definedInBoth (isFn && otherIsFn) name other (modPath m))
+            Nothing -> pure (Map.insert name (modPath m, isFn) acc)
         )
         owners
-        (fnNames m)
+        ([(n, True) | n <- fnNames m] ++ [(n, False) | n <- staticNames m])
 
 assemble :: FilePath -> FilePath -> BuildM ()
 assemble asmPath objPath = gcc ["-c", asmPath, "-g", "-o", objPath]

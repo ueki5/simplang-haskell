@@ -44,3 +44,4 @@
 | [step025](step025.md) | ドキュメント構成の見直し（全体像を docs へ移し、CLAUDE.md を作業規約に限定） |
 | [step026](step026.md) | GitHub Actions による CI の導入 |
 | [step027](step027.md) | ormolu によるコード整形の導入（エディタ・Claude Code・CI で版を揃える） |
+| [step028](step028.md) | 定数（`const`）とグローバル変数（`static`） |
