@@ -1,7 +1,7 @@
 module Main where
 
 import CodeGen (codegen, codegenModule)
-import Compiler (CompiledModule (..), Instr (..), Loc (..), compile, compileModule, run)
+import Compiler (CompiledModule (..), Instr (..), Loc (..), StaticInit (..), compile, compileModule, run)
 import Control.Exception (bracket)
 import Data.Either (isLeft, isRight)
 import qualified Data.Map as Map
@@ -2123,7 +2123,7 @@ main = hspec $ do
       compileSource "static X: i64 = 1;\nfn f() -> &i64 { &X }\nfn main() -> i64 { *f() }" `shouldSatisfy` isRight
     it "compileModuleはstaticの初期値を返す" $
       compileStatics "const N: i32 = 2;\nstatic A: [i32; 3] = [1, -N, 3];\nstatic B: u32 = 4294967295;\nstatic C: bool = true;\nstatic D: [i64; 3] = [7; 3];"
-        `shouldBe` Right [("A", W32, [1, -2, 3]), ("B", W32, [4294967295]), ("C", W32, [1]), ("D", W64, [7, 7, 7])]
+        `shouldBe` Right [("A", W32, map SInt [1, -2, 3]), ("B", W32, [SInt 4294967295]), ("C", W32, [SInt 1]), ("D", W64, map SInt [7, 7, 7])]
     it "importしたconst/staticを参照できる" $
       (tokenize "fn main() -> i64 { N + X }" >>= parse >>= compileModule Map.empty (Map.fromList [("N", (LConst 4, TyInt Signed W64)), ("X", (LStatic "X", TyInt Signed W64))]))
         `shouldBe` Right (CompiledModule [] [] (Just (TyInt Signed W64, [Push 4, LoadGlobal W64 "X", IAdd W64, Label ".Lfn_end0"])))
@@ -2161,8 +2161,6 @@ main = hspec $ do
       compileSource "const P: &i64 = 1;\nfn main() {}" `shouldBe` Left "invalid type for constant: P"
     it "配列型のconstはエラー" $
       compileSource "const A: [i64; 2] = [1, 2];\nfn main() {}" `shouldBe` Left "invalid type for constant: A"
-    it "ポインタ型のstaticはエラー" $
-      compileSource "static P: &i64 = 1;\nfn main() {}" `shouldBe` Left "invalid type for static: P"
     it "staticの配列の要素数が違うとエラー" $
       compileSource "static T: [i64; 3] = [1, 2];\nfn main() {}" `shouldBe` Left "array length mismatch: expected 3, found 2"
     it "staticの配列を配列リテラル以外で初期化するとエラー" $
@@ -2265,6 +2263,108 @@ main = hspec $ do
       withSources [("a.sl", "import \"b.sl\";\nconst N: i64 = 1;\nfn main() -> i64 { N + f() }"), ("b.sl", "import \"c.sl\";\nfn f() -> i64 { N }"), ("c.sl", "const N: i64 = 2;")] $ \dir -> do
         build (BuildOpts [dir </> "a.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Right ()
         readProcess (dir </> "prog") [] "" `shouldReturn` "3\n"
+
+  describe "ポインタ型のstatic（compile）" $ do
+    let compileStatics src = cmStatics <$> (tokenize src >>= parse >>= compileModule Map.empty Map.empty)
+        compileSource src = tokenize src >>= parse >>= compile
+    it "&staticとstaticの配列の&T[i]をアドレスの定数にする" $
+      compileStatics "static C: i64 = 0;\nstatic T: [i64; 4] = [1, 2, 3, 4];\nstatic P: &i64 = &C;\nstatic Q: &[i64; 4] = &T;\nstatic R: &i64 = &T[2];"
+        `shouldBe` Right
+          [ ("C", W64, [SInt 0]),
+            ("T", W64, map SInt [1, 2, 3, 4]),
+            ("P", W64, [SAddr "C" 0]),
+            ("Q", W64, [SAddr "T" 0]),
+            ("R", W64, [SAddr "T" 16])
+          ]
+    it "32bitの配列の要素のオフセットは4バイト単位" $
+      compileStatics "const I: usize = 1;\nstatic T: [u32; 3] = [0u32; 3];\nstatic P: &u32 = &T[I + 1];"
+        `shouldBe` Right [("T", W32, map SInt [0, 0, 0]), ("P", W64, [SAddr "T" 8])]
+    it "ポインタの配列とポインタへのポインタ" $
+      compileStatics "static A: i64 = 1;\nstatic B: i64 = 2;\nstatic PS: [&i64; 2] = [&A, &B];\nstatic P: &i64 = &B;\nstatic PP: &&i64 = &P;\nstatic QS: [&i64; 2] = [&A; 2];"
+        `shouldBe` Right
+          [ ("A", W64, [SInt 1]),
+            ("B", W64, [SInt 2]),
+            ("PS", W64, [SAddr "A" 0, SAddr "B" 0]),
+            ("P", W64, [SAddr "B" 0]),
+            ("PP", W64, [SAddr "P" 0]),
+            ("QS", W64, [SAddr "A" 0, SAddr "A" 0])
+          ]
+    it "後で宣言したstaticのアドレスも書ける" $
+      compileStatics "static P: &bool = &B;\nstatic B: bool = true;"
+        `shouldBe` Right [("P", W64, [SAddr "B" 0]), ("B", W32, [SInt 1])]
+    it "ポインタ型のstaticの読み書きはLoadGlobal/StoreGlobal W64になる" $
+      (\(_, _, is) -> is) <$> compileSource "static X: i64 = 1;\nstatic Y: i64 = 2;\nstatic P: &i64 = &X;\nfn main() -> i64 { P = &Y; *P }"
+        `shouldBe` Right [LoadGlobalAddr "Y", StoreGlobal W64 "P", LoadGlobal W64 "P", LoadInd W64, Label ".Lfn_end0"]
+
+  describe "ポインタ型のstatic（意味論エラー）" $ do
+    let compileSource src = fmap (const ()) (tokenize src >>= parse >>= compile)
+    it "指す先の型が違うとエラー" $
+      compileSource "static X: i64 = 1;\nstatic P: &i32 = &X;\nfn main() {}" `shouldBe` Left "type mismatch: expected &i32, found &i64"
+    it "要素の型が違うとエラー" $
+      compileSource "static T: [i32; 2] = [1, 2];\nstatic P: &i64 = &T[0];\nfn main() {}" `shouldBe` Left "type mismatch: expected &i64, found &i32"
+    it "constのアドレスはエラー" $
+      compileSource "const N: i64 = 1;\nstatic P: &i64 = &N;\nfn main() {}" `shouldBe` Left "cannot take address of constant: N"
+    it "未宣言の名前のアドレスはエラー" $
+      compileSource "static P: &i64 = &y;\nfn main() {}" `shouldBe` Left "undeclared variable: y"
+    it "リテラルのアドレスはエラー" $
+      compileSource "static P: &i64 = &5;\nfn main() {}" `shouldBe` Left "initializer of P is not a constant expression"
+    it "&*Pはエラー" $
+      compileSource "static X: i64 = 1;\nstatic P: &i64 = &X;\nstatic Q: &i64 = &*P;\nfn main() {}" `shouldBe` Left "initializer of Q is not a constant expression"
+    it "ポインタ型のstaticの添字のアドレスはエラー" $
+      compileSource "static T: [i64; 2] = [1, 2];\nstatic P: &[i64; 2] = &T;\nstatic Q: &i64 = &P[0];\nfn main() {}" `shouldBe` Left "initializer of Q is not a constant expression"
+    it "ポインタ型のstaticを整数で初期化するとエラー" $
+      compileSource "static P: &i64 = 0;\nfn main() {}" `shouldBe` Left "initializer of P is not a constant expression"
+    it "整数のstaticの初期値に&を書くとエラー" $
+      compileSource "static X: i64 = 1;\nstatic Y: i64 = *&X;\nfn main() {}" `shouldBe` Left "initializer of Y is not a constant expression"
+    it "添字が範囲外だとエラー" $
+      compileSource "static T: [i64; 4] = [0; 4];\nstatic R: &i64 = &T[4];\nfn main() {}" `shouldBe` Left "index out of bounds: the length is 4 but the index is 4"
+    it "添字にstaticを使うとエラー" $
+      compileSource "static I: usize = 0;\nstatic T: [i64; 4] = [0; 4];\nstatic R: &i64 = &T[I];\nfn main() {}" `shouldBe` Left "initializer of R is not a constant expression"
+    it "ポインタ型のconstは引き続きエラー" $
+      compileSource "static X: i64 = 1;\nconst P: &i64 = &X;\nfn main() {}" `shouldBe` Left "invalid type for constant: P"
+    it "staticへ&ローカル変数を代入するとエラー" $
+      compileSource "static X: i64 = 1;\nstatic P: &i64 = &X;\nfn f() { let x = 1; P = &x; }\nfn main() {}"
+        `shouldBe` Left "cannot store reference to local variable in static: P"
+    it "staticへ&仮引数を代入するとエラー" $
+      compileSource "static X: i64 = 1;\nstatic P: &i64 = &X;\nfn f(v: i64) { P = &v; }\nfn main() {}"
+        `shouldBe` Left "cannot store reference to local variable in static: P"
+    it "staticの配列の要素へ&ローカル配列[i]を代入するとエラー" $
+      compileSource "static X: i64 = 1;\nstatic PS: [&i64; 2] = [&X; 2];\nfn main() { let a = [1, 2]; PS[0] = &a[1]; }"
+        `shouldBe` Left "cannot store reference to local variable in static: PS"
+    it "中間変数を経由する代入は検出しない" $
+      compileSource "static X: i64 = 1;\nstatic P: &i64 = &X;\nfn main() { let x = 1; let p = &x; P = p; }" `shouldSatisfy` isRight
+    it "ローカルのポインタ変数へ&ローカルを代入するのは従来どおり可" $
+      compileSource "static X: i64 = 1;\nfn main() { let x = 1; let p = &X; p = &x; }" `shouldSatisfy` isRight
+
+  describe "compile + codegen + gcc（ポインタ型のstaticの結合テスト）" $ do
+    it "step029の例（&X・&T・&T[i]・ポインタの配列・&&i64）" $
+      compileSourceAndRun
+        "static COUNT: i64 = 0;\nstatic TABLE: [i64; 4] = [1, 2, 3, 4];\nstatic P: &i64 = &COUNT;\nstatic Q: &[i64; 4] = &TABLE;\nstatic R: &i64 = &TABLE[2];\nstatic PS: [&i64; 2] = [&COUNT, &TABLE[0]];\nstatic PP: &&i64 = &P;\nfn main() -> i64 {\n*P = 5;\nQ[1] + *R + **PP\n}"
+        `shouldReturn` "10"
+    it "ポインタの配列を経由して読み書きする" $
+      compileSourceAndRun "static A: i64 = 1;\nstatic B: i64 = 2;\nstatic PS: [&i64; 2] = [&A, &B];\nfn main() -> i64 { *PS[1] = 20; *PS[0] + B }"
+        `shouldReturn` "21"
+    it "実行時に別のstaticのアドレスを代入し直す" $
+      compileSourceAndRun "static A: i32 = 1;\nstatic B: i32 = 2;\nstatic P: &i32 = &A;\nfn swap() { if P == &A { P = &B; } else { P = &A; } }\nfn main() -> i32 { swap(); let x = *P; swap(); x * 10 + *P }"
+        `shouldReturn` "21"
+    it "32bitの配列の要素のアドレス" $
+      compileSourceAndRun "static T: [u32; 3] = [7u32, 8u32, 9u32];\nstatic P: &u32 = &T[2];\nfn main() -> u32 { *P = *P + 1u32; T[2] }"
+        `shouldReturn` "10"
+    it "ポインタ型のstaticを関数に渡す" $
+      compileSourceAndRun "static T: [i64; 3] = [1, 2, 3];\nstatic Q: &[i64; 3] = &T;\nfn sum(p: &[i64; 3]) -> i64 { p[0] + p[1] + p[2] }\nfn main() -> i64 { sum(Q) }"
+        `shouldReturn` "6"
+    it "mainの戻り値としてポインタ型のstaticを返す" $
+      compileSourceAndRun "static X: i64 = 1;\nstatic P: &i64 = &X;\nfn main() -> &i64 { P }" >>= (`shouldStartWith` "0x")
+
+  describe "ポインタ型のstatic（Driver）" $ do
+    it "importしたソースのポインタ型のstaticを使う"
+      $ withSources
+        [ ("main.sl", "import \"lib.sl\";\nfn main() -> i64 { *CUR = 7; next(); *CUR = 8; VALS[0] * 10 + VALS[1] }"),
+          ("lib.sl", "static VALS: [i64; 2] = [0, 0];\nstatic CUR: &i64 = &VALS[0];\nfn next() { CUR = &VALS[1]; }")
+        ]
+      $ \dir -> do
+        build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Right ()
+        readProcess (dir </> "prog") [] "" `shouldReturn` "78\n"
 
 -- パース結果を (main以外のfn定義, mainの文の列, mainの末尾式) に分解する（main が無ければテスト失敗）
 splitMain :: Program -> ([FnDecl], [Stmt], Expr)

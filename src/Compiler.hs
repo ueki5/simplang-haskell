@@ -1,4 +1,4 @@
-module Compiler (Instr (..), FnSigs, Loc (..), Globals, StaticData, CompiledModule (..), compile, compileModule, buildFnSigs, buildGlobals, run) where
+module Compiler (Instr (..), FnSigs, Loc (..), Globals, StaticInit (..), StaticData, CompiledModule (..), compile, compileModule, buildFnSigs, buildGlobals, run) where
 
 import Control.Monad (foldM, when, zipWithM)
 import Control.Monad.Trans.Class (lift)
@@ -197,8 +197,12 @@ maxParams = 6
 -- FnSigs と同じく、全fnの本体をコンパイルする前に構築するコンパイル中不変のテーブル
 type Globals = Map String (Loc, Type)
 
+-- static の初期値の1要素: 整数、またはアドレスの定数（同じソースの static のシンボル名, バイトオフセット）
+data StaticInit = SInt Int | SAddr String Int
+  deriving (Show, Eq)
+
 -- static の静的領域上の初期値: (シンボル名, 要素1個分の格納幅, 値の列（スカラーなら1個、配列なら要素数分）)
-type StaticData = (String, Width, [Int])
+type StaticData = (String, Width, [StaticInit])
 
 -- 1ソース分のコンパイル結果
 data CompiledModule = CompiledModule
@@ -330,6 +334,7 @@ compileStmtsFrom fnSigs initEnv initCursor loopCtx returnCtx stmts = foldM step 
         LLocal off -> Right (Store (storageWidth ty) off)
         LStatic sym -> Right (StoreGlobal (storageWidth ty) sym)
         LConst _ -> Left ("cannot assign to constant: " ++ name)
+      lift (checkNoLocalStore env name expr)
       -- 式の表現から命令を抽出（既存の変数の型を期待型として渡す）
       instrs <- lift (compileExprTyped fnSigs env ty expr)
       -- 変数とアドレスのマップはそのまま, 命令＋追加命令＋変数のストア
@@ -337,7 +342,9 @@ compileStmtsFrom fnSigs initEnv initCursor loopCtx returnCtx stmts = foldM step 
     -- a[i] = ... / p[i] = ... / *p = ...（場所式のアドレスを計算し、その型を期待型として値をコンパイルしてから間接ストアする）
     step (env, cursor, acc) (SAssignPlace lhs expr) = do
       case lhs of
-        Index _ _ -> pure ()
+        Index base _ -> case base of
+          Var x -> lift (checkNoLocalStore env x expr)
+          _ -> pure ()
         Deref _ -> pure ()
         _ -> lift (Left "invalid left-hand side of assignment")
       (ty, addrInstrs) <- lift (addressOf fnSigs env lhs)
@@ -476,14 +483,27 @@ compileFnDecl fnSigs globals (FnDecl name params retTy (stmts, tailExpr)) = do
 -- main は対象外（main の戻り値は main 自身のスタックフレーム上で表示してから終了するため、ダングリングにならない）
 checkNoLocalRef :: String -> Env -> Expr -> Either String ()
 checkNoLocalRef "main" _ _ = Right ()
-checkNoLocalRef _ env (AddrOf place) =
+checkNoLocalRef _ env expr = case isLocalRef env expr of
+  Just name -> Left ("cannot return reference to local variable: " ++ name)
+  Nothing -> Right ()
+
+-- static への代入（`P = e;` / `PS[i] = e;`）で、右辺が直接ローカル変数を指すポインタであればエラーとする
+-- （static はプログラムの終了まで残るため、関数から戻るとダングリングポインタになる）。
+-- checkNoLocalRef と同じ簡易検査で、中間変数を経由する形やポインタ経由の代入は検出しない。
+-- main も対象とする（main では実害は無いが、例外を設けず規則を単純にする）
+checkNoLocalStore :: Env -> String -> Expr -> Either String ()
+checkNoLocalStore env target expr = case lookupVar target env of
+  Just (LStatic _, _) | Just _ <- isLocalRef env expr -> Left ("cannot store reference to local variable in static: " ++ target)
+  _ -> Right ()
+
+-- 式が直接ローカル変数（仮引数を含む）を指すポインタ（`&x` / `&a[i]`。a はローカルの配列）であれば、その変数名を返す
+isLocalRef :: Env -> Expr -> Maybe String
+isLocalRef env (AddrOf place) =
   case place of
-    Var name | Just (LLocal _, _) <- lookupVar name env -> localRef name
-    Index (Var name) _ | Just (LLocal _, TArray _ _) <- lookupVar name env -> localRef name
-    _ -> Right ()
-  where
-    localRef name = Left ("cannot return reference to local variable: " ++ name)
-checkNoLocalRef _ _ _ = Right ()
+    Var name | Just (LLocal _, _) <- lookupVar name env -> Just name
+    Index (Var name) _ | Just (LLocal _, TArray _ _) <- lookupVar name env -> Just name
+    _ -> Nothing
+isLocalRef _ _ = Nothing
 
 -- Maybe Type の単一化（Nothing = 整数リテラルなど未確定な部分木）
 unifyType :: Type -> Type -> Either String Type
@@ -654,9 +674,10 @@ buildGlobals decls = do
   _ <- foldM addName Map.empty decls
   mapM_ checkGlobalType decls
   let constDecls = Map.fromList [(name, (ty, e)) | GlobalDecl GConst name ty e <- decls]
-      staticNames = [name | GlobalDecl GStatic name _ _ <- decls]
+      staticTypes = Map.fromList [(name, ty) | GlobalDecl GStatic name ty _ <- decls]
+      staticNames = Map.keys staticTypes
   consts <- foldM (evalConst constDecls staticNames []) Map.empty (Map.keys constDecls)
-  statics <- mapM (evalStatic consts staticNames) [(name, ty, e) | GlobalDecl GStatic name ty e <- decls]
+  statics <- mapM (evalStatic consts staticTypes) [(name, ty, e) | GlobalDecl GStatic name ty e <- decls]
   let globals =
         Map.union
           (Map.map (\(v, ty) -> (LConst v, ty)) consts)
@@ -666,15 +687,18 @@ buildGlobals decls = do
     addName seen (GlobalDecl _ name _ _)
       | Map.member name seen = Left ("name already declared: " ++ name)
       | otherwise = Right (Map.insert name () seen)
-    -- const はメモリを持たず値を Push 1つで埋め込むためスカラーのみ。static はスカラーとその配列
-    -- （ポインタは初期値にできる定数が無いため不可）
+    -- const はメモリを持たず値を Push 1つで埋め込むためスカラーのみ。static はスカラー・ポインタとその配列
+    -- （ポインタの初期値は static のアドレスの定数。evalAddrConst 参照）
     isScalar ty = isIntType ty || ty == TBool || ty == TUnit
+    isStaticElem ty = isScalar ty || isPtrType ty
+    isPtrType (TPtr _) = True
+    isPtrType _ = False
     checkGlobalType (GlobalDecl GConst name ty _)
       | isScalar ty = Right ()
       | otherwise = Left ("invalid type for constant: " ++ name)
     checkGlobalType (GlobalDecl GStatic name ty _) = case ty of
-      TArray elemTy _ | isScalar elemTy -> Right ()
-      _ | isScalar ty -> Right ()
+      TArray elemTy _ | isStaticElem elemTy -> Right ()
+      _ | isStaticElem ty -> Right ()
       _ -> Left ("invalid type for static: " ++ name)
 
 -- const name を（依存する const を先に評価してから）評価し、評価済みの表へ加える。
@@ -692,9 +716,10 @@ evalConst constDecls staticNames visiting done name
         v <- evalConstExpr done' name ty e
         Right (Map.insert name (v, ty) done')
 
--- static の初期値を評価する（配列は要素ごと。[e; N] は e を1回評価して N 個並べる）
-evalStatic :: Map String (Int, Type) -> [String] -> (String, Type, Expr) -> Either String StaticData
-evalStatic consts staticNames (name, ty, e) = case ty of
+-- static の初期値を評価する（配列は要素ごと。[e; N] は e を1回評価して N 個並べる）。
+-- staticTypes は同じソースの static の型の表（定数式からの参照の禁止と、アドレスの定数の解決に使う）
+evalStatic :: Map String (Int, Type) -> Map String Type -> (String, Type, Expr) -> Either String StaticData
+evalStatic consts staticTypes (name, ty, e) = case ty of
   TArray elemTy len -> do
     vs <- case e of
       ArrayLit es
@@ -709,11 +734,45 @@ evalStatic consts staticNames (name, ty, e) = case ty of
     v <- evalElem ty e
     Right (name, storageWidth ty, [v])
   where
+    -- ポインタ型の要素はアドレスの定数、それ以外は定数式として評価する
+    evalElem (TPtr pointeeTy) e1 = evalAddrConst consts staticTypes name pointeeTy e1
     evalElem elemTy e1 = do
-      checkConstExpr staticNames name e1
-      evalConstExpr consts name elemTy e1
+      checkConstExpr (Map.keys staticTypes) name e1
+      SInt <$> evalConstExpr consts name elemTy e1
     lengthMismatch len found =
       Left ("array length mismatch: expected " ++ show len ++ ", found " ++ show found)
+
+-- ポインタ型の static の初期値（アドレスの定数）を評価する。書けるのは同じソースの static の
+-- `&X` と `&T[i]`（T は static の配列、i は定数式）だけ。アドレスはリンク時（PIEならロード時）まで決まらないため、
+-- VM では評価せずシンボル名とバイトオフセットの組にする
+evalAddrConst :: Map String (Int, Type) -> Map String Type -> String -> Type -> Expr -> Either String StaticInit
+evalAddrConst consts staticTypes name pointeeTy expr = case expr of
+  AddrOf (Var x) -> do
+    xTy <- lookupTarget x
+    expectPointee xTy
+    Right (SAddr x 0)
+  AddrOf (Index (Var x) idx) -> do
+    xTy <- lookupTarget x
+    case xTy of
+      TArray elemTy len -> do
+        expectPointee elemTy
+        checkConstExpr (Map.keys staticTypes) name idx
+        i <- evalConstExpr consts name TUsize idx
+        when (toU64 i >= fromIntegral len) $
+          Left ("index out of bounds: the length is " ++ show len ++ " but the index is " ++ show (toU64 i))
+        Right (SAddr x (i * widthBytes (storageWidth elemTy)))
+      _ -> notConst
+  _ -> notConst
+  where
+    lookupTarget x = case Map.lookup x staticTypes of
+      Just t -> Right t
+      Nothing
+        | Map.member x consts -> Left ("cannot take address of constant: " ++ x)
+        | otherwise -> Left ("undeclared variable: " ++ x)
+    expectPointee t
+      | t == pointeeTy = Right ()
+      | otherwise = Left ("type mismatch: expected " ++ typeName (TPtr pointeeTy) ++ ", found " ++ typeName (TPtr t))
+    notConst = Left ("initializer of " ++ name ++ " is not a constant expression")
 
 -- 定数式として書ける式（リテラル・変数参照・単項/二項演算・キャスト）だけで構成されているかを検査する。
 -- static は実行時に値が変わるため参照できない

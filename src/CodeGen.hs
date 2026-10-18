@@ -1,6 +1,6 @@
 module CodeGen (codegen, codegenModule) where
 
-import Compiler (Instr (..), StaticData)
+import Compiler (Instr (..), StaticData, StaticInit (..))
 import Data.List (intercalate, mapAccumL)
 import Parser (Signedness (..), Type (..), Width (..))
 
@@ -136,7 +136,8 @@ runtimeErrors =
     "    call  exit"
   ]
 
--- static の初期値を .data セクションへ並べる（格納幅ごとに .quad/.long。static が無ければ何も出力しない）
+-- static の初期値を .data セクションへ並べる（格納幅ごとに .quad/.long。static が無ければ何も出力しない）。
+-- .data 内のアドレスは PIE でもロード時の再配置（R_X86_64_RELATIVE）で解決される
 dataSection :: [StaticData] -> [String]
 dataSection [] = []
 dataSection statics = "    .section .data" : concatMap genStatic statics
@@ -145,8 +146,12 @@ dataSection statics = "    .section .data" : concatMap genStatic statics
       [ "    .globl " ++ name,
         "    .balign " ++ show (widthBytes w),
         name ++ ":",
-        "    " ++ directive w ++ " " ++ intercalate ", " (map show vs)
+        "    " ++ directive w ++ " " ++ intercalate ", " (map initValue vs)
       ]
+    -- アドレスの定数はシンボル（＋オフセット）として書き、リンカ・ローダに埋めさせる
+    initValue (SInt v) = show v
+    initValue (SAddr sym 0) = sym
+    initValue (SAddr sym off) = sym ++ "+" ++ show off
     directive W64 = ".quad"
     directive W32 = ".long"
     widthBytes W64 = 8 :: Int

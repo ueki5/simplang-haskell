@@ -53,7 +53,8 @@ data Loc     = LLocal Int | LStatic String | LConst Int   -- %rbp 相対オフ�
 type Env     = [Map String (Loc, Type)]     -- 変数名 → (場所, 型)。スコープのスタック（先頭が最内側、末尾がグローバル）
 type FnSigs  = Map String ([Type], Type)    -- fn 名 → (仮引数の型, 戻り値型)
 type Globals = Map String (Loc, Type)       -- const/static 名 → (LConst 値 / LStatic 名, 型)
-type StaticData = (String, Width, [Int])    -- static の初期値（シンボル名, 要素の格納幅, 値の列）
+data StaticInit = SInt Int | SAddr String Int   -- static の初期値の要素：整数 / アドレスの定数（シンボル名, バイトオフセット）
+type StaticData = (String, Width, [StaticInit])  -- static の初期値（シンボル名, 要素の格納幅, 値の列）
 data CompiledModule = CompiledModule { cmStatics :: [StaticData], cmFns :: [(String, [Instr])], cmMain :: Maybe (Type, [Instr]) }
 data Instr   = Push Int | IAdd Width | ... | ICall String Int | IPop | LoadGlobal Width String | ...   -- スタックマシンの中間命令
 ```
@@ -109,6 +110,8 @@ data Instr   = Push Int | IAdd Width | ... | ICall String Int | IPop | LoadGloba
 - `&x` は `LoadAddr off`（static なら `LoadGlobalAddr name`）、`&*p` は `p` の値そのもの、`&a[i]` は要素アドレス
 - 読み出しは `LoadInd`、場所式への書き込みは `StoreInd`
 - `checkNoLocalRef`：fn の return 式・末尾式が直接 `&ローカル変数` / `&ローカル配列[i]` ならエラー（`&static` は可）。main は対象外
+- `checkNoLocalStore`：static への代入（`SAssign`、`SAssignPlace (Index (Var static) _)`）で、右辺が直接ローカルを指すならエラー。main も対象
+- どちらも、式が直接ローカルを指すかの判定は `isLocalRef` で共用する。中間変数を経由する形は検出しない
 
 ### 5.6 配列
 
@@ -133,6 +136,7 @@ data Instr   = Push Int | IAdd Width | ... | ICall String Int | IPop | LoadGloba
 - const は `evalConst` が依存する const を深さ優先で先に評価する（評価中の const に戻ってきたら循環エラー）。参照できるのは同じソースの const だけ
 - 評価は、評価済みの const だけを含む Env で `compileExprTyped` にかけて命令列にし、VM（`run`、→ 8）で実行する。型検査・ラップアラウンドは通常の式と同じになる。結果は型の正規形（i32 は符号拡張、u32 はゼロ拡張）に揃える
 - static の配列は要素ごとに評価する（`[e; N]` は e を1回評価して N 個並べる）
+- ポインタ型の要素は `evalAddrConst` がアドレスの定数として評価する。受け付けるのは同じソースの static の `&X`（`SAddr X 0`）と `&T[i]`（`SAddr T (i × 要素の格納幅)`。i は `evalConstExpr` で usize として評価し、範囲を検査する）。アドレスはロード時まで決まらないので VM は使わない
 
 ## 6. コード生成
 
@@ -146,7 +150,7 @@ data Instr   = Push Int | IAdd Width | ... | ICall String Int | IPop | LoadGloba
 - **アライメント**：`genBody` が操作スタックの深さを左から右へ追跡し（`stackDelta`）、`call` 直前に 16 バイト境界からずれていれば `subq $8` でパディングする。if/while は文の境界（操作スタックが空）にしか現れないので、分岐の合流点で深さが食い違うことはない。`printf`/`puts`/`exit` の直前は `andq $-16, %rsp` で強制的に揃える
 - **main**：他の fn と同じく `compileFnDecl` でコンパイルするが、`ret` の代わりに戻り値を型に応じたフォーマットで `printf` して終了するエピローグで終わる（`epilogue`）。そのため main は呼び出せない
 - **シンボル**：各 fn・static は `.globl` で公開する。`call` の対象や参照した static が未定義なら外部参照になる。`.L` ラベル（rodata の `.Lfmt64` 等を含む）はファイルローカルで、ユーザーのシンボルと衝突しない
-- **static**：`.data` セクションに `.globl`・`.balign`・`.quad`（64bit）／`.long`（32bit）で初期値を置き（`dataSection`）、RIP 相対（`name(%rip)`）で読み書きする。32bit の読み出しは `movslq` で、u32 は `loadFixup` でゼロ拡張し直す
+- **static**：`.data` セクションに `.globl`・`.balign`・`.quad`（64bit）／`.long`（32bit）で初期値を置き（`dataSection`。アドレスの定数は `.quad X` / `.quad T+16` と書き、PIE でもロード時の再配置で解決される）、RIP 相対（`name(%rip)`）で読み書きする。32bit の読み出しは `movslq` で、u32 は `loadFixup` でゼロ拡張し直す
 - **共通部**：エラー処理（`.Ldiv_zero_error`、`.Lindex_error`：メッセージを `puts` して `exit(1)`。`runtimeErrors`）と rodata（`rodataSection`）はファイルごとに1回出力する
 
 ## 7. ドライバ
