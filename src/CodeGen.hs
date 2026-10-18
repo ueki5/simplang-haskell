@@ -1,7 +1,7 @@
 module CodeGen (codegen, codegenModule) where
 
-import Compiler (Instr (..))
-import Data.List (mapAccumL)
+import Compiler (Instr (..), StaticData)
+import Data.List (intercalate, mapAccumL)
 import Parser (Signedness (..), Type (..), Width (..))
 
 -- -- Debug Printサンプル（pTraceShow: 純粋関数内, pTraceShowM: モナド内）
@@ -14,19 +14,22 @@ import Parser (Signedness (..), Type (..), Width (..))
 
 -- 単一ソースで完結するプログラム（mainあり）のアセンブリを組み立てる
 codegen :: [(String, [Instr])] -> Type -> [Instr] -> String
-codegen fns finalType mainInstrs = codegenModule fns (Just (finalType, mainInstrs))
+codegen fns finalType mainInstrs = codegenModule [] fns (Just (finalType, mainInstrs))
 
--- main以外の各fn（(名前, 命令列)）＋mainがあれば（戻り値の型, 命令列）から1ソース分のアセンブリ全体を組み立てる。
--- 各fnは他のオブジェクトファイルから呼べるよう .globl で公開する（mainも同様、mainが無いソースもある）。
+-- static の初期値＋main以外の各fn（(名前, 命令列)）＋mainがあれば（戻り値の型, 命令列）から
+-- 1ソース分のアセンブリ全体を組み立てる。
+-- 各fn・staticは他のオブジェクトファイルから参照できるよう .globl で公開する（mainも同様、mainが無いソースもある）。
 -- .text はファイル全体で一度だけ、各fnラベルはその後に、mainはmain:として
 -- 最後に並べる（GASのラベル解決は出現順に依存しないため順序自体に意味はない）
-codegenModule :: [(String, [Instr])] -> Maybe (Type, [Instr]) -> String
-codegenModule fns mainPart =
+codegenModule :: [StaticData] -> [(String, [Instr])] -> Maybe (Type, [Instr]) -> String
+codegenModule statics fns mainPart =
   unlines $
     ["    .section .text"]
       ++ concatMap genFn fns
       ++ maybe [] genMain mainPart
-      ++ commonTail
+      ++ runtimeErrors
+      ++ dataSection statics
+      ++ rodataSection
   where
     genFn (name, instrs) =
       ("    .globl " ++ name)
@@ -76,8 +79,8 @@ epilogueRet =
 -- 整数型・ポインタ型はそのまま値を %rsi に渡すが、bool は 0/1 を "true"/"false" 文字列へ分岐させる。
 epilogue :: Type -> [String]
 epilogue (TyInt sg w) = printfEpilogue (fmtLabel sg w)
-epilogue TUsize = printfEpilogue "fmtU64"
-epilogue (TPtr _) = printfEpilogue "fmtPtr"
+epilogue TUsize = printfEpilogue ".LfmtU64"
+epilogue (TPtr _) = printfEpilogue ".LfmtPtr"
 -- () は何も出力しない（Rust の main と同様）
 epilogue TUnit =
   [ "    xorl  %eax, %eax",
@@ -91,10 +94,10 @@ epilogue TBool =
     "    andq  $-16, %rsp",
     "    testq %rax, %rax",
     "    jne   .Lbool_true",
-    "    leaq  strFalse(%rip), %rdi",
+    "    leaq  .LstrFalse(%rip), %rdi",
     "    jmp   .Lbool_print",
     ".Lbool_true:",
-    "    leaq  strTrue(%rip), %rdi",
+    "    leaq  .LstrTrue(%rip), %rdi",
     ".Lbool_print:",
     "    xorl  %eax, %eax",
     "    call  printf",
@@ -116,48 +119,70 @@ printfEpilogue label =
     "    ret"
   ]
 
--- ゼロ除算・配列の範囲外アクセス時のエラー処理とrodataセクションは全関数で共通、ファイル全体で一度だけ出力する
-commonTail :: [String]
-commonTail =
+-- ゼロ除算・配列の範囲外アクセス時のエラー処理は全関数で共通、ファイル全体で一度だけ出力する
+runtimeErrors :: [String]
+runtimeErrors =
   [ ".Ldiv_zero_error:",
     "    andq  $-16, %rsp",
-    "    leaq  errmsg(%rip), %rdi",
+    "    leaq  .Lerrmsg(%rip), %rdi",
     "    call  puts",
     "    movl  $1, %edi",
     "    call  exit",
     ".Lindex_error:",
     "    andq  $-16, %rsp",
-    "    leaq  idxerrmsg(%rip), %rdi",
+    "    leaq  .Lidxerrmsg(%rip), %rdi",
     "    call  puts",
     "    movl  $1, %edi",
-    "    call  exit",
-    "    .section .rodata",
-    "fmt32:",
+    "    call  exit"
+  ]
+
+-- static の初期値を .data セクションへ並べる（格納幅ごとに .quad/.long。static が無ければ何も出力しない）
+dataSection :: [StaticData] -> [String]
+dataSection [] = []
+dataSection statics = "    .section .data" : concatMap genStatic statics
+  where
+    genStatic (name, w, vs) =
+      [ "    .globl " ++ name,
+        "    .balign " ++ show (widthBytes w),
+        name ++ ":",
+        "    " ++ directive w ++ " " ++ intercalate ", " (map show vs)
+      ]
+    directive W64 = ".quad"
+    directive W32 = ".long"
+    widthBytes W64 = 8 :: Int
+    widthBytes W32 = 4
+
+-- 書式文字列・エラーメッセージ。ラベルは .L 付きのファイルローカルなものにして、
+-- ユーザーの fn・static のシンボルと衝突しないようにする
+rodataSection :: [String]
+rodataSection =
+  [ "    .section .rodata",
+    ".Lfmt32:",
     "    .string \"%d\\n\"",
-    "fmt64:",
+    ".Lfmt64:",
     "    .string \"%ld\\n\"",
-    "fmtU32:",
+    ".LfmtU32:",
     "    .string \"%u\\n\"",
-    "fmtU64:",
+    ".LfmtU64:",
     "    .string \"%lu\\n\"",
-    "fmtPtr:",
+    ".LfmtPtr:",
     "    .string \"%p\\n\"",
-    "strTrue:",
+    ".LstrTrue:",
     "    .string \"true\\n\"",
-    "strFalse:",
+    ".LstrFalse:",
     "    .string \"false\\n\"",
-    "errmsg:",
+    ".Lerrmsg:",
     "    .string \"division by zero\"",
-    "idxerrmsg:",
+    ".Lidxerrmsg:",
     "    .string \"index out of bounds\"",
     "    .section .note.GNU-stack,\"\",@progbits"
   ]
 
 fmtLabel :: Signedness -> Width -> String
-fmtLabel Signed W32 = "fmt32"
-fmtLabel Signed W64 = "fmt64"
-fmtLabel Unsigned W32 = "fmtU32"
-fmtLabel Unsigned W64 = "fmtU64"
+fmtLabel Signed W32 = ".Lfmt32"
+fmtLabel Signed W64 = ".Lfmt64"
+fmtLabel Unsigned W32 = ".LfmtU32"
+fmtLabel Unsigned W64 = ".LfmtU64"
 
 -- 関数本体の命令列をアセンブリへ変換する。ICall（ユーザー関数呼び出し）だけは、
 -- 呼び出し直前のスタックアライメントを静的に判定するために操作スタックの深さ
@@ -205,6 +230,9 @@ stackDelta (IBoundsCheck _) = 0
 stackDelta (StoreInd _) = -2
 stackDelta (ICall _ n) = 1 - n
 stackDelta IPop = -1
+stackDelta (LoadGlobal _ _) = 1
+stackDelta (StoreGlobal _ _) = -1
+stackDelta (LoadGlobalAddr _) = 1
 
 -- 呼び出し直前（＝n個の引数をレジスタへpopし終えた時点）の深さ d = depthAtCall - n が奇数なら、
 -- 16バイト境界からrspが8バイトずれるため、call前後に8バイトのパディングを挟んで補正する
@@ -481,6 +509,26 @@ genInstr (StoreArg i W32 off) =
   ]
 genInstr IPop =
   [ "    addq  $8, %rsp"
+  ]
+genInstr (LoadGlobal W64 name) =
+  [ "    movq  " ++ name ++ "(%rip), %rax",
+    "    pushq %rax"
+  ]
+genInstr (LoadGlobal W32 name) =
+  [ "    movslq " ++ name ++ "(%rip), %rax",
+    "    pushq %rax"
+  ]
+genInstr (StoreGlobal W64 name) =
+  [ "    popq  %rax",
+    "    movq  %rax, " ++ name ++ "(%rip)"
+  ]
+genInstr (StoreGlobal W32 name) =
+  [ "    popq  %rax",
+    "    movl  %eax, " ++ name ++ "(%rip)"
+  ]
+genInstr (LoadGlobalAddr name) =
+  [ "    leaq  " ++ name ++ "(%rip), %rax",
+    "    pushq %rax"
   ]
 genInstr (ICall _ _) =
   error "ICall requires operand-stack-depth context; must be generated via genBody, not genInstr"

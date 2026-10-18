@@ -9,20 +9,20 @@
 ソース (.sl)
   → tokenize       (src/Parser.hs)    字句解析                     String → [Token]
   → parse          (src/Parser.hs)    再帰下降パーサ                [Token] → Program
-  → compileModule  (src/Compiler.hs)  型検査 + 中間命令列への変換    [FnDecl] → [Instr]（fn ごと）
+  → compileModule  (src/Compiler.hs)  型検査 + 定数式の評価 + 中間命令列への変換    Program → [Instr]（fn ごと）+ static の初期値
   → codegenModule  (src/CodeGen.hs)   x86-64 AT&T 構文アセンブリ    [Instr] → String
   → gcc -c         (src/Driver.hs)    アセンブル                    .s → .o
   → gcc            (src/Driver.hs)    リンク（libc の printf/puts/exit を使う）  .o... → 実行ファイル
 ```
 
-コンパイルはソースファイル単位で行い、他のソースの fn はシグネチャだけを使って呼び出す（本体はリンク時に解決される）。
+コンパイルはソースファイル単位で行い、他のソースの fn はシグネチャだけを使って呼び出す（本体はリンク時に解決される）。他のソースの static は型とシンボル名だけを使って参照し、const は評価済みの値を取り込む。
 
 ## 2. モジュール
 
 | ファイル | 責務 |
 |---|---|
 | `src/Parser.hs` | トークン・AST・型（`Type`/`Width`/`Signedness`）の定義、`tokenize`、`parse` |
-| `src/Compiler.hs` | 中間命令 `Instr` の定義、シグネチャ表の構築、型検査とIR生成（`compileModule`/`compile`）、テスト用スタックVM（`run`） |
+| `src/Compiler.hs` | 中間命令 `Instr` の定義、シグネチャ表・グローバルの表の構築（定数式の評価を含む）、型検査とIR生成（`compileModule`/`compile`）、スタックVM（`run`） |
 | `src/CodeGen.hs` | `Instr` → x86-64 アセンブリ（`codegenModule`/`codegen`） |
 | `src/Driver.hs` | 入力の種類の判定、import の解決、各段階の実行と gcc 呼び出し、中間ファイルの管理（`build`） |
 | `app/Main.hs` | コマンドライン引数の解析（optparse-applicative）と `build` の呼び出し |
@@ -34,9 +34,11 @@
 
 ```haskell
 -- AST（src/Parser.hs）
-data Program = Program { progImports :: [FilePath], progFns :: [FnDecl] }
-data FnDecl  = FnDecl String [(String, Type)] Type Body   -- 名前, 仮引数, 戻り値型, 本体
-type Body    = ([Stmt], Expr)                             -- 文の列 + 末尾式
+data Program    = Program { progImports :: [FilePath], progGlobals :: [GlobalDecl], progFns :: [FnDecl] }
+data FnDecl     = FnDecl String [(String, Type)] Type Body   -- 名前, 仮引数, 戻り値型, 本体
+type Body       = ([Stmt], Expr)                             -- 文の列 + 末尾式
+data GlobalDecl = GlobalDecl GlobalKind String Type Expr     -- const/static, 名前, 型, 初期値
+data GlobalKind = GConst | GStatic
 
 -- 型
 data Width      = W32 | W64                 -- 整数のビット幅 = codegen のレジスタ幅
@@ -47,9 +49,13 @@ data Type = TyInt Signedness Width          -- i32 / i64 / u32 / u64
           | TArray Type Int                 -- [T; N]
 
 -- コンパイラ（src/Compiler.hs）
-type Env    = [Map String (Int, Type)]      -- 変数名 → (%rbp 相対オフセット, 型)。スコープのスタック（先頭が最内側）
-type FnSigs = Map String ([Type], Type)     -- fn 名 → (仮引数の型, 戻り値型)
-data Instr  = Push Int | IAdd Width | ... | ICall String Int | IPop   -- スタックマシンの中間命令
+data Loc     = LLocal Int | LStatic String | LConst Int   -- %rbp 相対オフセット / static のシンボル名 / const の値
+type Env     = [Map String (Loc, Type)]     -- 変数名 → (場所, 型)。スコープのスタック（先頭が最内側、末尾がグローバル）
+type FnSigs  = Map String ([Type], Type)    -- fn 名 → (仮引数の型, 戻り値型)
+type Globals = Map String (Loc, Type)       -- const/static 名 → (LConst 値 / LStatic 名, 型)
+type StaticData = (String, Width, [Int])    -- static の初期値（シンボル名, 要素の格納幅, 値の列）
+data CompiledModule = CompiledModule { cmStatics :: [StaticData], cmFns :: [(String, [Instr])], cmMain :: Maybe (Type, [Instr]) }
+data Instr   = Push Int | IAdd Width | ... | ICall String Int | IPop | LoadGlobal Width String | ...   -- スタックマシンの中間命令
 ```
 
 ## 4. パーサ
@@ -59,15 +65,17 @@ data Instr  = Push Int | IAdd Width | ... | ICall String Int | IPop   -- スタ�
 - 文の判別（`parseStmts`）：キーワード、または `IDENT =`（先読み2トークン）で判別する。どれでもなければ式を試し読みし、次が `=` なら場所式への代入 `SAssignPlace`、`;` なら式文 `SExpr`、それ以外なら文の列の終わり（末尾式）として読み直す
 - 脱糖：fn 本体の末尾式の省略と `return;` は `UnitLit` に、`->` の省略は戻り値型 `TUnit` にする。AST 上は末尾式・return の値が常に存在する
 - 型サフィックス付き整数リテラル（`9999i64`）は字句解析で1トークン `TIntSuffixed` にまとめる。サフィックスの直後が識別子の構成文字なら（`10i64x`）サフィックスとみなさない
+- トップレベル（`parseItems`）は `fn` / `const` / `static` を混在して読み、`progGlobals` と `progFns` に振り分ける
 
 ## 5. 型検査と IR 生成
 
 ### 5.1 二パス構成
 
 1. `buildFnSigs`：全 fn の宣言から `FnSigs` を作る。重複定義・最大 6 引数・`main` の引数なし（`validateFnShapes`）とシグネチャ中の配列型の禁止を検査する。本体は見ないので宣言順に依存しない
-2. `compileModule importedSigs fnDecls`：自ソースのシグネチャと import 先のシグネチャ（`main` を除く）をマージし（同名はエラー）、各 fn の本体を `compileFnDecl` でコンパイルする
+2. `buildGlobals`：全 const/static の宣言から `Globals` と static の初期値を作る（→ 5.8）
+3. `compileModule importedSigs importedGlobals prog`：自ソースと import 先の fn シグネチャ（`main` を除く）・グローバルをマージし（fn・const・static は同じ名前空間で、同名はエラー）、各 fn の本体を `compileFnDecl` でコンパイルする
 
-`compile` は main を必須とする単一ソース用のラッパで、テストで使う。
+`compile` は main を必須とする単一ソース用のラッパで、命令列を検査するテストで使う（static の初期値は返さない）。
 
 ### 5.2 期待型の一様伝播
 
@@ -83,10 +91,11 @@ data Instr  = Push Int | IAdd Width | ... | ICall String Int | IPop   -- スタ�
 
 ### 5.3 変数とスコープ
 
-- `Env` はスコープのスタック。fn 本体は仮引数だけのスコープから始まり、文を左から右へ単一パスで処理しながら `(Env, cursor)` を引き回す（`compileStmtsFrom`）
+- `Env` はスコープのスタック。fn 本体は `[仮引数のスコープ, グローバルのスコープ]` から始まり、文を左から右へ単一パスで処理しながら `(Env, cursor)` を引き回す（`compileStmtsFrom`）
+- 名前の解決は `lookupVar` 1つで行い、見つかった場所（`Loc`）で命令を選ぶ：ローカルは `Load`/`Store`/`LoadAddr`、static は `LoadGlobal`/`StoreGlobal`/`LoadGlobalAddr`、const は `Push 値`（代入・`&` はエラー）
 - `cursor` はスタック上の次の空き位置（%rbp 相対、負の方向へ伸びる）。変数は型の実サイズ（`stackBytes`。i32=4, i64=8, 配列は要素数×要素サイズ）で詰めて配置し、オフセットは `cursor - stackBytes ty`
 - `{}`・if の各分岐・while の本体は空のスコープを push して再帰コンパイルし、戻ったら呼び出し前の `Env`/`cursor` で続ける。これでスコープアウトとスタック領域の巻き戻しが同時に実現され、時間的に重ならない兄弟ブロックは同じ領域を再利用する
-- 同一スコープでの再宣言は `declaredLocally` でエラーにし、外側との同名（シャドーイング）は許可する
+- 同一スコープでの再宣言は `declaredLocally` でエラーにし、外側との同名（シャドーイング）は許可する。ただし let・仮引数で const/static と同名の変数は宣言できない（`checkNotGlobal`）
 
 ### 5.4 制御構文とラベル
 
@@ -97,15 +106,15 @@ data Instr  = Push Int | IAdd Width | ... | ICall String Int | IPop   -- スタ�
 ### 5.5 場所式とポインタ
 
 - 場所式（`&` の対象・代入の左辺）は `addressOf` が一本化して扱う。認めるのは `Var`、`Deref`、`Index` の3種類で、それ以外は `not an lvalue` エラー
-- `&x` は `LoadAddr off`、`&*p` は `p` の値そのもの、`&a[i]` は要素アドレス
+- `&x` は `LoadAddr off`（static なら `LoadGlobalAddr name`）、`&*p` は `p` の値そのもの、`&a[i]` は要素アドレス
 - 読み出しは `LoadInd`、場所式への書き込みは `StoreInd`
-- `checkNoLocalRef`：fn の return 式・末尾式が直接 `&ローカル変数` / `&ローカル配列[i]` ならエラー。main は対象外
+- `checkNoLocalRef`：fn の return 式・末尾式が直接 `&ローカル変数` / `&ローカル配列[i]` ならエラー（`&static` は可）。main は対象外
 
 ### 5.6 配列
 
 - 配列変数の先頭（最下位アドレス）を `off = cursor - stackBytes ty` とし、要素 i は `off + i * elemSize`
 - `let` の初期化（`compileArrayInit`）は要素ごとに静的なオフセットへ `Store` する。`[e; N]` は e を1回だけ評価して要素0へ格納し、残りはそこからコピーする
-- 添字の基底は `arrayBase` が解決する：配列変数なら `LoadAddr`、`&[T; N]` 型の式（`p[i]` の自動参照外し、`(*p)[i]`）ならその値を先頭アドレスとする。`N` は型から得られる
+- 添字の基底は `arrayBase` が解決する：配列変数なら `LoadAddr`（static の配列なら `LoadGlobalAddr`）、`&[T; N]` 型の式（`p[i]` の自動参照外し、`(*p)[i]`）ならその値を先頭アドレスとする。`N` は型から得られる
 - 要素アドレスは `indexAddr` が `基底 + 添字（期待型 usize）+ IBoundsCheck N + Push size; IMul W64; IAdd W64` で計算する。添字がリテラルならコンパイル時にも範囲を検査する
 
 ### 5.7 整数の表現と命令選択
@@ -116,6 +125,14 @@ data Instr  = Push Int | IAdd Width | ... | ICall String Int | IPop   -- スタ�
 - 除算は符号なしなら `IDivU`、大小比較は符号なしなら `ICmpLtU` 等（`cmpInstr`）
 - キャスト（`castInstrs`）：32bit への変換はキャスト先の符号で正規化（`ISext32` / `IZext32`）、32→64bit の拡大はキャスト元の符号で拡張、64bit 同士は命令なし
 - bool と () は 32bit スロットに格納する（() は常に 0）。ポインタは指す先によらず 8 バイト（`storageWidth`）
+
+### 5.8 const/static と定数式の評価
+
+- `buildGlobals` が型（const はスカラー、static はスカラーとその配列）と名前の重複を検査し、初期値を評価する
+- 定数式は `checkConstExpr` が AST で検査する（リテラル・変数参照・単項/二項演算・キャストのみ。static の参照は不可）
+- const は `evalConst` が依存する const を深さ優先で先に評価する（評価中の const に戻ってきたら循環エラー）。参照できるのは同じソースの const だけ
+- 評価は、評価済みの const だけを含む Env で `compileExprTyped` にかけて命令列にし、VM（`run`、→ 8）で実行する。型検査・ラップアラウンドは通常の式と同じになる。結果は型の正規形（i32 は符号拡張、u32 はゼロ拡張）に揃える
+- static の配列は要素ごとに評価する（`[e; N]` は e を1回評価して N 個並べる）
 
 ## 6. コード生成
 
@@ -128,8 +145,9 @@ data Instr  = Push Int | IAdd Width | ... | ICall String Int | IPop   -- スタ�
 - **関数呼び出し**：SysV AMD64 ABI。引数はレジスタ（`%rdi` `%rsi` `%rdx` `%rcx` `%r8` `%r9`）で渡し、プロローグ直後に `StoreArg` でスタックへ退避する。戻り値は `%rax`
 - **アライメント**：`genBody` が操作スタックの深さを左から右へ追跡し（`stackDelta`）、`call` 直前に 16 バイト境界からずれていれば `subq $8` でパディングする。if/while は文の境界（操作スタックが空）にしか現れないので、分岐の合流点で深さが食い違うことはない。`printf`/`puts`/`exit` の直前は `andq $-16, %rsp` で強制的に揃える
 - **main**：他の fn と同じく `compileFnDecl` でコンパイルするが、`ret` の代わりに戻り値を型に応じたフォーマットで `printf` して終了するエピローグで終わる（`epilogue`）。そのため main は呼び出せない
-- **シンボル**：各 fn は `.globl` で公開する。`call` の対象が未定義なら外部参照になる。`.L` ラベルと rodata のラベル（`fmt64` 等）はファイルローカル
-- **共通部**：エラー処理（`.Ldiv_zero_error`、`.Lindex_error`：メッセージを `puts` して `exit(1)`）と rodata はファイルごとに1回出力する（`commonTail`）
+- **シンボル**：各 fn・static は `.globl` で公開する。`call` の対象や参照した static が未定義なら外部参照になる。`.L` ラベル（rodata の `.Lfmt64` 等を含む）はファイルローカルで、ユーザーのシンボルと衝突しない
+- **static**：`.data` セクションに `.globl`・`.balign`・`.quad`（64bit）／`.long`（32bit）で初期値を置き（`dataSection`）、RIP 相対（`name(%rip)`）で読み書きする。32bit の読み出しは `movslq` で、u32 は `loadFixup` でゼロ拡張し直す
+- **共通部**：エラー処理（`.Ldiv_zero_error`、`.Lindex_error`：メッセージを `puts` して `exit(1)`。`runtimeErrors`）と rodata（`rodataSection`）はファイルごとに1回出力する
 
 ## 7. ドライバ
 
@@ -137,17 +155,17 @@ data Instr  = Push Int | IAdd Width | ... | ICall String Int | IPop   -- スタ�
 
 - 入力の種類を拡張子で判定し、`-S`/`-c` との組み合わせを検証する（`classifyInputs`）
 - import の解決（`resolveImports`）：import を書いたソースのディレクトリからの相対パス。同一ファイルの判定は `canonicalizePath`
-- 1ソースのコンパイル（`compileSource`）：**直接** import したソースのシグネチャだけを集めて `compileModule` に渡す
-- リンクまでの一括処理：入力から import を再帰的にたどって全ソースを集め（`collectSources`、循環可）、fn 名の重複と main がちょうど1つであることを検査する（`checkLinkUnits`）
+- 1ソースのコンパイル（`compileSource`）：**直接** import したソースのシグネチャとグローバル（`buildGlobals` で const を評価したもの）だけを集めて `compileModule` に渡す（`importedSigs`。import 先どうしの同名もここで検査する）
+- リンクまでの一括処理：入力から import を再帰的にたどって全ソースを集め（`collectSources`、循環可）、fn 名・static 名の重複と main がちょうど1つであることを検査する（`checkLinkUnits`）
 - 中間ファイル：`OUTDIR/basename.s` / `.o`。名前の衝突を事前に検査し（`checkIntermediates`）、`-d` が無ければ成功・失敗を問わず `finally` で削除する
 - gcc：`gcc -c X.s -g -o X.o`（アセンブル）、`gcc OBJS... -o OUTPUT`（リンク）を `readProcessWithExitCode` で呼ぶ
 - エラーは `ExceptT String IO` で伝播させ、ファイル単位の処理のエラーにはファイル名を前置する（`inFile`）
 
 ## 8. テスト用スタック VM
 
-`Compiler.run :: [Instr] -> Either String Int` は中間命令列を直接実行する簡易 VM で、テストでのみ使う。
+`Compiler.run :: [Instr] -> Either String Int` は中間命令列を直接実行する簡易 VM で、テストと定数式の評価（→ 5.8）で使う。
 アドレスは %rbp=0 とみなしたオフセット値で表現し、`trunc`/`zext32`/`divU` で実機の切り詰め・拡張・符号なし除算を再現する。
-ジャンプ（`Jmp`/`JmpIfZero`）・関数呼び出し（`ICall`）・引数の退避（`StoreArg`）は扱わないため、制御構文や関数を含む命令列は結合テストで検証する。
+ジャンプ（`Jmp`/`JmpIfZero`）・関数呼び出し（`ICall`）・引数の退避（`StoreArg`）・static の読み書き（`LoadGlobal` 等）は扱わないため、制御構文や関数・static を含む命令列は結合テストで検証する。
 
 ## 9. テスト
 
@@ -180,7 +198,7 @@ GitHub Actions（`.github/workflows/ci.yml`）が、`main` への push・PR・�
 | `optparse-applicative` | コマンドライン引数の解析 |
 | `process` | gcc の呼び出し（`readProcessWithExitCode`） |
 | `directory` / `filepath` | import の解決、中間ファイル、テンポラリディレクトリ |
-| `containers` | `Env`・`FnSigs` の `Map` |
+| `containers` | `Env`・`FnSigs`・`Globals` の `Map` |
 | `transformers` | `StateT`（ラベル番号）、`ExceptT`（ドライバのエラー伝播） |
 | `hspec` / `temporary` | テスト専用 |
 
