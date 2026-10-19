@@ -6,7 +6,7 @@ import Control.Exception (bracket)
 import Data.Either (isLeft, isRight)
 import qualified Data.Map as Map
 import Driver (BuildOpts (BuildOpts), Mode (..), build)
-import Parser (Expr (..), FnDecl (..), GlobalDecl (..), GlobalKind (..), Program (..), Signedness (..), Stmt (..), Token (..), Type (..), Width (..), parse, tokenize)
+import Parser (Expr (..), FnDecl (..), GlobalDecl (..), GlobalKind (..), Program (..), Signedness (..), Stmt (..), Token (..), Type (..), Visibility (..), Width (..), parse, tokenize)
 import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
@@ -447,14 +447,15 @@ main = hspec $ do
     let parseSrc src = tokenize src >>= fmap splitMain . parse
     it "引数無しのfn定義" $
       parseSrc "fn f() -> i64 {\n1\n}\nfn main() -> i64 {\n2\n}"
-        `shouldBe` Right ([FnDecl "f" [] (TyInt Signed W64) ([], Lit 1)], [], Lit 2)
+        `shouldBe` Right ([FnDecl Private "f" [] (TyInt Signed W64) ([], Lit 1)], [], Lit 2)
     it "引数1個のfn定義" $
       parseSrc "fn f(a: i64) -> i64 {\na\n}\nfn main() -> i64 {\n2\n}"
-        `shouldBe` Right ([FnDecl "f" [("a", TyInt Signed W64)] (TyInt Signed W64) ([], Var "a")], [], Lit 2)
+        `shouldBe` Right ([FnDecl Private "f" [("a", TyInt Signed W64)] (TyInt Signed W64) ([], Var "a")], [], Lit 2)
     it "引数複数個のfn定義（型が混在してもパースできる。型検査は別）" $
       parseSrc "fn f(a: i64, b: i32, c: bool) -> i64 {\na\n}\nfn main() -> i64 {\n2\n}"
         `shouldBe` Right
           ( [ FnDecl
+                Private
                 "f"
                 [("a", TyInt Signed W64), ("b", TyInt Signed W32), ("c", TBool)]
                 (TyInt Signed W64)
@@ -466,15 +467,15 @@ main = hspec $ do
     it "fn本体は文の列＋末尾式を持てる" $
       parseSrc "fn f() -> i64 {\nlet x: i64 = 1;\nx\n}\nfn main() -> i64 {\n2\n}"
         `shouldBe` Right
-          ( [FnDecl "f" [] (TyInt Signed W64) ([SLet "x" (TyInt Signed W64) (Lit 1)], Var "x")],
+          ( [FnDecl Private "f" [] (TyInt Signed W64) ([SLet "x" (TyInt Signed W64) (Lit 1)], Var "x")],
             [],
             Lit 2
           )
     it "fn定義は複数並べられる" $
       parseSrc "fn f() -> i64 {\n1\n}\nfn g() -> i64 {\n2\n}\nfn main() -> i64 {\n3\n}"
         `shouldBe` Right
-          ( [ FnDecl "f" [] (TyInt Signed W64) ([], Lit 1),
-              FnDecl "g" [] (TyInt Signed W64) ([], Lit 2)
+          ( [ FnDecl Private "f" [] (TyInt Signed W64) ([], Lit 1),
+              FnDecl Private "g" [] (TyInt Signed W64) ([], Lit 2)
             ],
             [],
             Lit 3
@@ -482,22 +483,22 @@ main = hspec $ do
     it "fn定義はmainの前後どちらにも書ける" $
       parseSrc "fn main() -> i64 {\nlet a: i64 = 1;\nlet b: i64 = 2;\na + b\n}\nfn f() -> i64 {\n1\n}"
         `shouldBe` Right
-          ( [FnDecl "f" [] (TyInt Signed W64) ([], Lit 1)],
+          ( [FnDecl Private "f" [] (TyInt Signed W64) ([], Lit 1)],
             [SLet "a" (TyInt Signed W64) (Lit 1), SLet "b" (TyInt Signed W64) (Lit 2)],
             Add (Var "a") (Var "b")
           )
     it "fn本体の末尾式を省略すると () に脱糖する（型の不一致はcompile側で検出）" $
       parseSrc "fn f() -> i64 {\nlet x: i64 = 1;\n}\nfn main() -> i64 {\n2\n}"
-        `shouldBe` Right ([FnDecl "f" [] (TyInt Signed W64) ([SLet "x" (TyInt Signed W64) (Lit 1)], UnitLit)], [], Lit 2)
+        `shouldBe` Right ([FnDecl Private "f" [] (TyInt Signed W64) ([SLet "x" (TyInt Signed W64) (Lit 1)], UnitLit)], [], Lit 2)
     it "パラメータの型注釈は省略できない" $
       parseSrc "fn add(a, b: i64) -> i64 {\na + b\n}\nfn main() -> i64 {\n0\n}"
         `shouldBe` Left "expected ':' and type after parameter name: a"
     it "戻り値型を省略すると () とする（Rustと同じ）" $
       parseSrc "fn f(a: i64) {\n}\nfn main() -> i64 {\n0\n}"
-        `shouldBe` Right ([FnDecl "f" [("a", TyInt Signed W64)] TUnit ([], UnitLit)], [], Lit 0)
+        `shouldBe` Right ([FnDecl Private "f" [("a", TyInt Signed W64)] TUnit ([], UnitLit)], [], Lit 0)
     it "-> () の明示は戻り値型の省略と同じ" $
       parseSrc "fn f(a: i64) -> () {\n}\nfn main() -> i64 {\n0\n}"
-        `shouldBe` Right ([FnDecl "f" [("a", TyInt Signed W64)] TUnit ([], UnitLit)], [], Lit 0)
+        `shouldBe` Right ([FnDecl Private "f" [("a", TyInt Signed W64)] TUnit ([], UnitLit)], [], Lit 0)
     it "引数無しの呼び出し式" $
       parseSrc "fn main() {\nf()\n}" `shouldBe` Right ([], [], Call "f" [])
     it "引数1個の呼び出し式" $
@@ -511,13 +512,13 @@ main = hspec $ do
     it "return文（値付き）" $
       parseSrc "fn f() -> i64 {\nreturn 1;\n2\n}\nfn main() -> i64 {\n3\n}"
         `shouldBe` Right
-          ( [FnDecl "f" [] (TyInt Signed W64) ([SReturn (Lit 1)], Lit 2)],
+          ( [FnDecl Private "f" [] (TyInt Signed W64) ([SReturn (Lit 1)], Lit 2)],
             [],
             Lit 3
           )
     it "値の無いreturn文は return () に脱糖する（型の不一致はcompile側で検出）" $
       parseSrc "fn f() -> i64 {\nreturn;\n1\n}\nfn main() -> i64 {\n2\n}"
-        `shouldBe` Right ([FnDecl "f" [] (TyInt Signed W64) ([SReturn UnitLit], Lit 1)], [], Lit 2)
+        `shouldBe` Right ([FnDecl Private "f" [] (TyInt Signed W64) ([SReturn UnitLit], Lit 1)], [], Lit 2)
     it "return文に;が無ければエラー" $
       parseSrc "fn f() -> i64 {\nreturn 1\n2\n}\nfn main() {\n3\n}" `shouldSatisfy` isLeft
 
@@ -1766,10 +1767,10 @@ main = hspec $ do
           )
     it "末尾式を省略したfnは末尾式 () に脱糖する" $
       parseSrc "fn f() {\nlet x = 1;\n}\nfn main() -> i64 {\n2\n}"
-        `shouldBe` Right ([FnDecl "f" [] TUnit ([SLetInferred "x" (Lit 1)], UnitLit)], [], Lit 2)
+        `shouldBe` Right ([FnDecl Private "f" [] TUnit ([SLetInferred "x" (Lit 1)], UnitLit)], [], Lit 2)
     it "return; は return () に脱糖する" $
       parseSrc "fn f() -> () {\nreturn;\n}\nfn main() -> i64 {\n2\n}"
-        `shouldBe` Right ([FnDecl "f" [] TUnit ([SReturn UnitLit], UnitLit)], [], Lit 2)
+        `shouldBe` Right ([FnDecl Private "f" [] TUnit ([SReturn UnitLit], UnitLit)], [], Lit 2)
     it "式文" $
       parseSrc "fn main() {\nf(1);\n1 + 2;\nx\n}"
         `shouldBe` Right ([], [SExpr (Call "f" [Lit 1]), SExpr (Add (Lit 1) (Lit 2))], Var "x")
@@ -1854,7 +1855,7 @@ main = hspec $ do
     let parseProgram src = tokenize src >>= parse
     it "トップレベルはfn定義の列" $
       parseProgram "fn f() -> i64 { 1 }\nfn main() -> i64 { f() }"
-        `shouldBe` Right (Program [] [] [FnDecl "f" [] (TyInt Signed W64) ([], Lit 1), FnDecl "main" [] (TyInt Signed W64) ([], Call "f" [])])
+        `shouldBe` Right (Program [] [] [FnDecl Private "f" [] (TyInt Signed W64) ([], Lit 1), FnDecl Private "main" [] (TyInt Signed W64) ([], Call "f" [])])
     it "空のプログラムはfn定義0個（mainの有無はcompile側で検査）" $
       parseProgram "" `shouldBe` Right (Program [] [] [])
     it "トップレベルの文はエラー" $
@@ -1930,7 +1931,7 @@ main = hspec $ do
       tokenize "import \"lib\n\";" `shouldBe` Left "unterminated string literal"
     it "importの列とfn定義の列をパースする" $
       parseProgram "import \"a.sl\";\nimport \"lib/b.sl\";\nfn main() {}"
-        `shouldBe` Right (Program ["a.sl", "lib/b.sl"] [] [FnDecl "main" [] TUnit ([], UnitLit)])
+        `shouldBe` Right (Program ["a.sl", "lib/b.sl"] [] [FnDecl Private "main" [] TUnit ([], UnitLit)])
     it "importの後に;が無いとエラー" $
       parseProgram "import \"a.sl\"\nfn main() {}" `shouldBe` Left "expected ';' after import"
     it "importのパスが文字列リテラルでないとエラー" $
@@ -1959,11 +1960,11 @@ main = hspec $ do
 
   describe "codegenModule" $ do
     it "各fnを.globlで公開する" $
-      codegenModule [] [("add", [Push 1])] Nothing `shouldContain` ".globl add"
+      codegenModule ["add"] [] [("add", [Push 1])] Nothing `shouldContain` ".globl add"
     it "mainが無ければmainを出力しない" $
-      codegenModule [] [("add", [Push 1])] Nothing `shouldNotContain` "main"
+      codegenModule [] [] [("add", [Push 1])] Nothing `shouldNotContain` "main"
     it "mainがあれば.globl mainとmain:を出力する" $
-      codegenModule [] [] (Just (TUnit, [])) `shouldContain` ".globl main\nmain:"
+      codegenModule [] [] [] (Just (TUnit, [])) `shouldContain` ".globl main\nmain:"
 
   describe "複数ソースからのビルド（Driver）" $ do
     it "importしたソースを再帰的にコンパイルしてリンクする" $
@@ -2011,8 +2012,8 @@ main = hspec $ do
     it "importが循環していてもビルドできる"
       $ withSources
         [ ("main.sl", "import \"a.sl\";\nfn main() -> i64 { f(3) }"),
-          ("a.sl", "import \"main.sl\";\nimport \"b.sl\";\nfn f(n: i64) -> i64 { g(n) }"),
-          ("b.sl", "import \"a.sl\";\nfn g(n: i64) -> i64 { if n > 0 { return f(n - 1) + 1; }\n0 }")
+          ("a.sl", "import \"main.sl\";\nimport \"b.sl\";\npub fn f(n: i64) -> i64 { g(n) }"),
+          ("b.sl", "import \"a.sl\";\npub fn g(n: i64) -> i64 { if n > 0 { return f(n - 1) + 1; }\n0 }")
         ]
       $ \dir -> do
         build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Right ()
@@ -2020,8 +2021,8 @@ main = hspec $ do
     it "importしたソース同士で同名のfnがあるとエラー"
       $ withSources
         [ ("main.sl", "import \"a.sl\";\nimport \"b.sl\";\nfn main() {}"),
-          ("a.sl", "fn f() {}"),
-          ("b.sl", "fn f() {}")
+          ("a.sl", "pub fn f() {}"),
+          ("b.sl", "pub fn f() {}")
         ]
       $ \dir -> do
         result <- build (BuildOpts [dir </> "main.sl"] (dir </> "main.s") AsmOnly Nothing)
@@ -2038,7 +2039,7 @@ main = hspec $ do
         result <- build (BuildOpts [dir </> "a.sl", dir </> "b.sl"] (dir </> "prog") Link Nothing)
         result `shouldBe` Left ("function main is defined in multiple files: " ++ dir </> "a.sl " ++ dir </> "b.sl")
     it "リンクする全ソースでfnが重複するとエラー" $
-      withSources [("a.sl", "fn main() {}\nfn f() {}"), ("b.sl", "fn f() {}")] $ \dir -> do
+      withSources [("a.sl", "fn main() {}\npub fn f() {}"), ("b.sl", "pub fn f() {}")] $ \dir -> do
         result <- build (BuildOpts [dir </> "a.sl", dir </> "b.sl"] (dir </> "prog") Link Nothing)
         result `shouldBe` Left ("function f is defined in both " ++ dir </> "a.sl and " ++ dir </> "b.sl")
     it "別ディレクトリの同名ソースは中間ファイル名が衝突するのでエラー" $
@@ -2069,13 +2070,13 @@ main = hspec $ do
       tokenize "constant statics" `shouldBe` Right [TIdent "constant", TIdent "statics"]
     it "constとstaticの定義をパースする" $
       progGlobals <$> parseProgram "const N: usize = 5;\nstatic X: i64 = N as i64;"
-        `shouldBe` Right [GlobalDecl GConst "N" TUsize (Lit 5), GlobalDecl GStatic "X" (TyInt Signed W64) (Cast (Var "N") (TyInt Signed W64))]
+        `shouldBe` Right [GlobalDecl Private GConst "N" TUsize (Lit 5), GlobalDecl Private GStatic "X" (TyInt Signed W64) (Cast (Var "N") (TyInt Signed W64))]
     it "fn定義と混在して書ける" $
       (\p -> (length (progGlobals p), length (progFns p))) <$> parseProgram "import \"a.sl\";\nconst A: i64 = 1;\nfn main() {}\nstatic B: bool = true;\nfn f() {}"
         `shouldBe` Right (2, 2)
     it "staticの配列をパースする" $
       progGlobals <$> parseProgram "static T: [i32; 2] = [0; 2];"
-        `shouldBe` Right [GlobalDecl GStatic "T" (TArray (TyInt Signed W32) 2) (ArrayRepeat (Lit 0) 2)]
+        `shouldBe` Right [GlobalDecl Private GStatic "T" (TArray (TyInt Signed W32) 2) (ArrayRepeat (Lit 0) 2)]
     it "型注釈の無いconstはエラー" $
       parseProgram "const N = 5;" `shouldBe` Left "expected ':' and type after const name: N"
     it "型注釈の無いstaticはエラー" $
@@ -2126,7 +2127,7 @@ main = hspec $ do
         `shouldBe` Right [("A", W32, map SInt [1, -2, 3]), ("B", W32, [SInt 4294967295]), ("C", W32, [SInt 1]), ("D", W64, map SInt [7, 7, 7])]
     it "importしたconst/staticを参照できる" $
       (tokenize "fn main() -> i64 { N + X }" >>= parse >>= compileModule Map.empty (Map.fromList [("N", (LConst 4, TyInt Signed W64)), ("X", (LStatic "X", TyInt Signed W64))]))
-        `shouldBe` Right (CompiledModule [] [] (Just (TyInt Signed W64, [Push 4, LoadGlobal W64 "X", IAdd W64, Label ".Lfn_end0"])))
+        `shouldBe` Right (CompiledModule [] [] (Just (TyInt Signed W64, [Push 4, LoadGlobal W64 "X", IAdd W64, Label ".Lfn_end0"])) [])
 
   describe "定数・static（意味論エラー）" $ do
     let compileSource src = fmap (const ()) (tokenize src >>= parse >>= compile)
@@ -2220,7 +2221,7 @@ main = hspec $ do
     it "importしたソースのconst/staticを使う"
       $ withSources
         [ ("main.sl", "import \"lib.sl\";\nfn main() -> i64 { bump(); COUNT = COUNT + 1; COUNT * BASE }"),
-          ("lib.sl", "const BASE: i64 = 10;\nstatic COUNT: i64 = 0;\nfn bump() { COUNT = COUNT + BASE; }")
+          ("lib.sl", "pub const BASE: i64 = 10;\npub static COUNT: i64 = 0;\npub fn bump() { COUNT = COUNT + BASE; }")
         ]
       $ \dir -> do
         build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Right ()
@@ -2229,7 +2230,7 @@ main = hspec $ do
       $ withSources
         [ ("main.sl", "import \"a.sl\";\nfn main() -> i64 { N }"),
           ("a.sl", "import \"b.sl\";\nfn f() {}"),
-          ("b.sl", "const N: i64 = 1;")
+          ("b.sl", "pub const N: i64 = 1;")
         ]
       $ \dir -> do
         result <- build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing)
@@ -2237,8 +2238,8 @@ main = hspec $ do
     it "importしたソース同士で同名のconstとfnがあるとエラー"
       $ withSources
         [ ("main.sl", "import \"a.sl\";\nimport \"b.sl\";\nfn main() {}"),
-          ("a.sl", "const f: i64 = 1;"),
-          ("b.sl", "fn f() {}")
+          ("a.sl", "pub const f: i64 = 1;"),
+          ("b.sl", "pub fn f() {}")
         ]
       $ \dir -> do
         result <- build (BuildOpts [dir </> "main.sl"] (dir </> "main.s") AsmOnly Nothing)
@@ -2252,15 +2253,15 @@ main = hspec $ do
         result <- build (BuildOpts [dir </> "main.sl"] (dir </> "main.s") AsmOnly Nothing)
         result `shouldBe` Left (dir </> "a.sl: division by zero in constant expression: N")
     it "リンクする全ソースでstaticが重複するとエラー" $
-      withSources [("a.sl", "static X: i64 = 1;\nfn main() {}"), ("b.sl", "static X: i64 = 2;")] $ \dir -> do
+      withSources [("a.sl", "pub static X: i64 = 1;\nfn main() {}"), ("b.sl", "pub static X: i64 = 2;")] $ \dir -> do
         result <- build (BuildOpts [dir </> "a.sl", dir </> "b.sl"] (dir </> "prog") Link Nothing)
         result `shouldBe` Left ("X is defined in both " ++ dir </> "a.sl and " ++ dir </> "b.sl")
     it "importしたconstと同名のconstを定義するとエラー" $
-      withSources [("a.sl", "import \"b.sl\";\nconst N: i64 = 1;\nfn main() -> i64 { N + f() }"), ("b.sl", "const N: i64 = 2;\nfn f() -> i64 { N }")] $ \dir -> do
+      withSources [("a.sl", "import \"b.sl\";\nconst N: i64 = 1;\nfn main() -> i64 { N + f() }"), ("b.sl", "pub const N: i64 = 2;\npub fn f() -> i64 { N }")] $ \dir -> do
         result <- build (BuildOpts [dir </> "a.sl"] (dir </> "prog") Link Nothing)
         result `shouldBe` Left (dir </> "a.sl: name already declared in imported file: N")
     it "importで同時に見えなければconstは重複してもよい" $
-      withSources [("a.sl", "import \"b.sl\";\nconst N: i64 = 1;\nfn main() -> i64 { N + f() }"), ("b.sl", "import \"c.sl\";\nfn f() -> i64 { N }"), ("c.sl", "const N: i64 = 2;")] $ \dir -> do
+      withSources [("a.sl", "import \"b.sl\";\nconst N: i64 = 1;\nfn main() -> i64 { N + f() }"), ("b.sl", "import \"c.sl\";\npub fn f() -> i64 { N }"), ("c.sl", "pub const N: i64 = 2;")] $ \dir -> do
         build (BuildOpts [dir </> "a.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Right ()
         readProcess (dir </> "prog") [] "" `shouldReturn` "3\n"
 
@@ -2360,17 +2361,120 @@ main = hspec $ do
     it "importしたソースのポインタ型のstaticを使う"
       $ withSources
         [ ("main.sl", "import \"lib.sl\";\nfn main() -> i64 { *CUR = 7; next(); *CUR = 8; VALS[0] * 10 + VALS[1] }"),
-          ("lib.sl", "static VALS: [i64; 2] = [0, 0];\nstatic CUR: &i64 = &VALS[0];\nfn next() { CUR = &VALS[1]; }")
+          ("lib.sl", "pub static VALS: [i64; 2] = [0, 0];\npub static CUR: &i64 = &VALS[0];\npub fn next() { CUR = &VALS[1]; }")
         ]
       $ \dir -> do
         build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Right ()
         readProcess (dir </> "prog") [] "" `shouldReturn` "78\n"
 
+  describe "pub（tokenize/parse）" $ do
+    it "pubは予約語" $
+      tokenize "pub fn" `shouldBe` Right [TPub, TFn]
+    it "pub付きの定義はPublic、無ければPrivate" $
+      (tokenize "pub const N: i64 = 1;\nstatic X: i64 = 2;\npub fn f() {}\nfn main() {}" >>= parse)
+        `shouldBe` Right
+          ( Program
+              []
+              [GlobalDecl Public GConst "N" (TyInt Signed W64) (Lit 1), GlobalDecl Private GStatic "X" (TyInt Signed W64) (Lit 2)]
+              [FnDecl Public "f" [] TUnit ([], UnitLit), FnDecl Private "main" [] TUnit ([], UnitLit)]
+          )
+    it "pub staticもPublic" $
+      (tokenize "pub static X: i64 = 2;" >>= parse)
+        `shouldBe` Right (Program [] [GlobalDecl Public GStatic "X" (TyInt Signed W64) (Lit 2)] [])
+    it "pubのあとにfn・const・static以外が続くとエラー" $
+      (tokenize "pub let x = 1;" >>= parse) `shouldBe` Left "expected 'fn', 'const' or 'static' after pub"
+    it "pub importはエラー" $
+      (tokenize "pub import \"a.sl\";\nfn main() {}" >>= parse) `shouldBe` Left "expected 'fn', 'const' or 'static' after pub"
+    it "末尾のpubはエラー" $
+      (tokenize "fn main() {}\npub" >>= parse) `shouldBe` Left "expected 'fn', 'const' or 'static' after pub"
+
+  describe "pub（codegenModule）" $ do
+    it "公開するfnにだけ.globlを付ける" $ do
+      let asm = codegenModule ["add"] [] [("add", [Push 1]), ("helper", [Push 2])] Nothing
+      asm `shouldContain` ".globl add\nadd:"
+      asm `shouldNotContain` ".globl helper"
+      asm `shouldContain` "helper:"
+    it "公開するstaticにだけ.globlを付ける" $ do
+      let asm = codegenModule ["X"] [("X", W64, [SInt 1]), ("Y", W64, [SInt 2])] [] Nothing
+      asm `shouldContain` ".globl X"
+      asm `shouldNotContain` ".globl Y"
+      asm `shouldContain` "Y:\n    .quad 2"
+    it "mainは公開の一覧に無くても.globlを付ける" $
+      codegenModule [] [] [] (Just (TUnit, [])) `shouldContain` ".globl main\nmain:"
+
+  describe "pub（Driver）" $ do
+    it "importしたソースのpubの定義を使う（非公開の定義はそのソースの中で使える）" $
+      withSources [("main.sl", "import \"lib.sl\";\nfn main() -> i64 { add(1) + LIMIT }"), pubLib] $
+        \dir -> do
+          build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Right ()
+          readProcess (dir </> "prog") [] "" `shouldReturn` "31\n"
+    it "importしたソースの非公開のfnは呼び出せない" $
+      withSources [("main.sl", "import \"lib.sl\";\nfn main() -> i64 { helper(1) }"), pubLib] $ \dir -> do
+        result <- build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing)
+        result `shouldBe` Left (dir </> "main.sl: undeclared function: helper")
+    it "importしたソースの非公開のconstは参照できない" $
+      withSources [("main.sl", "import \"lib.sl\";\nfn main() -> i64 { BASE }"), pubLib] $ \dir -> do
+        result <- build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing)
+        result `shouldBe` Left (dir </> "main.sl: undeclared variable: BASE")
+    it "importしたソースの非公開のstaticは参照できない" $
+      withSources [("main.sl", "import \"lib.sl\";\nfn main() -> i64 { CALLS }"), pubLib] $ \dir -> do
+        result <- build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing)
+        result `shouldBe` Left (dir </> "main.sl: undeclared variable: CALLS")
+    it "importしたソースの非公開の定義と同名の定義を書いてもよい" $
+      withSources [("main.sl", "import \"lib.sl\";\nconst BASE: i64 = 1;\nstatic CALLS: i64 = 2;\nfn helper() -> i64 { BASE + CALLS }\nfn main() -> i64 { add(1) + helper() }"), pubLib] $
+        \dir -> do
+          build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Right ()
+          readProcess (dir </> "prog") [] "" `shouldReturn` "14\n"
+    it "importした2つのソースに同名の非公開の定義があってもよい"
+      $ withSources
+        [ ("main.sl", "import \"a.sl\";\nimport \"b.sl\";\nfn main() -> i64 { fa() * 10 + fb() }"),
+          ("a.sl", "static S: i64 = 1;\nfn f() -> i64 { S }\npub fn fa() -> i64 { f() }"),
+          ("b.sl", "static S: i64 = 2;\nfn f() -> i64 { S }\npub fn fb() -> i64 { f() }")
+        ]
+      $ \dir -> do
+        build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Right ()
+        readProcess (dir </> "prog") [] "" `shouldReturn` "12\n"
+    it "リンクする全ソースで非公開のfn・staticが重複してもよい"
+      $ withSources
+        [ ("a.sl", "static X: i64 = 1;\nfn f() -> i64 { X }\nfn main() -> i64 { f() }"),
+          ("b.sl", "static X: i64 = 2;\nfn f() -> i64 { X }")
+        ]
+      $ \dir -> do
+        build (BuildOpts [dir </> "a.sl", dir </> "b.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Right ()
+        readProcess (dir </> "prog") [] "" `shouldReturn` "1\n"
+    it "pubと非公開のfnが重複してもよい（非公開の側はそのソースの中で解決される）"
+      $ withSources
+        [ ("a.sl", "fn f() -> i64 { 1 }\nfn main() -> i64 { f() }"),
+          ("b.sl", "pub fn f() -> i64 { 2 }")
+        ]
+      $ \dir -> do
+        build (BuildOpts [dir </> "a.sl", dir </> "b.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Right ()
+        readProcess (dir </> "prog") [] "" `shouldReturn` "1\n"
+    it "pubのstaticを通して非公開のstaticを読み書きできる"
+      $ withSources
+        [ ("main.sl", "import \"a.sl\";\nfn main() -> i64 { *P = 5; get() }"),
+          ("a.sl", "static X: i64 = 7;\npub static P: &i64 = &X;\npub fn get() -> i64 { X }")
+        ]
+      $ \dir -> do
+        build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Right ()
+        readProcess (dir </> "prog") [] "" `shouldReturn` "5\n"
+    it "pub fn mainも書ける" $
+      withSources [("main.sl", "pub fn main() -> i64 { 3 }")] $ \dir -> do
+        build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Right ()
+        readProcess (dir </> "prog") [] "" `shouldReturn` "3\n"
+    it "-Sの出力で非公開のfn・staticに.globlが付かない" $
+      withSources [pubLib] $ \dir -> do
+        build (BuildOpts [dir </> "lib.sl"] (dir </> "lib.s") AsmOnly Nothing) `shouldReturn` Right ()
+        asm <- readFile (dir </> "lib.s")
+        asm `shouldContain` ".globl add"
+        asm `shouldNotContain` ".globl helper"
+        asm `shouldNotContain` ".globl CALLS"
+
 -- パース結果を (main以外のfn定義, mainの文の列, mainの末尾式) に分解する（main が無ければテスト失敗）
 splitMain :: Program -> ([FnDecl], [Stmt], Expr)
 splitMain (Program _ _ prog) =
-  case [body | FnDecl "main" _ _ body <- prog] of
-    [(stmts, e)] -> ([d | d@(FnDecl name _ _ _) <- prog, name /= "main"], stmts, e)
+  case [body | FnDecl _ "main" _ _ body <- prog] of
+    [(stmts, e)] -> ([d | d@(FnDecl _ name _ _ _) <- prog, name /= "main"], stmts, e)
     _ -> error "splitMain: expected exactly one main"
 
 -- トークン列を main の本体として包んでパースする（文・式単位のパースのテスト用）
@@ -2382,7 +2486,7 @@ compileAndRun retTy expr =
   withSystemTempDirectory "hs006" $ \tmpDir -> do
     let asmPath = tmpDir </> "out.s"
         binPath = tmpDir </> "out"
-    case compile (Program [] [] [FnDecl "main" [] retTy ([], expr)]) of
+    case compile (Program [] [] [FnDecl Private "main" [] retTy ([], expr)]) of
       Left err -> error ("compile failed: " ++ err)
       Right (fns, finalType, instrs) -> do
         writeFile asmPath (codegen fns finalType instrs)
@@ -2399,7 +2503,7 @@ buildAndRun runBinary src =
     case tokenize src >>= parse >>= compileModule Map.empty Map.empty of
       Left err -> error ("compile failed: " ++ err)
       Right m -> do
-        writeFile asmPath (codegenModule (cmStatics m) (cmFns m) (cmMain m))
+        writeFile asmPath (codegenModule (cmPublic m) (cmStatics m) (cmFns m) (cmMain m))
         _ <- readProcess "gcc" [asmPath, "-o", binPath] ""
         runBinary binPath
 
@@ -2413,11 +2517,19 @@ compileSourceAndRunExit = buildAndRun $ \binPath -> do
   return (code, takeWhile (/= '\n') out)
 
 -- 複数ソースのビルドのテスト用: main.sl → lib/util.sl → lib/math.sl の順に import する（main の値は 10）
+-- pub の Driver のテストで import するソース（非公開の const・static・fn を pub の定義から使う）
+pubLib :: (FilePath, String)
+pubLib =
+  ( "lib.sl",
+    "const BASE: i64 = 10;\npub const LIMIT: i64 = BASE * 2;\nstatic CALLS: i64 = 0;\n"
+      ++ "fn helper(x: i64) -> i64 { CALLS = CALLS + 1; x + BASE }\npub fn add(x: i64) -> i64 { helper(x) }"
+  )
+
 multiSources :: [(FilePath, String)]
 multiSources =
   [ ("main.sl", "import \"lib/util.sl\";\nfn main() -> i64 { add(sq(3), 1) }"),
-    ("lib/util.sl", "import \"math.sl\";\nfn add(a: i64, b: i64) -> i64 { a + b }\nfn sq(x: i64) -> i64 { mul(x, x) }"),
-    ("lib/math.sl", "fn mul(a: i64, b: i64) -> i64 { a * b }")
+    ("lib/util.sl", "import \"math.sl\";\npub fn add(a: i64, b: i64) -> i64 { a + b }\npub fn sq(x: i64) -> i64 { mul(x, x) }"),
+    ("lib/math.sl", "pub fn mul(a: i64, b: i64) -> i64 { a * b }")
   ]
 
 -- 一時ディレクトリにソース群を書き出してから action を実行する

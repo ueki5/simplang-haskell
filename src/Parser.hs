@@ -1,4 +1,4 @@
-module Parser (Token (..), Expr (..), Stmt (..), FnDecl (..), GlobalKind (..), GlobalDecl (..), Width (..), Signedness (..), Type (..), Program (..), intRepr, tokenize, parse) where
+module Parser (Token (..), Expr (..), Stmt (..), Visibility (..), FnDecl (..), GlobalKind (..), GlobalDecl (..), Width (..), Signedness (..), Type (..), Program (..), intRepr, tokenize, parse) where
 
 import Data.Char (isAlpha, isAlphaNum, isDigit, isSpace)
 import Data.List (stripPrefix)
@@ -22,6 +22,7 @@ data Token
   | TImport
   | TConst
   | TStatic
+  | TPub
   | -- 文字列リテラル `"..."`（import のパス指定にのみ使う。エスケープは無い）
     TString String
   | TArrow
@@ -108,17 +109,21 @@ data Stmt
 -- 文の列 + 末尾式（関数本体の形。省略された末尾式は UnitLit へ脱糖済み）
 type Body = ([Stmt], Expr)
 
--- 関数定義: 名前, 仮引数(名前, 型)の列, 戻り値の型, 本体。
+-- トップレベルの定義の公開範囲（既定は Private。`pub` を付けた定義だけを import したソースから使える）
+data Visibility = Private | Public
+  deriving (Show, Eq)
+
+-- 関数定義: 公開範囲, 名前, 仮引数(名前, 型)の列, 戻り値の型, 本体。
 -- シグネチャは宣言だけで確定する（仮引数の型注釈は必須。'->' を省略した戻り値型は () とする）
-data FnDecl = FnDecl String [(String, Type)] Type Body
+data FnDecl = FnDecl Visibility String [(String, Type)] Type Body
   deriving (Show, Eq)
 
 -- トップレベルの const（コンパイル時定数）と static（静的領域に置くグローバル変数）の区別
 data GlobalKind = GConst | GStatic
   deriving (Show, Eq)
 
--- const/static の定義: 種類, 名前, 型（注釈は必須）, 初期値（定数式であることはcompile側で検査する）
-data GlobalDecl = GlobalDecl GlobalKind String Type Expr
+-- const/static の定義: 公開範囲, 種類, 名前, 型（注釈は必須）, 初期値（定数式であることはcompile側で検査する）
+data GlobalDecl = GlobalDecl Visibility GlobalKind String Type Expr
   deriving (Show, Eq)
 
 -- 1ソースファイル分のプログラム: 先頭の import の列（importを書いたソースからの相対パス）と、
@@ -184,6 +189,7 @@ tokenize (c : cs)
             "import" -> (TImport :) <$> tokenize rest
             "const" -> (TConst :) <$> tokenize rest
             "static" -> (TStatic :) <$> tokenize rest
+            "pub" -> (TPub :) <$> tokenize rest
             _ -> (TIdent ident :) <$> tokenize rest
   | c == '"' =
       case break (\ch -> ch == '"' || ch == '\n') cs of
@@ -228,7 +234,7 @@ matchIntSuffix s
 --
 -- program    ::= import-decl* item*（トップレベルに文・式は書けない。import は他の定義より前にのみ書ける）
 -- import-decl ::= 'import' STRING ';'
--- item       ::= fn-decl | const-decl | static-decl
+-- item       ::= 'pub'? (fn-decl | const-decl | static-decl)（pub の無い定義は非公開）
 -- const-decl ::= 'const' IDENT ':' type '=' expr ';'
 -- static-decl ::= 'static' IDENT ':' type '=' expr ';'
 -- fn-decl    ::= 'fn' IDENT '(' (IDENT ':' type (',' IDENT ':' type)*)? ')' ('->' type)? '{' stmt* expr? '}'
@@ -279,25 +285,32 @@ parseImports tokens = Right ([], tokens)
 -- item*（const/static の定義と fn 定義を、それぞれ出現順に集める）
 parseItems :: [Token] -> Either String ([GlobalDecl], [FnDecl])
 parseItems [] = Right ([], [])
-parseItems (TFn : rest) = do
-  (fnDecl, rest') <- parseFnDecl rest
+parseItems (TPub : rest) = case rest of
+  (t : _) | t `elem` [TFn, TConst, TStatic] -> parseItem Public rest
+  _ -> Left "expected 'fn', 'const' or 'static' after pub"
+parseItems tokens = parseItem Private tokens
+
+parseItem :: Visibility -> [Token] -> Either String ([GlobalDecl], [FnDecl])
+parseItem vis (TFn : rest) = do
+  (fnDecl, rest') <- parseFnDecl vis rest
   (globals, fns) <- parseItems rest'
   Right (globals, fnDecl : fns)
-parseItems (TConst : rest) = parseGlobalItem GConst "const" rest
-parseItems (TStatic : rest) = parseGlobalItem GStatic "static" rest
-parseItems (TImport : _) = Left "import must appear before other definitions"
-parseItems (t : _) = Left ("expected 'fn', 'const' or 'static' at top level, got: " ++ show t)
+parseItem vis (TConst : rest) = parseGlobalItem vis GConst "const" rest
+parseItem vis (TStatic : rest) = parseGlobalItem vis GStatic "static" rest
+parseItem _ (TImport : _) = Left "import must appear before other definitions"
+parseItem _ (t : _) = Left ("expected 'fn', 'const' or 'static' at top level, got: " ++ show t)
+parseItem _ [] = Right ([], [])
 
-parseGlobalItem :: GlobalKind -> String -> [Token] -> Either String ([GlobalDecl], [FnDecl])
-parseGlobalItem kind keyword tokens = do
-  (decl, rest) <- parseGlobalDecl kind keyword tokens
+parseGlobalItem :: Visibility -> GlobalKind -> String -> [Token] -> Either String ([GlobalDecl], [FnDecl])
+parseGlobalItem vis kind keyword tokens = do
+  (decl, rest) <- parseGlobalDecl vis kind keyword tokens
   (globals, fns) <- parseItems rest
   Right (decl : globals, fns)
 
 -- const-decl / static-decl（先頭の 'const'/'static' は呼び出し側で消費済み）。
 -- 型注釈は必須（fnのシグネチャと同じく、宣言だけで型を確定させる）
-parseGlobalDecl :: GlobalKind -> String -> [Token] -> ParseResult GlobalDecl
-parseGlobalDecl kind keyword tokens = do
+parseGlobalDecl :: Visibility -> GlobalKind -> String -> [Token] -> ParseResult GlobalDecl
+parseGlobalDecl vis kind keyword tokens = do
   (name, rest) <- expectIdent tokens
   case rest of
     (TColon : rest') -> do
@@ -305,12 +318,12 @@ parseGlobalDecl kind keyword tokens = do
       rest3 <- expectToken TAssign rest''
       (expr, rest4) <- parseExpr rest3
       rest5 <- expectToken TSemicolon rest4
-      Right (GlobalDecl kind name ty expr, rest5)
+      Right (GlobalDecl vis kind name ty expr, rest5)
     _ -> Left ("expected ':' and type after " ++ keyword ++ " name: " ++ name)
 
 -- fn定義（先頭の'fn'は呼び出し側で消費済み）
-parseFnDecl :: [Token] -> ParseResult FnDecl
-parseFnDecl tokens = do
+parseFnDecl :: Visibility -> [Token] -> ParseResult FnDecl
+parseFnDecl vis tokens = do
   (name, rest) <- expectIdent tokens
   rest' <- expectToken TLParen rest
   (params, rest'') <- parseParamList rest'
@@ -325,7 +338,7 @@ parseFnDecl tokens = do
     (TRBrace : _) -> Right (UnitLit, rest6)
     _ -> parseExpr rest6
   case rest7 of
-    (TRBrace : rest8) -> Right (FnDecl name params retTy (stmts, tailExpr), rest8)
+    (TRBrace : rest8) -> Right (FnDecl vis name params retTy (stmts, tailExpr), rest8)
     _ -> Left "expected closing brace"
 
 -- 仮引数リスト: (IDENT ':' type (',' IDENT ':' type)*)?（'(' は呼び出し側で消費済み、終端の ')' はここで消費する）

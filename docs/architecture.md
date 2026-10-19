@@ -35,10 +35,11 @@
 ```haskell
 -- AST（src/Parser.hs）
 data Program    = Program { progImports :: [FilePath], progGlobals :: [GlobalDecl], progFns :: [FnDecl] }
-data FnDecl     = FnDecl String [(String, Type)] Type Body   -- 名前, 仮引数, 戻り値型, 本体
-type Body       = ([Stmt], Expr)                             -- 文の列 + 末尾式
-data GlobalDecl = GlobalDecl GlobalKind String Type Expr     -- const/static, 名前, 型, 初期値
+data FnDecl     = FnDecl Visibility String [(String, Type)] Type Body   -- 公開範囲, 名前, 仮引数, 戻り値型, 本体
+type Body       = ([Stmt], Expr)                                        -- 文の列 + 末尾式
+data GlobalDecl = GlobalDecl Visibility GlobalKind String Type Expr     -- 公開範囲, const/static, 名前, 型, 初期値
 data GlobalKind = GConst | GStatic
+data Visibility = Private | Public                                      -- pub の有無
 
 -- 型
 data Width      = W32 | W64                 -- 整数のビット幅 = codegen のレジスタ幅
@@ -66,7 +67,7 @@ data Instr   = Push Int | IAdd Width | ... | ICall String Int | IPop | LoadGloba
 - 文の判別（`parseStmts`）：キーワード、または `IDENT =`（先読み2トークン）で判別する。どれでもなければ式を試し読みし、次が `=` なら場所式への代入 `SAssignPlace`、`;` なら式文 `SExpr`、それ以外なら文の列の終わり（末尾式）として読み直す
 - 脱糖：fn 本体の末尾式の省略と `return;` は `UnitLit` に、`->` の省略は戻り値型 `TUnit` にする。AST 上は末尾式・return の値が常に存在する
 - 型サフィックス付き整数リテラル（`9999i64`）は字句解析で1トークン `TIntSuffixed` にまとめる。サフィックスの直後が識別子の構成文字なら（`10i64x`）サフィックスとみなさない
-- トップレベル（`parseItems`）は `fn` / `const` / `static` を混在して読み、`progGlobals` と `progFns` に振り分ける
+- トップレベル（`parseItems`）は `fn` / `const` / `static` を混在して読み、`progGlobals` と `progFns` に振り分ける。先頭の `pub` は `Public`、無ければ `Private` として各定義に持たせる
 
 ## 5. 型検査と IR 生成
 
@@ -74,7 +75,7 @@ data Instr   = Push Int | IAdd Width | ... | ICall String Int | IPop | LoadGloba
 
 1. `buildFnSigs`：全 fn の宣言から `FnSigs` を作る。重複定義・最大 6 引数・`main` の引数なし（`validateFnShapes`）とシグネチャ中の配列型の禁止を検査する。本体は見ないので宣言順に依存しない
 2. `buildGlobals`：全 const/static の宣言から `Globals` と static の初期値を作る（→ 5.8）
-3. `compileModule importedSigs importedGlobals prog`：自ソースと import 先の fn シグネチャ（`main` を除く）・グローバルをマージし（fn・const・static は同じ名前空間で、同名はエラー）、各 fn の本体を `compileFnDecl` でコンパイルする
+3. `compileModule importedSigs importedGlobals prog`：自ソースと import 先の fn シグネチャ（`main` を除く）・グローバルをマージし（fn・const・static は同じ名前空間で、同名はエラー）、各 fn の本体を `compileFnDecl` でコンパイルする。結果の `CompiledModule` は、`.globl` にする pub の fn・static の名前（`cmPublic`）も持つ
 
 `compile` は main を必須とする単一ソース用のラッパで、命令列を検査するテストで使う（static の初期値は返さない）。
 
@@ -149,8 +150,8 @@ data Instr   = Push Int | IAdd Width | ... | ICall String Int | IPop | LoadGloba
 - **関数呼び出し**：SysV AMD64 ABI。引数はレジスタ（`%rdi` `%rsi` `%rdx` `%rcx` `%r8` `%r9`）で渡し、プロローグ直後に `StoreArg` でスタックへ退避する。戻り値は `%rax`
 - **アライメント**：`genBody` が操作スタックの深さを左から右へ追跡し（`stackDelta`）、`call` 直前に 16 バイト境界からずれていれば `subq $8` でパディングする。if/while は文の境界（操作スタックが空）にしか現れないので、分岐の合流点で深さが食い違うことはない。`printf`/`puts`/`exit` の直前は `andq $-16, %rsp` で強制的に揃える
 - **main**：他の fn と同じく `compileFnDecl` でコンパイルするが、`ret` の代わりに戻り値を型に応じたフォーマットで `printf` して終了するエピローグで終わる（`epilogue`）。そのため main は呼び出せない
-- **シンボル**：各 fn・static は `.globl` で公開する。`call` の対象や参照した static が未定義なら外部参照になる。`.L` ラベル（rodata の `.Lfmt64` 等を含む）はファイルローカルで、ユーザーのシンボルと衝突しない
-- **static**：`.data` セクションに `.globl`・`.balign`・`.quad`（64bit）／`.long`（32bit）で初期値を置き（`dataSection`。アドレスの定数は `.quad X` / `.quad T+16` と書き、PIE でもロード時の再配置で解決される）、RIP 相対（`name(%rip)`）で読み書きする。32bit の読み出しは `movslq` で、u32 は `loadFixup` でゼロ拡張し直す
+- **シンボル**：pub の fn・static と main だけを `.globl` で公開する（`codegenModule` が `cmPublic` を受け取る）。非公開の fn・static はファイルローカルなシンボルになり、ほかのオブジェクトと同名でも衝突しない。`call` の対象や参照した static が未定義なら外部参照になる。`.L` ラベル（rodata の `.Lfmt64` 等を含む）はファイルローカルで、ユーザーのシンボルと衝突しない
+- **static**：`.data` セクションに（pub なら `.globl` と）`.balign`・`.quad`（64bit）／`.long`（32bit）で初期値を置き（`dataSection`。アドレスの定数は `.quad X` / `.quad T+16` と書き、PIE でもロード時の再配置で解決される）、RIP 相対（`name(%rip)`）で読み書きする。32bit の読み出しは `movslq` で、u32 は `loadFixup` でゼロ拡張し直す
 - **共通部**：エラー処理（`.Ldiv_zero_error`、`.Lindex_error`：メッセージを `puts` して `exit(1)`。`runtimeErrors`）と rodata（`rodataSection`）はファイルごとに1回出力する
 
 ## 7. ドライバ
@@ -159,8 +160,8 @@ data Instr   = Push Int | IAdd Width | ... | ICall String Int | IPop | LoadGloba
 
 - 入力の種類を拡張子で判定し、`-S`/`-c` との組み合わせを検証する（`classifyInputs`）
 - import の解決（`resolveImports`）：import を書いたソースのディレクトリからの相対パス。同一ファイルの判定は `canonicalizePath`
-- 1ソースのコンパイル（`compileSource`）：**直接** import したソースのシグネチャとグローバル（`buildGlobals` で const を評価したもの）だけを集めて `compileModule` に渡す（`importedSigs`。import 先どうしの同名もここで検査する）
-- リンクまでの一括処理：入力から import を再帰的にたどって全ソースを集め（`collectSources`、循環可）、fn 名・static 名の重複と main がちょうど1つであることを検査する（`checkLinkUnits`）
+- 1ソースのコンパイル（`compileSource`）：**直接** import したソースのシグネチャとグローバル（`buildGlobals` で const を評価したもの）のうち、pub の定義（`publicNames`）だけを集めて `compileModule` に渡す（`importedSigs`。評価はソース全体で行うので、pub の const が非公開の const を参照してもよい。import 先どうしの pub の同名もここで検査する）
+- リンクまでの一括処理：入力から import を再帰的にたどって全ソースを集め（`collectSources`、循環可）、pub の fn 名・static 名の重複と main がちょうど1つであることを検査する（`checkLinkUnits`。非公開の名前はファイルローカルなので対象外）
 - 中間ファイル：`OUTDIR/basename.s` / `.o`。名前の衝突を事前に検査し（`checkIntermediates`）、`-d` が無ければ成功・失敗を問わず `finally` で削除する
 - gcc：`gcc -c X.s -g -o X.o`（アセンブル）、`gcc OBJS... -o OUTPUT`（リンク）を `readProcessWithExitCode` で呼ぶ
 - エラーは `ExceptT String IO` で伝播させ、ファイル単位の処理のエラーにはファイル名を前置する（`inFile`）

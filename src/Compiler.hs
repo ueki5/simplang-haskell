@@ -1,4 +1,4 @@
-module Compiler (Instr (..), FnSigs, Loc (..), Globals, StaticInit (..), StaticData, CompiledModule (..), compile, compileModule, buildFnSigs, buildGlobals, run) where
+module Compiler (Instr (..), FnSigs, Loc (..), Globals, StaticInit (..), StaticData, CompiledModule (..), compile, compileModule, buildFnSigs, buildGlobals, publicNames, run) where
 
 import Control.Monad (foldM, when, zipWithM)
 import Control.Monad.Trans.Class (lift)
@@ -7,7 +7,7 @@ import Data.Int (Int32)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Word (Word32, Word64)
-import Parser (Expr (..), FnDecl (..), GlobalDecl (..), GlobalKind (..), Program (..), Signedness (..), Stmt (..), Type (..), Width (..), intRepr)
+import Parser (Expr (..), FnDecl (..), GlobalDecl (..), GlobalKind (..), Program (..), Signedness (..), Stmt (..), Type (..), Visibility (..), Width (..), intRepr)
 
 -- -- Debug Printサンプル（pTraceShow: 純粋関数内, pTraceShowM: モナド内）
 -- import Debug.Pretty.Simple (pTraceShow, pTraceShowM)
@@ -211,7 +211,9 @@ data CompiledModule = CompiledModule
     -- main以外のfnの命令列
     cmFns :: [(String, [Instr])],
     -- mainがあれば (mainの戻り値型, mainの命令列)
-    cmMain :: Maybe (Type, [Instr])
+    cmMain :: Maybe (Type, [Instr]),
+    -- .globl で公開するシンボル（pub の fn・static の名前。main は codegen が常に公開する）
+    cmPublic :: [String]
   }
   deriving (Show, Eq)
 
@@ -221,14 +223,14 @@ data CompiledModule = CompiledModule
 compile :: Program -> Either String ([(String, [Instr])], Type, [Instr])
 compile prog = do
   validateFnShapes (progFns prog)
-  when (null [() | FnDecl "main" _ _ _ <- progFns prog]) $ Left "missing function: main"
+  when (null [() | FnDecl _ "main" _ _ _ <- progFns prog]) $ Left "missing function: main"
   m <- compileModule Map.empty Map.empty prog
   case cmMain m of
     Just (mainType, mainInstrs) -> Right (cmFns m, mainType, mainInstrs)
     Nothing -> Left "missing function: main"
 
 -- 1ソース分の const/static・fn 定義から命令を抽出する（複数ソースからのビルドの単位）。
--- importedSigs/importedGlobals は import したソースに定義された fn のシグネチャと const/static で、
+-- importedSigs/importedGlobals は import したソースに定義された pub の fn のシグネチャと const/static で、
 -- 自ソースの定義と同様に参照できる（fn の本体や static の実体は別のオブジェクトファイルにあり、
 -- リンク時に解決される）。自ソースの定義と同名ならエラー。
 -- 各fnの本体は他の関数を一切参照しない独立スコープでコンパイルされ、
@@ -256,7 +258,16 @@ compileModule importedSigs0 importedGlobals prog = do
     (name : _) -> Left ("name already declared in imported file: " ++ name)
     [] -> Right ()
   (fns, mainPart) <- evalStateT (compileProgram (Map.union ownSigs importedSigs) (Map.union ownGlobals importedGlobals) fnDecls) 0
-  Right (CompiledModule statics fns mainPart)
+  let public =
+        [name | FnDecl Public name _ _ _ <- fnDecls]
+          ++ [name | GlobalDecl Public GStatic name _ _ <- progGlobals prog]
+  Right (CompiledModule statics fns mainPart public)
+
+-- import したソースから使える（pub を付けた）fn・const・static の名前
+publicNames :: Program -> [String]
+publicNames prog =
+  [name | FnDecl Public name _ _ _ <- progFns prog]
+    ++ [name | GlobalDecl Public _ name _ _ <- progGlobals prog]
 
 compileProgram :: FnSigs -> Globals -> [FnDecl] -> CompileM ([(String, [Instr])], Maybe (Type, [Instr]))
 compileProgram fnSigs globals fnDecls = do
@@ -461,7 +472,7 @@ allocParams params = (reverse revAssigned, Map.fromList [(n, (LLocal o, t)) | (n
 -- 一切参照できない。その外側にグローバルのスコープだけがある）から開始し、パラメータはプロローグ直後に
 -- レジスタからスタックへスピルする（StoreArg）。早期returnと末尾式のフォールスルーは同じ関数末尾ラベルへ合流する
 compileFnDecl :: FnSigs -> Globals -> FnDecl -> CompileM (String, [Instr])
-compileFnDecl fnSigs globals (FnDecl name params retTy (stmts, tailExpr)) = do
+compileFnDecl fnSigs globals (FnDecl _ name params retTy (stmts, tailExpr)) = do
   endLabel <- freshLabel "fn_end"
   lift (mapM_ (\(p, _) -> checkNotGlobal p [globals]) params)
   let (assigned, paramEnv, paramCursor) = allocParams params
@@ -640,7 +651,7 @@ validateFnShapes fnDecls = do
   pure ()
   where
     addSig :: Map String () -> FnDecl -> Either String (Map String ())
-    addSig seen (FnDecl name params _ _)
+    addSig seen (FnDecl _ name params _ _)
       | Map.member name seen = Left ("function already declared: " ++ name)
       | length params > maxParams = Left ("too many parameters (max " ++ show maxParams ++ "): " ++ name)
       -- main は呼び出し元を持たず、戻り値を表示して終了するだけなので、引数を受け取る経路が無い
@@ -653,7 +664,7 @@ validateFnShapes fnDecls = do
 buildFnSigs :: [FnDecl] -> Either String FnSigs
 buildFnSigs fnDecls = do
   validateFnShapes fnDecls
-  let sigs = [(name, (map snd params, retTy)) | FnDecl name params retTy _ <- fnDecls]
+  let sigs = [(name, (map snd params, retTy)) | FnDecl _ name params retTy _ <- fnDecls]
   -- 配列はローカル変数専用のため、仮引数・戻り値の型には使えない
   mapM_
     ( \(name, (paramTys, retTy)) ->
@@ -673,18 +684,18 @@ buildGlobals :: [GlobalDecl] -> Either String (Globals, [StaticData])
 buildGlobals decls = do
   _ <- foldM addName Map.empty decls
   mapM_ checkGlobalType decls
-  let constDecls = Map.fromList [(name, (ty, e)) | GlobalDecl GConst name ty e <- decls]
-      staticTypes = Map.fromList [(name, ty) | GlobalDecl GStatic name ty _ <- decls]
+  let constDecls = Map.fromList [(name, (ty, e)) | GlobalDecl _ GConst name ty e <- decls]
+      staticTypes = Map.fromList [(name, ty) | GlobalDecl _ GStatic name ty _ <- decls]
       staticNames = Map.keys staticTypes
   consts <- foldM (evalConst constDecls staticNames []) Map.empty (Map.keys constDecls)
-  statics <- mapM (evalStatic consts staticTypes) [(name, ty, e) | GlobalDecl GStatic name ty e <- decls]
+  statics <- mapM (evalStatic consts staticTypes) [(name, ty, e) | GlobalDecl _ GStatic name ty e <- decls]
   let globals =
         Map.union
           (Map.map (\(v, ty) -> (LConst v, ty)) consts)
-          (Map.fromList [(name, (LStatic name, ty)) | GlobalDecl GStatic name ty _ <- decls])
+          (Map.fromList [(name, (LStatic name, ty)) | GlobalDecl _ GStatic name ty _ <- decls])
   Right (globals, statics)
   where
-    addName seen (GlobalDecl _ name _ _)
+    addName seen (GlobalDecl _ _ name _ _)
       | Map.member name seen = Left ("name already declared: " ++ name)
       | otherwise = Right (Map.insert name () seen)
     -- const はメモリを持たず値を Push 1つで埋め込むためスカラーのみ。static はスカラー・ポインタとその配列
@@ -693,10 +704,10 @@ buildGlobals decls = do
     isStaticElem ty = isScalar ty || isPtrType ty
     isPtrType (TPtr _) = True
     isPtrType _ = False
-    checkGlobalType (GlobalDecl GConst name ty _)
+    checkGlobalType (GlobalDecl _ GConst name ty _)
       | isScalar ty = Right ()
       | otherwise = Left ("invalid type for constant: " ++ name)
-    checkGlobalType (GlobalDecl GStatic name ty _) = case ty of
+    checkGlobalType (GlobalDecl _ GStatic name ty _) = case ty of
       TArray elemTy _ | isStaticElem elemTy -> Right ()
       _ | isStaticElem ty -> Right ()
       _ -> Left ("invalid type for static: " ++ name)
