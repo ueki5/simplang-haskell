@@ -49,6 +49,7 @@ data Token
   | TRBrace
   | TLBracket
   | TRBracket
+  | TDot
   deriving (Show, Eq)
 
 data Expr
@@ -82,6 +83,8 @@ data Expr
     ArrayRepeat Expr Int
   | -- 添字アクセス `a[i]`（添字はusize型）
     Index Expr Expr
+  | -- メソッド呼び出し `e.name(args)`（受け付けるメソッドと型の組み合わせはcompile側で検査する）
+    MethodCall Expr String [Expr]
   deriving (Show, Eq)
 
 data Stmt
@@ -147,7 +150,8 @@ data Signedness = Signed | Unsigned deriving (Show, Eq)
 -- TUsize は配列の添字用の型で、表現・命令列は u64 と同一だが u64 とは別の型として扱う（Rust準拠）。
 -- TArray の要素型は配列以外の型のみ（ネストした配列は扱わない）。
 -- TUnit はユニット型 `()`（値は `()` のみ。実行時は bool と同じく32bitスロットに常に0を格納する）
-data Type = TyInt Signedness Width | TUsize | TBool | TUnit | TPtr Type | TArray Type Int deriving (Show, Eq)
+-- TSlice T はスライス `&[T]`（先頭ポインタと長さの組。`[T]` 単独の型は持たない）
+data Type = TyInt Signedness Width | TUsize | TBool | TUnit | TPtr Type | TArray Type Int | TSlice Type deriving (Show, Eq)
 
 -- 整数型の (符号の有無, レジスタ幅) への分解（usize は u64 と同じ表現）。整数型でなければ Nothing
 intRepr :: Type -> Maybe (Signedness, Width)
@@ -206,6 +210,7 @@ tokenize (c : cs)
   | c == '}' = (TRBrace :) <$> tokenize cs
   | c == '[' = (TLBracket :) <$> tokenize cs
   | c == ']' = (TRBracket :) <$> tokenize cs
+  | c == '.' = (TDot :) <$> tokenize cs
   | c == ',' = (TComma :) <$> tokenize cs
   | c == ':' = (TColon :) <$> tokenize cs
   | c == '=' = (TAssign :) <$> tokenize cs
@@ -442,27 +447,50 @@ parseType "usize" = Right TUsize
 parseType "bool" = Right TBool
 parseType ty = Left ("unsupported type: " ++ ty)
 
--- type ::= '&' type | '[' type ';' INT ']' | '(' ')' | IDENT（IDENTは parseType でベース型に変換する）
+-- type ::= '&' '[' type ']' | '&' type | '[' type ';' INT ']' | '(' ')' | IDENT（IDENTは parseType でベース型に変換する）
 parseTypeAnnotation :: [Token] -> ParseResult Type
 parseTypeAnnotation (TLParen : TRParen : rest) = Right (TUnit, rest)
+-- &[T] はスライス、&[T; N] は配列へのポインタ
+parseTypeAnnotation (TAmp : TLBracket : rest) = do
+  (elemTy, rest') <- parseTypeAnnotation rest
+  case rest' of
+    (TRBracket : rest'') -> do
+      case elemTy of
+        TArray _ _ -> Left "nested arrays are not supported"
+        TSlice _ -> Left "slice of slices is not supported"
+        _ -> Right ()
+      Right (TSlice elemTy, rest'')
+    _ -> do
+      (arrTy, rest'') <- parseArrayTypeRest elemTy rest'
+      Right (TPtr arrTy, rest'')
 parseTypeAnnotation (TAmp : rest) = do
   (inner, rest') <- parseTypeAnnotation rest
-  Right (TPtr inner, rest')
+  case inner of
+    TSlice _ -> Left "pointer to slice is not supported"
+    _ -> Right (TPtr inner, rest')
 parseTypeAnnotation (TLBracket : rest) = do
   (elemTy, rest') <- parseTypeAnnotation rest
-  case elemTy of
-    TArray _ _ -> Left "nested arrays are not supported"
-    _ -> Right ()
-  rest'' <- expectToken TSemicolon rest'
-  case rest'' of
-    (TInt n : TRBracket : rest3)
-      | n >= 1 -> Right (TArray elemTy n, rest3)
-      | otherwise -> Left "array length must be at least 1"
-    _ -> Left "expected array length (integer literal) followed by ']'"
+  case rest' of
+    (TRBracket : _) -> Left "slice type must be used behind a reference: &[T]"
+    _ -> parseArrayTypeRest elemTy rest'
 parseTypeAnnotation tokens = do
   (tyName, rest) <- expectIdent tokens
   ty <- parseType tyName
   Right (ty, rest)
+
+-- 配列型の要素型より後ろ（';' INT ']'）を読む
+parseArrayTypeRest :: Type -> [Token] -> ParseResult Type
+parseArrayTypeRest elemTy tokens = do
+  case elemTy of
+    TArray _ _ -> Left "nested arrays are not supported"
+    TSlice _ -> Left "array of slices is not supported"
+    _ -> Right ()
+  rest <- expectToken TSemicolon tokens
+  case rest of
+    (TInt n : TRBracket : rest')
+      | n >= 1 -> Right (TArray elemTy n, rest')
+      | otherwise -> Left "array length must be at least 1"
+    _ -> Left "expected array length (integer literal) followed by ']'"
 
 -- assign-stmt ::= IDENT '=' expr ';'
 parseAssignStmt :: String -> [Token] -> ParseResult Stmt
@@ -689,11 +717,15 @@ parseFactor tokens = do
   (expr, rest) <- parsePrimary tokens
   parsePostfixRest expr rest
 
--- postfix ::= primary ('[' expr ']')*
+-- postfix ::= primary ('[' expr ']' | '.' IDENT '(' (expr (',' expr)*)? ')')*
 parsePostfixRest :: Expr -> [Token] -> ParseResult Expr
 parsePostfixRest expr (TLBracket : rest) = do
   (idx, rest') <- parseIndexTarget rest
   parsePostfixRest (Index expr idx) rest'
+parsePostfixRest expr (TDot : TIdent name : TLParen : rest) = do
+  (args, rest') <- parseArgList rest
+  parsePostfixRest (MethodCall expr name args) rest'
+parsePostfixRest _ (TDot : _) = Left "expected method call after '.'"
 parsePostfixRest expr rest = Right (expr, rest)
 
 -- primary ::= INT | INT ('i64' | 'i32' | 'u64' | 'u32' | 'usize') | 'true' | 'false' | '(' ')' | IDENT | IDENT '(' (expr (',' expr)*)? ')'

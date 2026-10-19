@@ -1,4 +1,4 @@
-module Compiler (Instr (..), FnSigs, Loc (..), Globals, StaticInit (..), StaticData, CompiledModule (..), compile, compileModule, buildFnSigs, buildGlobals, publicNames, run) where
+module Compiler (Instr (..), FnSigs, Loc (..), Globals, StaticInit (..), StaticData, CompiledModule (..), compile, compileModule, buildFnSigs, buildGlobals, publicNames, slotCount, run) where
 
 import Control.Monad (foldM, when, zipWithM)
 import Control.Monad.Trans.Class (lift)
@@ -66,9 +66,14 @@ data Instr
     IBoundsCheck Int
   | -- 値、アドレスの順にpopし、指定幅でアドレスの先へストアする（配列要素への代入 用）
     StoreInd Width
-  | -- 関数呼び出し: 操作スタックに積まれた引数（左から順、個数はIntで指定）を
-    -- 引数レジスタへpopしてcallし、戻り値を%raxからpushして戻す
-    ICall String Int
+  | -- 関数呼び出し: 操作スタックに積まれた引数（左から順、1つ目のIntは引数のスロット数の合計）を
+    -- 引数の位置へ割り当ててcallし、戻り値（2つ目のIntはそのスロット数）を%rax（2スロットなら続けて%rdx）からpushして戻す
+    ICall String Int Int
+  | -- 操作スタックの [長さ, 添字]（先頭が添字）をpopし、添字が符号なしで長さ以上なら範囲外エラー（.Lindex_error）へ
+    -- ジャンプする。範囲内なら添字だけをpushし直す（スライスの添字アクセス 用。長さが実行時に決まる）
+    IBoundsCheckDyn
+  | -- 操作スタック先頭を残し、2段目を捨てる（スライスの長さだけを取り出す s.len() 用）
+    INip
   | -- 操作スタック先頭を捨てる（式文の値の破棄 用）
     IPop
   | -- static の値を指定幅で（64bit正規化済みで）読み出して push する（RIP相対アドレッシング）
@@ -144,11 +149,32 @@ storageWidth TBool = W32
 storageWidth TUnit = W32
 storageWidth (TPtr _) = W64
 storageWidth (TArray elemTy _) = storageWidth elemTy
+-- スライスは2スロットとも64bit（先頭ポインタと長さ）
+storageWidth (TSlice _) = W64
 
 -- 変数がスタック上に占有するバイト数（配列は 要素数 × 要素の格納幅）
 stackBytes :: Type -> Int
 stackBytes (TArray elemTy n) = n * widthBytes (storageWidth elemTy)
-stackBytes ty = widthBytes (storageWidth ty)
+stackBytes ty = slotCount ty * widthBytes (storageWidth ty)
+
+-- 値が操作スタック・引数の位置で占めるスロット（8バイト）の数。スライスは先頭ポインタと長さの2スロット
+slotCount :: Type -> Int
+slotCount (TSlice _) = 2
+slotCount _ = 1
+
+-- オフセット off の変数の各スロットのオフセット（先頭のスロットが下位アドレス）
+slotOffsets :: Type -> Int -> [Int]
+slotOffsets ty off = [off + 8 * i | i <- [0 .. slotCount ty - 1]]
+
+-- ローカル変数の値を（スロットの順に）積む命令列
+loadLocal :: Type -> Int -> [Instr]
+loadLocal ty off
+  | slotCount ty == 1 = Load (storageWidth ty) off : loadFixup ty
+  | otherwise = [Load (storageWidth ty) o | o <- slotOffsets ty off]
+
+-- 操作スタックの値をローカル変数へストアする命令列（最上段が最後のスロットなので、後ろのスロットから）
+storeLocal :: Type -> Int -> [Instr]
+storeLocal ty off = [Store (storageWidth ty) o | o <- reverse (slotOffsets ty off)]
 
 -- エラーメッセージ表示用の型名
 typeName :: Type -> String
@@ -161,6 +187,7 @@ typeName TBool = "bool"
 typeName TUnit = "()"
 typeName (TPtr t) = "&" ++ typeName t
 typeName (TArray t n) = "[" ++ typeName t ++ "; " ++ show n ++ "]"
+typeName (TSlice t) = "&[" ++ typeName t ++ "]"
 
 -- 32bit整数の値を64bitスタック上の正規形（i32 は符号拡張、u32 はゼロ拡張）へ揃える命令
 normalize32 :: Signedness -> Instr
@@ -203,8 +230,8 @@ type StaticData = (String, Width, [StaticInit])
 data CompiledModule = CompiledModule
   { -- 自ソースで定義した static の初期値
     cmStatics :: [StaticData],
-    -- main以外のfnの命令列
-    cmFns :: [(String, [Instr])],
+    -- main以外のfnの (名前, 戻り値の型, 命令列)
+    cmFns :: [(String, Type, [Instr])],
     -- mainがあれば (mainの戻り値型, mainの命令列)
     cmMain :: Maybe (Type, [Instr]),
     -- .globl で公開するシンボル（pub の fn・static の名前。main は codegen が常に公開する）
@@ -213,9 +240,9 @@ data CompiledModule = CompiledModule
   deriving (Show, Eq)
 
 -- 単一ソースで完結するプログラム（import しない）をコンパイルする。main は必須。
--- 戻り値は (main以外のfnの命令列, mainの戻り値型, mainの命令列)。命令列を検査するテスト用で、
+-- 戻り値は (main以外のfnの (名前, 戻り値の型, 命令列), mainの戻り値型, mainの命令列)。命令列を検査するテスト用で、
 -- static の初期値は返さない（アセンブリまで組み立てるには compileModule と codegenModule を使う）
-compile :: Program -> Either String ([(String, [Instr])], Type, [Instr])
+compile :: Program -> Either String ([(String, Type, [Instr])], Type, [Instr])
 compile prog = do
   validateFnShapes (progFns prog)
   when (null [() | FnDecl _ "main" _ _ _ <- progFns prog]) $ Left "missing function: main"
@@ -264,14 +291,13 @@ publicNames prog =
   [name | FnDecl Public name _ _ _ <- progFns prog]
     ++ [name | GlobalDecl Public _ name _ _ <- progGlobals prog]
 
-compileProgram :: FnSigs -> Globals -> [FnDecl] -> CompileM ([(String, [Instr])], Maybe (Type, [Instr]))
+compileProgram :: FnSigs -> Globals -> [FnDecl] -> CompileM ([(String, Type, [Instr])], Maybe (Type, [Instr]))
 compileProgram fnSigs globals fnDecls = do
   fns <- mapM (compileFnDecl fnSigs globals) fnDecls
-  let mainPart = do
-        mainInstrs <- lookup "main" fns
-        (_, mainType) <- Map.lookup "main" fnSigs
-        Just (mainType, mainInstrs)
-  pure ([fn | fn@(name, _) <- fns, name /= "main"], mainPart)
+  let mainPart = case [(retTy, instrs) | ("main", retTy, instrs) <- fns] of
+        (m : _) -> Just m
+        [] -> Nothing
+  pure ([fn | fn@(name, _, _) <- fns, name /= "main"], mainPart)
 
 -- if の分岐ラベル採番用のカウンタを持ち回るモナド。
 -- Env/cursor はブロックやif分岐を抜けるたびに「呼び出し前の値へ巻き戻す」必要がある一方、
@@ -336,15 +362,15 @@ compileStmtsFrom fnSigs initEnv initCursor loopCtx returnCtx stmts = foldM step 
         TArray _ _ -> lift (Left ("cannot assign to array " ++ name ++ "; assign to elements instead"))
         _ -> pure ()
       -- ストア先は場所によって切り替える（const はメモリを持たないため代入できない）
-      storeInstr <- lift $ case loc of
-        LLocal off -> Right (Store (storageWidth ty) off)
-        LStatic sym -> Right (StoreGlobal (storageWidth ty) sym)
+      storeInstrs <- lift $ case loc of
+        LLocal off -> Right (storeLocal ty off)
+        LStatic sym -> Right [StoreGlobal (storageWidth ty) sym]
         LConst _ -> Left ("cannot assign to constant: " ++ name)
       lift (checkNoLocalStore env name expr)
       -- 式の表現から命令を抽出（既存の変数の型を期待型として渡す）
       instrs <- lift (compileExprTyped fnSigs env ty expr)
       -- 変数とアドレスのマップはそのまま, 命令＋追加命令＋変数のストア
-      pure (env, cursor, acc ++ instrs ++ [storeInstr])
+      pure (env, cursor, acc ++ instrs ++ storeInstrs)
     -- a[i] = ... / p[i] = ... / *p = ...（場所式のアドレスを計算し、その型を期待型として値をコンパイルしてから間接ストアする）
     step (env, cursor, acc) (SAssignPlace lhs expr) = do
       case lhs of
@@ -392,7 +418,7 @@ compileStmtsFrom fnSigs initEnv initCursor loopCtx returnCtx stmts = foldM step 
     step (env, cursor, acc) (SExpr expr) = do
       ty <- lift (inferType fnSigs env expr)
       instrs <- lift (compileExprTyped fnSigs env ty expr)
-      pure (env, cursor, acc ++ instrs ++ [IPop])
+      pure (env, cursor, acc ++ instrs ++ replicate (slotCount ty) IPop)
 
 -- let の初期化式をコンパイルし、オフセット off の変数へストアする命令列を返す。
 -- 配列型は要素ごとのストア（compileArrayInit）、それ以外は式を評価して1回ストアする
@@ -400,7 +426,7 @@ compileLetInit :: FnSigs -> Env -> Type -> Int -> Expr -> Either String [Instr]
 compileLetInit fnSigs env (TArray elemTy len) off expr = compileArrayInit fnSigs env elemTy len off expr
 compileLetInit fnSigs env ty off expr = do
   instrs <- compileExprTyped fnSigs env ty expr
-  Right (instrs ++ [Store (storageWidth ty) off])
+  Right (instrs ++ storeLocal ty off)
 
 -- if/else-if/else の分岐列を、条件が偽なら次の分岐へジャンプする形の命令列へ展開する。
 -- 各分岐の本体はブロックと同じく独立スコープでコンパイルし、Env/cursorは呼び出し側へ伝播させない
@@ -466,13 +492,14 @@ allocParams params = (reverse revAssigned, Map.fromList [(n, (LLocal o, t)) | (n
 -- 関数本体のコンパイル。パラメータのみを含む独立スコープ（他の関数の変数は
 -- 一切参照できない。その外側にグローバルのスコープだけがある）から開始し、パラメータはプロローグ直後に
 -- レジスタからスタックへスピルする（StoreArg）。早期returnと末尾式のフォールスルーは同じ関数末尾ラベルへ合流する
-compileFnDecl :: FnSigs -> Globals -> FnDecl -> CompileM (String, [Instr])
+compileFnDecl :: FnSigs -> Globals -> FnDecl -> CompileM (String, Type, [Instr])
 compileFnDecl fnSigs globals (FnDecl _ name params retTy (stmts, tailExpr)) = do
   endLabel <- freshLabel "fn_end"
   lift (mapM_ (\(p, _) -> checkNotGlobal p [globals]) params)
   let (assigned, paramEnv, paramCursor) = allocParams params
       env0 = [paramEnv, globals]
-      spillInstrs = [StoreArg i (storageWidth ty) off | (i, (_, off, ty)) <- zip [0 ..] assigned]
+      -- 引数の位置はスロットの通し番号（スライスは先頭ポインタと長さで2つ使う）
+      spillInstrs = zipWith (\i (w, off) -> StoreArg i w off) [0 ..] [(storageWidth ty, o) | (_, off, ty) <- assigned, o <- slotOffsets ty off]
       returnCtx = Just (name, retTy, endLabel)
   (env1, _cursor1, stmtInstrs) <- compileStmtsFrom fnSigs env0 paramCursor Nothing returnCtx stmts
   lift (checkNoLocalRef name env1 tailExpr)
@@ -480,7 +507,7 @@ compileFnDecl fnSigs globals (FnDecl _ name params retTy (stmts, tailExpr)) = do
   -- pTraceShowM ("assigned of " ++ name, assigned)
   -- pTraceShowM ("env0 of " ++ name, env0)
   -- pTraceShowM ("env1 of " ++ name, env1)
-  pure (name, spillInstrs ++ stmtInstrs ++ tailInstrs ++ [Label endLabel])
+  pure (name, retTy, spillInstrs ++ stmtInstrs ++ tailInstrs ++ [Label endLabel])
 
 -- 関数から返す式（return式・末尾式）が、直接その関数のローカル変数（仮引数を含む）を指すポインタで
 -- あればエラーとする（関数から戻るとスタックフレームが破棄され、ダングリングポインタになるため）。
@@ -570,12 +597,19 @@ inferMaybeType fnSigs env expr = do
       case t of
         Just (TArray elemTy _) -> Right (Just elemTy)
         Just (TPtr (TArray elemTy _)) -> Right (Just elemTy)
+        Just (TSlice elemTy) -> Right (Just elemTy)
         Just other -> Left ("cannot index into a value of type " ++ typeName other)
         Nothing -> Left "cannot index into a value of type integer literal"
     -- &lvalue の型は lvalue 自身の型を TPtr で包んだもの（addressOf に委譲する）
     go (AddrOf e) = do
       (pointeeTy, _) <- addressOf fnSigs env e
+      checkNotSlicePointee pointeeTy
       Right (Just (TPtr pointeeTy))
+    -- e.len() の型は usize（受け手の型の検査は methodRecvType に委譲する）
+    go (MethodCall recv name args) = do
+      t <- go recv
+      _ <- methodRecvType t name args
+      Right (Just TUsize)
     --  *ptr の型は ptr 自身の型からポインタを一枚剥がしたもの
     go (Deref e) = do
       t <- go e
@@ -604,6 +638,27 @@ inferMaybeType fnSigs env expr = do
       ta <- go a
       tb <- go b
       unifyMaybeType ta tb
+
+-- メソッド呼び出しの受け手の型を検査して返す。受け付けるのは配列・配列へのポインタ・スライスの len() だけ
+methodRecvType :: Maybe Type -> String -> [Expr] -> Either String Type
+methodRecvType (Just ty) "len" []
+  | isLenType ty = Right ty
+methodRecvType (Just ty) "len" args
+  | isLenType ty = Left ("wrong number of arguments for len: expected 0, found " ++ show (length args))
+methodRecvType (Just ty) name _ = Left ("no method named " ++ name ++ " for type " ++ typeName ty)
+methodRecvType Nothing name _ = Left ("no method named " ++ name ++ " for type integer literal")
+
+-- len() を持つ型
+isLenType :: Type -> Bool
+isLenType (TArray _ _) = True
+isLenType (TPtr (TArray _ _)) = True
+isLenType (TSlice _) = True
+isLenType _ = False
+
+-- スライスへのポインタ（&s）は扱わない（*p の読み書きが2スロットに対応していないため）
+checkNotSlicePointee :: Type -> Either String ()
+checkNotSlicePointee (TSlice _) = Left "pointer to slice is not supported"
+checkNotSlicePointee _ = Right ()
 
 -- 最後まで未確定なら i64 をデフォルトとする。
 inferType :: FnSigs -> Env -> Expr -> Either String Type
@@ -666,6 +721,10 @@ buildFnSigs fnDecls = do
           Left ("array type is not allowed in function signature (pass &[T; N] instead): " ++ name)
     )
     sigs
+  -- main の戻り値は表示して終了するが、スライスの表示形式は無い
+  case lookup "main" sigs of
+    Just (_, retTy@(TSlice _)) -> Left ("invalid return type for main: " ++ typeName retTy)
+    _ -> Right ()
   pure (Map.fromList sigs)
   where
     isArrayType (TArray _ _) = True
@@ -843,6 +902,13 @@ evalConstExpr consts name ty e = do
 -- 算術演算・整数リテラルは整数型（intRepr が Just を返す型）専用、Not/BoolLit/Eq/Neq は TBool 専用であり、
 -- expected と食い違えばその場でエラーとする。配列型は値として扱えない（letの初期化は compileArrayInit が担う）。
 compileExprTyped :: FnSigs -> Env -> Type -> Expr -> Either String [Instr]
+-- 期待型がスライスの箇所では、&[T; N] 型の式を &[T] へ変換する（Rust の unsized coercion）。
+-- 式を配列へのポインタとしてコンパイルし、長さ N を積んで (先頭ポインタ, 長さ) の2スロットにする
+compileExprTyped fnSigs env (TSlice elemTy) e
+  | Right (Just (TPtr (TArray elemTy' n))) <- inferMaybeType fnSigs env e,
+    elemTy' == elemTy = do
+      instrs <- compileExprTyped fnSigs env (TPtr (TArray elemTy n)) e
+      Right (instrs ++ [Push n])
 -- [let ]xxx = 1234;（リテラルは無型なので expected をそのまま採用する。ただし整数型以外は不可）
 compileExprTyped _ _ expected (Lit n)
   | isIntType expected = Right [Push n]
@@ -868,7 +934,7 @@ compileExprTyped _ env expected (Var name) =
       | ty /= expected ->
           Left ("type mismatch: expected " ++ typeName expected ++ ", found " ++ typeName ty)
       | otherwise -> Right $ case loc of
-          LLocal off -> Load (storageWidth ty) off : loadFixup ty
+          LLocal off -> loadLocal ty off
           LStatic sym -> LoadGlobal (storageWidth ty) sym : loadFixup ty
           -- const は評価済み（型の正規形へ揃え済み）の値をそのまま積む
           LConst v -> [Push v]
@@ -939,10 +1005,11 @@ compileExprTyped fnSigs env expected (Call name args) =
             )
       | otherwise -> do
           argInstrs <- zipWithM (compileExprTyped fnSigs env) paramTys args
-          Right (concat argInstrs ++ [ICall name (length args)])
+          Right (concat argInstrs ++ [ICall name (sum (map slotCount paramTys)) (slotCount retTy)])
 -- [let ]xxx = &lvalue;（lvalueの実効アドレスを計算する。expectedはlvalue自身の型をTPtrで包んだものでなければならない）
 compileExprTyped fnSigs env expected (AddrOf e) = do
   (pointeeTy, instrs) <- addressOf fnSigs env e
+  checkNotSlicePointee pointeeTy
   if expected == TPtr pointeeTy
     then Right instrs
     else Left ("type mismatch: expected " ++ typeName expected ++ ", found " ++ typeName (TPtr pointeeTy))
@@ -957,6 +1024,20 @@ compileExprTyped fnSigs env expected (Index base idx) = do
   if elemTy == expected
     then Right (addrInstrs ++ [LoadInd (storageWidth elemTy)] ++ loadFixup elemTy)
     else Left ("type mismatch: expected " ++ typeName expected ++ ", found " ++ typeName elemTy)
+-- [let ]xxx = e.len();（配列・配列へのポインタは型の要素数 N、スライスは2スロット目の長さ）
+compileExprTyped fnSigs env expected (MethodCall recv name args) = do
+  recvTy <- inferMaybeType fnSigs env recv >>= \t -> methodRecvType t name args
+  when (expected /= TUsize) $
+    Left ("type mismatch: expected " ++ typeName expected ++ ", found usize")
+  case (recv, recvTy) of
+    -- 変数なら評価の必要が無い（スライスは長さのスロットだけを読む）
+    (Var x, TSlice _) | Just (LLocal off, _) <- lookupVar x env -> Right [Load W64 (off + 8)]
+    (Var _, TArray _ n) -> Right [Push n]
+    (_, TSlice _) -> (++ [INip]) <$> compileExprTyped fnSigs env recvTy recv
+    -- \*p（p: &[T; N]）は p を評価する
+    (Deref e, TArray elemTy n) -> (++ [IPop, Push n]) <$> compileExprTyped fnSigs env (TPtr (TArray elemTy n)) e
+    (_, TPtr (TArray _ n)) -> (++ [IPop, Push n]) <$> compileExprTyped fnSigs env recvTy recv
+    _ -> Left ("no method named " ++ name ++ " for type " ++ typeName recvTy)
 -- 配列リテラルは let の初期化式（compileArrayInit）でのみ使える
 compileExprTyped _ _ _ (ArrayLit _) = Left "array literal can only be used to initialize a let variable"
 compileExprTyped _ _ _ (ArrayRepeat _ _) = Left "array literal can only be used to initialize a let variable"
@@ -985,47 +1066,60 @@ compileCompare fnSigs env expected l r allowBool cmp
       case opTy of
         TBool | not allowBool -> Left "type mismatch: expected i32 or i64, found bool"
         TUnit | not allowBool -> Left "type mismatch: expected i32 or i64, found ()"
+        -- Rust のスライスの比較は要素どうしの比較になるため、先頭ポインタの比較と混同しないよう禁止する
+        TSlice _ -> Left "cannot compare slices"
         _ -> do
           li <- compileExprTyped fnSigs env opTy l
           ri <- compileExprTyped fnSigs env opTy r
           Right (li ++ ri ++ [cmp opTy])
 
+-- 添字アクセスの基底の長さ。配列（へのポインタ）は型の要素数、スライスは操作スタック上の長さのスロット
+data BaseLen = StaticLen Int | DynLen
+
 -- 配列要素 base[idx] の実効アドレスを計算する命令列と、その要素型を返す（読み出し・代入・&a[i] で共用）。
--- 添字は usize 型で、実行時に範囲検査（IBoundsCheck）を行う。要素数は型から得られるため、
--- 配列へのポインタ経由でも検査できる。添字が整数リテラルであればコンパイル時にも範囲検査する
+-- 添字は usize 型で、実行時に範囲検査を行う。配列（へのポインタ）は要素数が型から得られるため IBoundsCheck、
+-- スライスは長さが実行時に決まるため IBoundsCheckDyn で検査する。
+-- 添字が整数リテラルで要素数が型から得られれば、コンパイル時にも範囲検査する
 indexAddr :: FnSigs -> Env -> Expr -> Expr -> Either String (Type, [Instr])
 indexAddr fnSigs env base idx = do
-  (elemTy, len, baseInstrs) <- arrayBase fnSigs env base
-  case literalIndex idx of
-    Just n
+  (elemTy, baseLen, baseInstrs) <- arrayBase fnSigs env base
+  case (baseLen, literalIndex idx) of
+    (StaticLen len, Just n)
       | toU64 n >= fromIntegral len ->
           Left ("index out of bounds: the length is " ++ show len ++ " but the index is " ++ show (toU64 n))
     _ -> Right ()
   idxInstrs <- compileExprTyped fnSigs env TUsize idx
   let elemSize = widthBytes (storageWidth elemTy)
-  Right (elemTy, baseInstrs ++ idxInstrs ++ [IBoundsCheck len, Push elemSize, IMul W64, IAdd W64])
+      check = case baseLen of
+        StaticLen len -> IBoundsCheck len
+        DynLen -> IBoundsCheckDyn
+  Right (elemTy, baseInstrs ++ idxInstrs ++ [check, Push elemSize, IMul W64, IAdd W64])
   where
     literalIndex (Lit n) = Just n
     literalIndex (LitTyped n TUsize) = Just n
     literalIndex _ = Nothing
 
--- 添字アクセスの基底となる配列の (要素型, 要素数, 先頭アドレスを積む命令列) を返す。
+-- 添字アクセスの基底の (要素型, 長さ, 先頭アドレス（スライスなら続けて長さ）を積む命令列) を返す。
 --   a      （配列のローカル変数）    → LoadAddr で変数自身のアドレス（static の配列なら LoadGlobalAddr）
 --   ( *p ) （p: &[T; N]）            → p の値がそのまま先頭アドレス
 --   p      （&[T; N] 型の任意の式）  → 自動デリファレンス（式の値がそのまま先頭アドレス）
-arrayBase :: FnSigs -> Env -> Expr -> Either String (Type, Int, [Instr])
+--   s      （&[T] 型の任意の式）     → 式の値（先頭ポインタと長さの2スロット）
+arrayBase :: FnSigs -> Env -> Expr -> Either String (Type, BaseLen, [Instr])
 arrayBase _ env (Var name)
-  | Just (LLocal off, TArray elemTy len) <- lookupVar name env = Right (elemTy, len, [LoadAddr off])
-  | Just (LStatic sym, TArray elemTy len) <- lookupVar name env = Right (elemTy, len, [LoadGlobalAddr sym])
+  | Just (LLocal off, TArray elemTy len) <- lookupVar name env = Right (elemTy, StaticLen len, [LoadAddr off])
+  | Just (LStatic sym, TArray elemTy len) <- lookupVar name env = Right (elemTy, StaticLen len, [LoadGlobalAddr sym])
 arrayBase fnSigs env base = do
   mty <- inferMaybeType fnSigs env base
   case (base, mty) of
     (Deref e, Just (TArray elemTy len)) -> do
       instrs <- compileExprTyped fnSigs env (TPtr (TArray elemTy len)) e
-      Right (elemTy, len, instrs)
+      Right (elemTy, StaticLen len, instrs)
     (_, Just ty@(TPtr (TArray elemTy len))) -> do
       instrs <- compileExprTyped fnSigs env ty base
-      Right (elemTy, len, instrs)
+      Right (elemTy, StaticLen len, instrs)
+    (_, Just ty@(TSlice elemTy)) -> do
+      instrs <- compileExprTyped fnSigs env ty base
+      Right (elemTy, DynLen, instrs)
     (_, Just ty) -> Left ("cannot index into a value of type " ++ typeName ty)
     (_, Nothing) -> Left "cannot index into a value of type integer literal"
 

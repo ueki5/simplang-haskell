@@ -48,6 +48,7 @@ data Type = TyInt Signedness Width          -- i32 / i64 / u32 / u64
           | TUsize | TBool | TUnit
           | TPtr Type                       -- &T（再帰的）
           | TArray Type Int                 -- [T; N]
+          | TSlice Type                     -- &[T]（スライス。[T] 単独の型は持たない）
 
 -- コンパイラ（src/Compiler.hs）
 data Loc     = LLocal Int | LStatic String | LConst Int   -- %rbp 相対オフセット / static のシンボル名 / const の値
@@ -56,14 +57,15 @@ type FnSigs  = Map String ([Type], Type)    -- fn 名 → (仮引数の型, 戻�
 type Globals = Map String (Loc, Type)       -- const/static 名 → (LConst 値 / LStatic 名, 型)
 data StaticInit = SInt Int | SAddr String Int   -- static の初期値の要素：整数 / アドレスの定数（シンボル名, バイトオフセット）
 type StaticData = (String, Width, [StaticInit])  -- static の初期値（シンボル名, 要素の格納幅, 値の列）
-data CompiledModule = CompiledModule { cmStatics :: [StaticData], cmFns :: [(String, [Instr])], cmMain :: Maybe (Type, [Instr]) }
-data Instr   = Push Int | IAdd Width | ... | ICall String Int | IPop | LoadGlobal Width String | ...   -- スタックマシンの中間命令
+data CompiledModule = CompiledModule { cmStatics :: [StaticData], cmFns :: [(String, Type, [Instr])], cmMain :: Maybe (Type, [Instr]) }  -- fn は (名前, 戻り値の型, 命令列)
+data Instr   = Push Int | IAdd Width | ... | ICall String Int Int | IPop | LoadGlobal Width String | ...   -- スタックマシンの中間命令（ICall は 名前・引数のスロット数・戻り値のスロット数）
 ```
 
 ## 4. パーサ
 
-- 左再帰を除去した反復ループで左結合を実現する：`parseExpr` → `parseEquality` → `parseComparison` → `parseAdditive` → `parseMultiplicative` → `parseCast` → `parseFactor`（前置の単項演算子）→ `parsePostfixRest`（添字）→ `parsePrimary`
+- 左再帰を除去した反復ループで左結合を実現する：`parseExpr` → `parseEquality` → `parseComparison` → `parseAdditive` → `parseMultiplicative` → `parseCast` → `parseFactor`（前置の単項演算子）→ `parsePostfixRest`（添字・メソッド呼び出し `e.name(args)`）→ `parsePrimary`
 - `parseCast` は `as` の後の型が整数型でなければパース時にエラーにする
+- 型（`parseTypeAnnotation`）：`&` の直後が `[` なら要素型を読み、`]` が続けばスライス `TSlice`、`;` が続けば配列へのポインタ。`&` のない `[T]`、`&&[T]`、スライス・配列の要素にスライスを置く形はパース時にエラーにする
 - 文の判別（`parseStmts`）：キーワード、または `IDENT =`（先読み2トークン）で判別する。どれでもなければ式を試し読みし、次が `=` なら場所式への代入 `SAssignPlace`、`;` なら式文 `SExpr`、それ以外なら文の列の終わり（末尾式）として読み直す
 - 脱糖：fn 本体の末尾式の省略と `return;` は `UnitLit` に、`->` の省略は戻り値型 `TUnit` にする。AST 上は末尾式・return の値が常に存在する
 - 型サフィックス付き整数リテラル（`9999i64`）は字句解析で1トークン `TIntSuffixed` にまとめる。サフィックスの直後が識別子の構成文字なら（`10i64x`）サフィックスとみなさない
@@ -74,7 +76,7 @@ data Instr   = Push Int | IAdd Width | ... | ICall String Int | IPop | LoadGloba
 ### 5.1 二パス構成
 
 1. `buildFnSigs`：全 fn の宣言から `FnSigs` を作る。重複定義・最大 6 引数・`main` の引数なし（`validateFnShapes`）とシグネチャ中の配列型の禁止を検査する。本体は見ないので宣言順に依存しない
-2. `buildGlobals`：全 const/static の宣言から `Globals` と static の初期値を作る（→ 5.8）
+2. `buildGlobals`：全 const/static の宣言から `Globals` と static の初期値を作る（→ 5.9）
 3. `compileModule importedSigs importedGlobals prog`：自ソースと import 先の fn シグネチャ（`main` を除く）・グローバルをマージし（fn・const・static は同じ名前空間で、同名はエラー）、各 fn の本体を `compileFnDecl` でコンパイルする。結果の `CompiledModule` は、`.globl` にする pub の fn・static の名前（`cmPublic`）も持つ
 
 `compile` は main を必須とする単一ソース用のラッパで、命令列を検査するテストで使う（static の初期値は返さない）。
@@ -120,8 +122,19 @@ data Instr   = Push Int | IAdd Width | ... | ICall String Int | IPop | LoadGloba
 - `let` の初期化（`compileArrayInit`）は要素ごとに静的なオフセットへ `Store` する。`[e; N]` は e を1回だけ評価して要素0へ格納し、残りはそこからコピーする
 - 添字の基底は `arrayBase` が解決する：配列変数なら `LoadAddr`（static の配列なら `LoadGlobalAddr`）、`&[T; N]` 型の式（`p[i]` の自動参照外し、`(*p)[i]`）ならその値を先頭アドレスとする。`N` は型から得られる
 - 要素アドレスは `indexAddr` が `基底 + 添字（期待型 usize）+ IBoundsCheck N + Push size; IMul W64; IAdd W64` で計算する。添字がリテラルならコンパイル時にも範囲を検査する
+- `arrayBase` は長さを `BaseLen`（`StaticLen N` / `DynLen`）で返す。スライスの基底は (先頭ポインタ, 長さ) の2スロットを積み、`indexAddr` は `IBoundsCheckDyn`（積まれた長さと添字を比べ、添字だけを積み直す）で検査する
+- `e.len()`（`MethodCall`）は、受け手が配列なら `Push N`、配列へのポインタなら式を評価して捨ててから `Push N`、スライスの変数なら長さのスロットを `Load`、それ以外のスライスの式なら評価して `INip`（2段目の先頭ポインタを捨てる）。受け手の型の検査は `methodRecvType`
 
-### 5.7 整数の表現と命令選択
+### 5.7 複数スロットの値とスライス
+
+- 値が操作スタック・引数の位置で占める8バイトのスロットの数を `slotCount :: Type -> Int` で求める（スライスは 2、それ以外は 1）。変数の格納場所は `stackBytes`（スライスは16バイト。先頭ポインタが `off`、長さが `off+8`）
+- ローカル変数の読み書きは `loadLocal` / `storeLocal` がスロットごとの `Load` / `Store` に展開する（書き込みは最上段の最後のスロットから）。式文はスロット数だけ `IPop` する
+- 仮引数のスピル（`StoreArg i`）の i はスロットの通し番号で、スライスは2つの引数の位置を使う。レジスタとスタックにまたがって分かれてもよい（Rust と同じ）
+- 呼び出しは `ICall 名前 引数のスロット数 戻り値のスロット数`。fn の命令列は戻り値の型と一緒に codegen へ渡す（`cmFns`）
+- 期待型が `TSlice T` で、式の推論型が `TPtr (TArray T N)` なら、`compileExprTyped` の入口で式を配列へのポインタとしてコンパイルし `Push N` を続ける（unsized coercion。型推論 `inferMaybeType` では変換しない）
+- スライスへのポインタ（`&s`）は `checkNotSlicePointee` でエラー、スライスどうしの比較は `compileCompare` でエラー、main の戻り値のスライスは `buildFnSigs` でエラーにする
+
+### 5.8 整数の表現と命令選択
 
 - 整数型の判定・命令選択は `TyInt` へ直接マッチせず、`intRepr :: Type -> Maybe (Signedness, Width)` を経由する（usize は `(Unsigned, W64)` に分解される。コード生成は u64 と同一だが型としては区別される）
 - 操作スタック上の値は常に 64bit で、不変条件は「**i32 は符号拡張済み、u32 はゼロ拡張済み、i64/u64/usize はそのまま**」
@@ -130,7 +143,7 @@ data Instr   = Push Int | IAdd Width | ... | ICall String Int | IPop | LoadGloba
 - キャスト（`castInstrs`）：32bit への変換はキャスト先の符号で正規化（`ISext32` / `IZext32`）、32→64bit の拡大はキャスト元の符号で拡張、64bit 同士は命令なし
 - bool と () は 32bit スロットに格納する（() は常に 0）。ポインタは指す先によらず 8 バイト（`storageWidth`）
 
-### 5.8 const/static と定数式の評価
+### 5.9 const/static と定数式の評価
 
 - `buildGlobals` が型（const はスカラー、static はスカラーとその配列）と名前の重複を検査し、初期値を評価する
 - 定数式は `checkConstExpr` が AST で検査する（リテラル・変数参照・単項/二項演算・キャストのみ。static の参照は不可）
@@ -145,9 +158,9 @@ data Instr   = Push Int | IAdd Width | ... | ICall String Int | IPop | LoadGloba
 - **即値**：`Push` は `movabsq` 経由（`pushq` の符号拡張 32bit 即値の制限を回避）
 - **32bit 演算**：`addl`/`subl`/`imull`/`idivl`/`negl` の後に `cltq`/`movslq` で符号拡張して 64bit スタックへ戻す。演算ごとにラップアラウンドする
 - **除算**：`cmpq $0` で除数を検査し、0 なら `.Ldiv_zero_error` へ。符号ありで除数が -1 のときは `cmove` で「被除数の符号反転・除数 1」に置き換えて割る（`最小値 / -1` で idiv が例外を起こすのを避け、最小値へラップさせる）
-- **範囲検査**：`IBoundsCheck N` は添字を符号なしで N と比較し、範囲外なら `.Lindex_error` へ（負の添字も巨大な値として検出される）
+- **範囲検査**：`IBoundsCheck N` は添字を符号なしで N と比較し、範囲外なら `.Lindex_error` へ（負の添字も巨大な値として検出される）。`IBoundsCheckDyn` は N の代わりに操作スタック上の長さと比べる
 - **スタックフレーム**：命令列中の `Load`/`Store`/`StoreArg`/`LoadAddr` のオフセットの最大絶対値を 16 バイトに切り上げてフレームサイズとし（`frameSize`）、プロローグで一度だけ `subq`。エピローグは `leave`
-- **関数呼び出し**：SysV AMD64 ABI。1〜6個目の引数はレジスタ（`%rdi` `%rsi` `%rdx` `%rcx` `%r8` `%r9`、`argRegs`）で渡し、7個目以降はスタックで渡す（call の時点で7個目が `(%rsp)`、8個目が `8(%rsp)`…。引数の個数に上限はない）。呼ばれた側はプロローグ直後に `StoreArg` でローカルのスロットへ退避する（7個目以降は `16(%rbp)` から8バイト間隔の位置からコピーする。`stackArgOffset`）。戻り値は `%rax`
+- **関数呼び出し**：SysV AMD64 ABI。1〜6個目の引数はレジスタ（`%rdi` `%rsi` `%rdx` `%rcx` `%r8` `%r9`、`argRegs`）で渡し、7個目以降はスタックで渡す（call の時点で7個目が `(%rsp)`、8個目が `8(%rsp)`…。引数の個数に上限はない）。呼ばれた側はプロローグ直後に `StoreArg` でローカルのスロットへ退避する（7個目以降は `16(%rbp)` から8バイト間隔の位置からコピーする。`stackArgOffset`）。引数の位置はスロット単位で割り当てる（スライスは先頭ポインタと長さで2つ）。戻り値は `%rax`、2スロットの値（スライス）は `%rax`（先頭ポインタ）と `%rdx`（長さ）。`epilogueRet` が fn の戻り値の型を受け取って取り出し、`genCall` は call の後に戻り値のスロット数だけ積む
 - **スタック渡しの並べ替え**：実引数は左から右へ評価して積むため、操作スタック上の並びは ABI と逆になる。7個以上の呼び出しでは `genCall` が、最後の引数から順に `pushq off(%rsp)` で7個目以降を複製して並べ直し、レジスタ渡しの分は元の位置から `movq` で読む。call 後に複製・パディング・元の引数をまとめて `addq` で捨てる
 - **アライメント**：`genBody` が操作スタックの深さを左から右へ追跡し（`stackDelta`）、`call` 直前に 16 バイト境界からずれていれば `subq $8` でパディングする（7個以上の呼び出しでは、スタック渡しの引数と call の間に隙間ができないよう、複製より先にパディングを積む）。if/while は文の境界（操作スタックが空）にしか現れないので、分岐の合流点で深さが食い違うことはない。`printf`/`puts`/`exit` の直前は `andq $-16, %rsp` で強制的に揃える
 - **main**：他の fn と同じく `compileFnDecl` でコンパイルするが、`ret` の代わりに戻り値を型に応じたフォーマットで `printf` して終了するエピローグで終わる（`epilogue`）。そのため main は呼び出せない
@@ -169,7 +182,7 @@ data Instr   = Push Int | IAdd Width | ... | ICall String Int | IPop | LoadGloba
 
 ## 8. テスト用スタック VM
 
-`Compiler.run :: [Instr] -> Either String Int` は中間命令列を直接実行する簡易 VM で、テストと定数式の評価（→ 5.8）で使う。
+`Compiler.run :: [Instr] -> Either String Int` は中間命令列を直接実行する簡易 VM で、テストと定数式の評価（→ 5.9）で使う。
 アドレスは %rbp=0 とみなしたオフセット値で表現し、`trunc`/`zext32`/`divU` で実機の切り詰め・拡張・符号なし除算を再現する。
 ジャンプ（`Jmp`/`JmpIfZero`）・関数呼び出し（`ICall`）・引数の退避（`StoreArg`）・static の読み書き（`LoadGlobal` 等）は扱わないため、制御構文や関数・static を含む命令列は結合テストで検証する。
 
