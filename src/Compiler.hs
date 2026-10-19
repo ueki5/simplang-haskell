@@ -1,4 +1,4 @@
-module Compiler (Instr (..), FnSigs, Loc (..), Globals, StaticInit (..), StaticData, CompiledModule (..), compile, compileModule, buildFnSigs, buildGlobals, publicNames, slotCount, run) where
+module Compiler (Instr (..), FnSigs, Loc (..), Globals, StaticInit (..), StaticData, CompiledModule (..), compile, buildFnSigs, buildGlobals, publicNames, slotCount, run) where
 
 import Control.Monad (foldM, when, zipWithM)
 import Control.Monad.Trans.Class (lift)
@@ -239,18 +239,6 @@ data CompiledModule = CompiledModule
   }
   deriving (Show, Eq)
 
--- 単一ソースで完結するプログラム（import しない）をコンパイルする。main は必須。
--- 戻り値は (main以外のfnの (名前, 戻り値の型, 命令列), mainの戻り値型, mainの命令列)。命令列を検査するテスト用で、
--- static の初期値は返さない（アセンブリまで組み立てるには compileModule と codegenModule を使う）
-compile :: Program -> Either String ([(String, Type, [Instr])], Type, [Instr])
-compile prog = do
-  validateFnShapes (progFns prog)
-  when (null [() | FnDecl _ "main" _ _ _ <- progFns prog]) $ Left "missing function: main"
-  m <- compileModule Map.empty Map.empty prog
-  case cmMain m of
-    Just (mainType, mainInstrs) -> Right (cmFns m, mainType, mainInstrs)
-    Nothing -> Left "missing function: main"
-
 -- 1ソース分の const/static・fn 定義から命令を抽出する（複数ソースからのビルドの単位）。
 -- importedSigs/importedGlobals は import したソースに定義された pub の fn のシグネチャと const/static で、
 -- 自ソースの定義と同様に参照できる（fn の本体や static の実体は別のオブジェクトファイルにあり、
@@ -260,8 +248,8 @@ compile prog = do
 -- （同名ラベルの重複はアセンブル時に壊れるため）。
 -- mainは戻り値を表示して終了する特別な末尾（codegen側のepilogue）を持つため、他のfnとは分けて返す。
 -- main の有無はここでは検査しない（リンクする全ソースでちょうど1つあればよく、それはドライバが検査する）
-compileModule :: FnSigs -> Globals -> Program -> Either String CompiledModule
-compileModule importedSigs0 importedGlobals prog = do
+compile :: FnSigs -> Globals -> Program -> Either String CompiledModule
+compile importedSigs0 importedGlobals prog = do
   let fnDecls = progFns prog
   ownSigs <- buildFnSigs fnDecls
   (ownGlobals, statics) <- buildGlobals (progGlobals prog)

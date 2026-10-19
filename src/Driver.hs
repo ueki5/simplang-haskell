@@ -1,7 +1,7 @@
 module Driver (Mode (..), BuildOpts (..), build) where
 
-import CodeGen (codegenModule)
-import Compiler (CompiledModule (..), FnSigs, Globals, buildFnSigs, buildGlobals, compileModule, publicNames)
+import CodeGen (codegen)
+import Compiler (CompiledModule (..), FnSigs, Globals, buildFnSigs, buildGlobals, compile, publicNames)
 import Control.Exception (IOException, finally, try)
 import Control.Monad (foldM, forM, forM_, unless, when)
 import Control.Monad.IO.Class (liftIO)
@@ -139,8 +139,8 @@ compileSource :: FilePath -> BuildM String
 compileSource path = do
   m <- loadModule path
   (sigs, globals) <- importedSigs m
-  cm <- inFile path (compileModule sigs globals (modProgram m))
-  pure (codegenModule (cmPublic cm) (cmStatics cm) (cmFns cm) (cmMain cm))
+  cm <- inFile path (compile sigs globals (modProgram m))
+  pure (codegen (cmPublic cm) (cmStatics cm) (cmFns cm) (cmMain cm))
 
 -- ソースを読み込んでパースする（エラーにはファイル名を前置する）
 loadModule :: FilePath -> BuildM Module
