@@ -915,10 +915,10 @@ main = hspec $ do
     it "同名の関数を再定義するとエラー" $
       compileSource "fn f() -> i64 {\n1\n}\nfn f() -> i64 {\n2\n}\nfn main() {\n3\n}"
         `shouldBe` Left "function already declared: f"
-    it "引数が7個を超える関数定義はエラー（レジスタ渡しの上限）" $
+    it "7個以上の引数でも、実引数の個数が仮引数と異なるとエラー" $
       compileSource
-        "fn f(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 {\na\n}\nfn main() {\nf(1,2,3,4,5,6,7)\n}"
-        `shouldBe` Left "too many parameters (max 6): f"
+        "fn f(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 {\na\n}\nfn main() -> i64 {\nf(1,2,3,4,5,6)\n}"
+        `shouldBe` Left "wrong number of arguments for f: expected 7, found 6"
     it "宣言順に依存しない相互再帰は成功する（二パスコンパイルの確認）" $
       compileSource
         "fn is_even(n: i64) -> bool {\nif n == 0 {\nreturn true;\n}\nis_odd(n - 1)\n}\nfn is_odd(n: i64) -> bool {\nif n == 0 {\nreturn false;\n}\nis_even(n - 1)\n}\nfn main() -> bool {\nis_even(4)\n}"
@@ -1379,6 +1379,63 @@ main = hspec $ do
         compileSourceAndRun
           "fn double(x: i64) -> i64 {\nx * 2\n}\nfn main() -> i64 {\nlet a: i64 = 1;\nlet b: i64 = double(a);\ntriple(b)\n}\nfn triple(x: i64) -> i64 {\nx * 3\n}"
       result `shouldBe` "6"
+  describe "7個以上の引数（compile）" $ do
+    let compileSource src = tokenize src >>= parse >>= compile
+    it "7個以上の引数を持つfnを定義・呼び出しできる" $
+      compileSource "fn w7(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 {\n((((((a * 10 + b) * 10 + c) * 10 + d) * 10 + e) * 10 + f) * 10 + g)\n}\nfn main() -> i64 {\nw7(1, 2, 3, 4, 5, 6, 7)\n}"
+        `shouldSatisfy` isRight
+
+  describe "7個以上の引数（codegen）" $ do
+    it "7個目の仮引数は16(%rbp)からスピルする" $
+      codegen [("f", [StoreArg 6 W64 (-56)])] (TyInt Signed W64) [] `shouldContain` "movq  16(%rbp), %rax\n    movq  %rax, -56(%rbp)"
+    it "8個目のi32の仮引数は24(%rbp)から32bitでスピルする" $
+      codegen [("f", [StoreArg 7 W32 (-60)])] (TyInt Signed W64) [] `shouldContain` "movl  24(%rbp), %eax\n    movl  %eax, -60(%rbp)"
+    it "深さが偶数なら、スタック渡しの引数を逆順に複製してパディングなしで呼び出す" $ do
+      let asm = codegen [] (TyInt Signed W64) (map Push [1 .. 8] ++ [ICall "f" 8])
+      asm `shouldContain` "pushq 0(%rsp)\n    pushq 16(%rsp)\n    movq  72(%rsp), %rdi"
+      asm `shouldContain` "movq  32(%rsp), %r9\n    call  f\n    addq  $80, %rsp\n    pushq %rax"
+      asm `shouldNotContain` "subq  $8, %rsp"
+    it "深さが奇数なら、複製より先にパディングを積む" $ do
+      let asm = codegen [] (TyInt Signed W64) (map Push [0 .. 8] ++ [ICall "f" 8])
+      asm `shouldContain` "subq  $8, %rsp\n    pushq 8(%rsp)\n    pushq 24(%rsp)\n    movq  80(%rsp), %rdi"
+      asm `shouldContain` "call  f\n    addq  $88, %rsp\n    pushq %rax"
+
+  describe "compile + codegen + gcc（7個以上の引数の結合テスト）" $ do
+    it "7個・8個・9個の引数を順序どおりに受け渡す" $
+      compileSourceAndRun "fn w7(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 {\n((((((a * 10 + b) * 10 + c) * 10 + d) * 10 + e) * 10 + f) * 10 + g)\n}\nfn w8(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64 {\n(((((((a * 10 + b) * 10 + c) * 10 + d) * 10 + e) * 10 + f) * 10 + g) * 10 + h)\n}\nfn w9(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64) -> i64 {\n((((((((a * 10 + b) * 10 + c) * 10 + d) * 10 + e) * 10 + f) * 10 + g) * 10 + h) * 10 + i)\n}\nfn main() -> i64 {\nw7(1, 2, 3, 4, 5, 6, 7) + w8(1, 2, 3, 4, 5, 6, 7, 8) + w9(1, 2, 3, 4, 5, 6, 7, 8, 9)\n}"
+        `shouldReturn` "137037034"
+    it "i32・bool・配列へのポインタ・u32をスタック渡しの位置で受け渡す" $
+      compileSourceAndRun
+        "fn m(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i32, h: bool, p: &[i64; 3], q: u32) -> i64 {\nif !h {\nreturn 0;\n}\ng as i64 + p[2] + q as i64 + a\n}\nfn main() -> i64 {\nlet x = [10, 20, 30];\nm(1, 2, 3, 4, 5, 6, -5, true, &x, 4294967295) + m(1, 2, 3, 4, 5, 6, 1, false, &x, 1)\n}"
+        `shouldReturn` "4294967321"
+    it "式の途中（奇数深さ）で7個以上の引数の関数を呼び出す" $
+      compileSourceAndRun "fn w8(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64 {\n(((((((a * 10 + b) * 10 + c) * 10 + d) * 10 + e) * 10 + f) * 10 + g) * 10 + h)\n}\nfn main() -> i64 {\n1 + w8(1, 2, 3, 4, 5, 6, 7, 8) * 2\n}"
+        `shouldReturn` "24691357"
+    it "7個以上の引数の呼び出しを入れ子にする" $
+      compileSourceAndRun "fn w7(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 {\n((((((a * 10 + b) * 10 + c) * 10 + d) * 10 + e) * 10 + f) * 10 + g)\n}\nfn main() -> i64 {\nw7(w7(1, 2, 3, 4, 5, 6, 7) - 1234560, 2, 3, 4, 5, 6, w7(0, 0, 0, 0, 0, 0, 7))\n}"
+        `shouldReturn` "7234567"
+    it "引数を入れ替えながら再帰する" $
+      compileSourceAndRun
+        "fn rot(n: i64, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 {\nif n == 0 {\nreturn ((((((a * 10 + b) * 10 + c) * 10 + d) * 10 + e) * 10 + f) * 10 + g);\n}\nrot(n - 1, b, c, d, e, f, g, a)\n}\nfn main() -> i64 {\nrot(3, 1, 2, 3, 4, 5, 6, 7)\n}"
+        `shouldReturn` "4567123"
+    it "実引数は左から右へ評価する" $
+      compileSourceAndRun
+        "static S: i64 = 0;\nfn t(x: i64) -> i64 {\nS = S * 10 + x;\nx\n}\nfn w8(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64 {\n(((((((a * 10 + b) * 10 + c) * 10 + d) * 10 + e) * 10 + f) * 10 + g) * 10 + h)\n}\nfn main() -> i64 {\nlet r = w8(t(1), t(2), t(3), t(4), t(5), t(6), t(7), t(8));\nS - r\n}"
+        `shouldReturn` "0"
+    it "スタック渡しの仮引数のアドレスを取って読み書きする" $
+      compileSourceAndRun
+        "fn inc(p: &i32) {\n*p = *p + 1i32;\n}\nfn f(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i32) -> i64 {\nlet p = &g;\n*p = *p * 2;\ninc(&h);\ng + h as i64\n}\nfn main() -> i64 {\nf(1, 2, 3, 4, 5, 6, 7, 8)\n}"
+        `shouldReturn` "23"
+    it "Cのmainから9個の引数でpub fnを呼び出せる（ABIの互換）"
+      $ withSources
+        [ ("lib.sl", "pub fn w9(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64) -> i64 {\n((((((((a * 10 + b) * 10 + c) * 10 + d) * 10 + e) * 10 + f) * 10 + g) * 10 + h) * 10 + i)\n}\n"),
+          ("main.c", "#include <stdio.h>\nlong w9(long, long, long, long, long, long, long, long, long);\nint main(void) { printf(\"%ld\\n\", w9(1, 2, 3, 4, 5, 6, 7, 8, 9)); return 0; }\n")
+        ]
+      $ \dir -> do
+        build (BuildOpts [dir </> "lib.sl"] (dir </> "lib.o") ObjOnly Nothing) `shouldReturn` Right ()
+        _ <- readProcess "gcc" [dir </> "main.c", dir </> "lib.o", "-o", dir </> "prog"] ""
+        readProcess (dir </> "prog") [] "" `shouldReturn` "123456789\n"
+
   describe "compile + codegen + gcc（ポインタ型の結合テスト）" $ do
     it "&で取得したアドレスを*で読み戻す（仕様例）" $ do
       result <- compileSourceAndRun "fn main() -> i64 {\nlet a:i64 = 0;\nlet b:&i64 = &a;\nlet c:i64 = *b;\nc\n}"

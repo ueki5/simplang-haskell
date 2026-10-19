@@ -244,21 +244,49 @@ stackDelta (LoadGlobal _ _) = 1
 stackDelta (StoreGlobal _ _) = -1
 stackDelta (LoadGlobalAddr _) = 1
 
--- 呼び出し直前（＝n個の引数をレジスタへpopし終えた時点）の深さ d = depthAtCall - n が奇数なら、
+-- 引数が6個以下なら、呼び出し直前（＝n個の引数をレジスタへpopし終えた時点）の深さ d = depthAtCall - n が奇数のとき、
 -- 16バイト境界からrspが8バイトずれるため、call前後に8バイトのパディングを挟んで補正する
 -- （frameSizeを16の倍数に切り上げてあるため、プロローグ直後は常に16バイト境界にあることが前提）
 genCall :: Int -> Int -> String -> [String]
-genCall depthAtCall n name =
-  [ "    popq  " ++ argReg64 i | i <- reverse [0 .. n - 1]
-  ]
-    ++ ["    subq  $8, %rsp" | needsPad]
-    ++ ["    call  " ++ name]
-    ++ ["    addq  $8, %rsp" | needsPad]
-    ++ ["    pushq %rax"]
+genCall depthAtCall n name
+  | n <= length argRegs = genRegCall
+  | otherwise = genStackCall
   where
-    needsPad = odd (depthAtCall - n)
+    genRegCall =
+      [ "    popq  " ++ argReg64 i | i <- reverse [0 .. n - 1]
+      ]
+        ++ ["    subq  $8, %rsp" | needsPad]
+        ++ ["    call  " ++ name]
+        ++ ["    addq  $8, %rsp" | needsPad]
+        ++ ["    pushq %rax"]
+      where
+        needsPad = odd (depthAtCall - n)
+    -- 7個目以降の引数はスタック渡し（call時点で7個目が(%rsp)、8個目が8(%rsp)…）。
+    -- 引数は左から右へ評価して積んであり、操作スタック上の並びがABIと逆になるため、最後の引数から順に
+    -- pushqで複製して並べ直す。パディングは複製より先に積み（元の引数と複製の間に置き）、複製とcallの間に隙間を作らない。
+    -- レジスタ渡しの分は元の位置からmovqで読み、call後に複製・パディング・元のn個をまとめて捨てる
+    genStackCall =
+      ["    subq  $8, %rsp" | pad == 1]
+        ++ [ "    pushq " ++ show (8 * (2 * m + pad)) ++ "(%rsp)"
+           | m <- [0 .. k - 1]
+           ]
+        ++ [ "    movq  " ++ show (8 * (n - 1 - i + k + pad)) ++ "(%rsp), " ++ argReg64 i
+           | i <- [0 .. length argRegs - 1]
+           ]
+        ++ ["    call  " ++ name]
+        ++ ["    addq  $" ++ show (8 * (n + k + pad)) ++ ", %rsp"]
+        ++ ["    pushq %rax"]
+      where
+        -- スタック渡しの引数の個数。m番目の複製は引数 n-1-m で、元の位置 8*m に、
+        -- それまでのパディングと複製の分（pad + m スロット）を足した位置にある
+        k = n - length argRegs
+        pad = if odd (depthAtCall + k) then 1 else 0 :: Int
 
--- SysV AMD64の整数引数レジスタ（0始まり、最大6個）
+-- SysV AMD64の整数引数レジスタ（レジスタ渡しの分。7個目以降はスタック渡し）
+argRegs :: [String]
+argRegs = ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"]
+
+-- SysV AMD64の整数引数レジスタ（0始まり、レジスタ渡しの6個分）
 argReg64 :: Int -> String
 argReg64 0 = "%rdi"
 argReg64 1 = "%rsi"
@@ -267,6 +295,10 @@ argReg64 3 = "%rcx"
 argReg64 4 = "%r8"
 argReg64 5 = "%r9"
 argReg64 i = error ("argReg64: parameter index out of range: " ++ show i)
+
+-- スタック渡しの引数（0始まりの番号 i >= 6）の %rbp 相対オフセット
+stackArgOffset :: Int -> Int
+stackArgOffset i = 16 + 8 * (i - length argRegs)
 
 argReg32 :: Int -> String
 argReg32 0 = "%edi"
@@ -511,12 +543,23 @@ genInstr (StoreInd W32) =
     "    popq  %rcx",
     "    movl  %eax, (%rcx)"
   ]
-genInstr (StoreArg i W64 off) =
-  [ "    movq  " ++ argReg64 i ++ ", " ++ show off ++ "(%rbp)"
-  ]
-genInstr (StoreArg i W32 off) =
-  [ "    movl  " ++ argReg32 i ++ ", " ++ show off ++ "(%rbp)"
-  ]
+-- 7個目以降の引数は呼び出し元のフレーム上（戻り番地と退避した%rbpの上、16(%rbp)から8バイト間隔）にある
+genInstr (StoreArg i W64 off)
+  | i >= length argRegs =
+      [ "    movq  " ++ show (stackArgOffset i) ++ "(%rbp), %rax",
+        "    movq  %rax, " ++ show off ++ "(%rbp)"
+      ]
+  | otherwise =
+      [ "    movq  " ++ argReg64 i ++ ", " ++ show off ++ "(%rbp)"
+      ]
+genInstr (StoreArg i W32 off)
+  | i >= length argRegs =
+      [ "    movl  " ++ show (stackArgOffset i) ++ "(%rbp), %eax",
+        "    movl  %eax, " ++ show off ++ "(%rbp)"
+      ]
+  | otherwise =
+      [ "    movl  " ++ argReg32 i ++ ", " ++ show off ++ "(%rbp)"
+      ]
 genInstr IPop =
   [ "    addq  $8, %rsp"
   ]
