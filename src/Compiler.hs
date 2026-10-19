@@ -57,7 +57,7 @@ data Instr
   | -- 操作スタック先頭のアドレスをpopし、指定幅でその先の値をロードして
     -- （64bit正規化済みで）push する（*式 用）
     LoadInd Width
-  | -- 関数の第N引数レジスタ（SysV AMD64の整数引数レジスタ、0始まり最大6個）の値を
+  | -- 関数の第N引数（0始まり。6個目まではSysV AMD64の整数引数レジスタ、7個目以降は呼び出し元が積んだスタック上）の値を
     -- 指定オフセットへストアする（関数プロローグ直後、パラメータをローカル変数と同じ
     -- スタックスロットへスピルするために使う。操作スタックには触れない）
     StoreArg Int Width Int
@@ -187,11 +187,6 @@ cmpInstr ty signedInstr unsignedInstr = case intRepr ty of
 -- 全fnの本体をコンパイルする前に一括構築する、コンパイル中不変のグローバルな読み取り専用テーブル
 -- （宣言順に依存しない相互再帰を可能にするための二パスコンパイルの核）。
 type FnSigs = Map String ([Type], Type)
-
--- SysV AMD64の整数引数レジスタはレジスタ渡し分の最大6個までしか無いため、
--- スタック経由の引数渡し（今回のスコープ外）を避けるべく上限として採用する
-maxParams :: Int
-maxParams = 6
 
 -- グローバルの表: 名前 -> (場所, 型)。const は評価済みの値（LConst）、static はシンボル名（LStatic）を持つ。
 -- FnSigs と同じく、全fnの本体をコンパイルする前に構築するコンパイル中不変のテーブル
@@ -644,7 +639,7 @@ addressOf fnSigs env (Deref e) = do
     other -> Left ("type mismatch: expected pointer, found " ++ typeName other)
 addressOf _ _ e = Left ("invalid operand for &: not an lvalue: " ++ show e)
 
--- 構造検証: 重複定義・最大引数数・mainの引数なし（型の中身は見ない。mainの存在は検査しない）
+-- 構造検証: 重複定義・mainの引数なし（型の中身は見ない。mainの存在は検査しない）
 validateFnShapes :: [FnDecl] -> Either String ()
 validateFnShapes fnDecls = do
   _ <- foldM addSig Map.empty fnDecls
@@ -653,7 +648,6 @@ validateFnShapes fnDecls = do
     addSig :: Map String () -> FnDecl -> Either String (Map String ())
     addSig seen (FnDecl _ name params _ _)
       | Map.member name seen = Left ("function already declared: " ++ name)
-      | length params > maxParams = Left ("too many parameters (max " ++ show maxParams ++ "): " ++ name)
       -- main は呼び出し元を持たず、戻り値を表示して終了するだけなので、引数を受け取る経路が無い
       | name == "main" && not (null params) = Left "main function must not take parameters"
       | otherwise = Right (Map.insert name () seen)
