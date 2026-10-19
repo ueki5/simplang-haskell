@@ -1,4 +1,4 @@
-module CodeGen (codegen, codegenModule) where
+module CodeGen (codegen) where
 
 import Compiler (Instr (..), StaticData, StaticInit (..), slotCount)
 import Data.List (intercalate, mapAccumL)
@@ -12,18 +12,14 @@ import Parser (Signedness (..), Type (..), Width (..))
 -- -- print/putStrLn: IOモナド内
 -- import Debug.Trace (trace)
 
--- 単一ソースで完結するプログラム（mainあり）のアセンブリを組み立てる
-codegen :: [(String, Type, [Instr])] -> Type -> [Instr] -> String
-codegen fns finalType mainInstrs = codegenModule [] [] fns (Just (finalType, mainInstrs))
-
 -- 公開するシンボルの一覧＋static の初期値＋main以外の各fn（(名前, 戻り値の型, 命令列)）＋mainがあれば（戻り値の型, 命令列）から
 -- 1ソース分のアセンブリ全体を組み立てる。
 -- 一覧にある（pub の）fn・static だけを、他のオブジェクトファイルから参照できるよう .globl で公開する。
 -- 非公開のものはファイルローカルなシンボルになる。mainはエントリポイントなので常に公開する（mainが無いソースもある）。
 -- .text はファイル全体で一度だけ、各fnラベルはその後に、mainはmain:として
 -- 最後に並べる（GASのラベル解決は出現順に依存しないため順序自体に意味はない）
-codegenModule :: [String] -> [StaticData] -> [(String, Type, [Instr])] -> Maybe (Type, [Instr]) -> String
-codegenModule public statics fns mainPart =
+codegen :: [String] -> [StaticData] -> [(String, Type, [Instr])] -> Maybe (Type, [Instr]) -> String
+codegen public statics fns mainPart =
   unlines $
     ["    .section .text"]
       ++ concatMap genFn fns

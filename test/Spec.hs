@@ -1,8 +1,9 @@
 module Main where
 
-import CodeGen (codegen, codegenModule)
-import Compiler (CompiledModule (..), Instr (..), Loc (..), StaticInit (..), compile, compileModule, run)
+import CodeGen (codegen)
+import Compiler (CompiledModule (..), Instr (..), Loc (..), StaticInit (..), compile, run)
 import Control.Exception (bracket)
+import Control.Monad (when)
 import Data.Either (isLeft, isRight)
 import qualified Data.Map as Map
 import Driver (BuildOpts (BuildOpts), Mode (..), build)
@@ -524,113 +525,113 @@ main = hspec $ do
 
   describe "codegen" $ do
     it "プロローグにmainラベルを含む" $
-      codegen [] (TyInt Signed W64) [] `shouldContain` "main:"
+      codegenMain [] (TyInt Signed W64) [] `shouldContain` "main:"
     it "Push nをmovabsq+pushq命令に変換する" $
-      codegen [] (TyInt Signed W64) [Push 42] `shouldContain` "movabsq $42, %rax"
+      codegenMain [] (TyInt Signed W64) [Push 42] `shouldContain` "movabsq $42, %rax"
     it "IAdd W64をaddq命令に変換する" $
-      codegen [] (TyInt Signed W64) [IAdd W64] `shouldContain` "addq"
+      codegenMain [] (TyInt Signed W64) [IAdd W64] `shouldContain` "addq"
     it "ISub W64をsubq命令に変換する" $
-      codegen [] (TyInt Signed W64) [ISub W64] `shouldContain` "subq"
+      codegenMain [] (TyInt Signed W64) [ISub W64] `shouldContain` "subq"
     it "IMul W64をimulq命令に変換する" $
-      codegen [] (TyInt Signed W64) [IMul W64] `shouldContain` "imulq"
+      codegenMain [] (TyInt Signed W64) [IMul W64] `shouldContain` "imulq"
     it "IDiv W64をidivq命令に変換する" $
-      codegen [] (TyInt Signed W64) [IDiv W64] `shouldContain` "idivq"
+      codegenMain [] (TyInt Signed W64) [IDiv W64] `shouldContain` "idivq"
     it "INeg W64をnegq命令に変換する" $
-      codegen [] (TyInt Signed W64) [INeg W64] `shouldContain` "negq"
+      codegenMain [] (TyInt Signed W64) [INeg W64] `shouldContain` "negq"
     it "IAdd W32をaddl命令に変換する" $
-      codegen [] (TyInt Signed W32) [IAdd W32] `shouldContain` "addl"
+      codegenMain [] (TyInt Signed W32) [IAdd W32] `shouldContain` "addl"
     it "ISub W32をsubl命令に変換する" $
-      codegen [] (TyInt Signed W32) [ISub W32] `shouldContain` "subl"
+      codegenMain [] (TyInt Signed W32) [ISub W32] `shouldContain` "subl"
     it "IMul W32をimull命令に変換する" $
-      codegen [] (TyInt Signed W32) [IMul W32] `shouldContain` "imull"
+      codegenMain [] (TyInt Signed W32) [IMul W32] `shouldContain` "imull"
     it "IDiv W32をidivl命令に変換する" $
-      codegen [] (TyInt Signed W32) [IDiv W32] `shouldContain` "idivl"
+      codegenMain [] (TyInt Signed W32) [IDiv W32] `shouldContain` "idivl"
     it "INeg W32をnegl命令に変換する" $
-      codegen [] (TyInt Signed W32) [INeg W32] `shouldContain` "negl"
+      codegenMain [] (TyInt Signed W32) [INeg W32] `shouldContain` "negl"
     it "IDivにゼロ除算チェックを含む" $
-      codegen [] (TyInt Signed W64) [IDiv W64] `shouldContain` ".Ldiv_zero_error"
+      codegenMain [] (TyInt Signed W64) [IDiv W64] `shouldContain` ".Ldiv_zero_error"
     it "IDiv W64は除数-1の場合に被除数を符号反転する（cmoveq）" $
-      codegen [] (TyInt Signed W64) [IDiv W64] `shouldContain` "cmoveq"
+      codegenMain [] (TyInt Signed W64) [IDiv W64] `shouldContain` "cmoveq"
     it "IDiv W32は除数-1の場合に被除数を符号反転する（cmovel）" $
-      codegen [] (TyInt Signed W32) [IDiv W32] `shouldContain` "cmovel"
+      codegenMain [] (TyInt Signed W32) [IDiv W32] `shouldContain` "cmovel"
     it "IZext32をmovl %eax, %eaxに変換する（u32のゼロ拡張正規化）" $
-      codegen [] (TyInt Unsigned W32) [Push 1, IZext32] `shouldContain` "movl  %eax, %eax"
+      codegenMain [] (TyInt Unsigned W32) [Push 1, IZext32] `shouldContain` "movl  %eax, %eax"
     it "IDivU W32はdivlで符号なし除算する" $
-      codegen [] (TyInt Unsigned W32) [IDivU W32] `shouldContain` "divl  %ecx"
+      codegenMain [] (TyInt Unsigned W32) [IDivU W32] `shouldContain` "divl  %ecx"
     it "IDivU W64はdivqで符号なし除算する" $
-      codegen [] (TyInt Unsigned W64) [IDivU W64] `shouldContain` "divq  %rcx"
+      codegenMain [] (TyInt Unsigned W64) [IDivU W64] `shouldContain` "divq  %rcx"
     it "ICmpLtUはsetbを使う" $
-      codegen [] TBool [ICmpLtU] `shouldContain` "setb  %al"
+      codegenMain [] TBool [ICmpLtU] `shouldContain` "setb  %al"
     it "ICmpGeUはsetaeを使う" $
-      codegen [] TBool [ICmpGeU] `shouldContain` "setae %al"
+      codegenMain [] TBool [ICmpGeU] `shouldContain` "setae %al"
     it "最終値がu32なら%uフォーマットを使う" $
-      codegen [] (TyInt Unsigned W32) [] `shouldContain` "fmtU32(%rip)"
+      codegenMain [] (TyInt Unsigned W32) [] `shouldContain` "fmtU32(%rip)"
     it "最終値がu64なら%luフォーマットを使う" $
-      codegen [] (TyInt Unsigned W64) [] `shouldContain` "fmtU64(%rip)"
+      codegenMain [] (TyInt Unsigned W64) [] `shouldContain` "fmtU64(%rip)"
     it "エピローグにprintf呼び出しを含む" $
-      codegen [] (TyInt Signed W64) [] `shouldContain` "call  printf"
+      codegenMain [] (TyInt Signed W64) [] `shouldContain` "call  printf"
     it "最終値がi64なら%ldフォーマットを使う" $
-      codegen [] (TyInt Signed W64) [] `shouldContain` "\"%ld\\n\""
+      codegenMain [] (TyInt Signed W64) [] `shouldContain` "\"%ld\\n\""
     it "最終値がi32なら%dフォーマットを使う" $
-      codegen [] (TyInt Signed W32) [] `shouldContain` "\"%d\\n\""
+      codegenMain [] (TyInt Signed W32) [] `shouldContain` "\"%d\\n\""
     it "Load W64をmovq+pushqに変換する" $
-      codegen [] (TyInt Signed W64) [Load W64 (-8)] `shouldContain` "movq  -8(%rbp), %rax"
+      codegenMain [] (TyInt Signed W64) [Load W64 (-8)] `shouldContain` "movq  -8(%rbp), %rax"
     it "Store W64をpopq+movqに変換する" $
-      codegen [] (TyInt Signed W64) [Store W64 (-8)] `shouldContain` "movq  %rax, -8(%rbp)"
+      codegenMain [] (TyInt Signed W64) [Store W64 (-8)] `shouldContain` "movq  %rax, -8(%rbp)"
     it "Load W32をmovslq+pushqに変換する（符号拡張ロード）" $
-      codegen [] (TyInt Signed W32) [Load W32 (-4)] `shouldContain` "movslq -4(%rbp), %rax"
+      codegenMain [] (TyInt Signed W32) [Load W32 (-4)] `shouldContain` "movslq -4(%rbp), %rax"
     it "Store W32をpopq+movlに変換する（切り詰めストア）" $
-      codegen [] (TyInt Signed W32) [Store W32 (-4)] `shouldContain` "movl  %eax, -4(%rbp)"
+      codegenMain [] (TyInt Signed W32) [Store W32 (-4)] `shouldContain` "movl  %eax, -4(%rbp)"
     it "変数がある場合はsubqでスタックフレームを確保する（16バイト境界へ切り上げ）" $
-      codegen [] (TyInt Signed W64) [Store W64 (-8)] `shouldContain` "subq  $16, %rsp"
+      codegenMain [] (TyInt Signed W64) [Store W64 (-8)] `shouldContain` "subq  $16, %rsp"
     it "変数が無ければsubqを出さない" $
-      codegen [] (TyInt Signed W64) [] `shouldNotContain` "subq"
+      codegenMain [] (TyInt Signed W64) [] `shouldNotContain` "subq"
     it "printf呼び出し前にスタックアライメントを揃える" $
-      codegen [] (TyInt Signed W64) [] `shouldContain` "andq  $-16, %rsp"
+      codegenMain [] (TyInt Signed W64) [] `shouldContain` "andq  $-16, %rsp"
     it "エピローグはleave命令を使う" $
-      codegen [] (TyInt Signed W64) [] `shouldContain` "leave"
+      codegenMain [] (TyInt Signed W64) [] `shouldContain` "leave"
     it "ICmpEqをcmpq+sete命令に変換する" $
-      codegen [] (TyInt Signed W64) [ICmpEq] `shouldContain` "sete"
+      codegenMain [] (TyInt Signed W64) [ICmpEq] `shouldContain` "sete"
     it "ICmpNeをcmpq+setne命令に変換する" $
-      codegen [] (TyInt Signed W64) [ICmpNe] `shouldContain` "setne"
+      codegenMain [] (TyInt Signed W64) [ICmpNe] `shouldContain` "setne"
     it "ICmpLtをcmpq+setl命令に変換する" $
-      codegen [] (TyInt Signed W64) [ICmpLt] `shouldContain` "setl"
+      codegenMain [] (TyInt Signed W64) [ICmpLt] `shouldContain` "setl"
     it "ICmpLeをcmpq+setle命令に変換する" $
-      codegen [] (TyInt Signed W64) [ICmpLe] `shouldContain` "setle"
+      codegenMain [] (TyInt Signed W64) [ICmpLe] `shouldContain` "setle"
     it "ICmpGtをcmpq+setg命令に変換する" $
-      codegen [] (TyInt Signed W64) [ICmpGt] `shouldContain` "setg"
+      codegenMain [] (TyInt Signed W64) [ICmpGt] `shouldContain` "setg"
     it "ICmpGeをcmpq+setge命令に変換する" $
-      codegen [] (TyInt Signed W64) [ICmpGe] `shouldContain` "setge"
+      codegenMain [] (TyInt Signed W64) [ICmpGe] `shouldContain` "setge"
     it "INotをxorq命令に変換する" $
-      codegen [] (TyInt Signed W64) [INot] `shouldContain` "xorq"
+      codegenMain [] (TyInt Signed W64) [INot] `shouldContain` "xorq"
     it "ISext32をcltq命令に変換する（as i64/as i32共通の符号拡張正規化）" $
-      codegen [] (TyInt Signed W64) [ISext32] `shouldContain` "cltq"
+      codegenMain [] (TyInt Signed W64) [ISext32] `shouldContain` "cltq"
     it "JmpIfZeroはpop+testq+je命令に変換する" $ do
-      let asm = codegen [] (TyInt Signed W64) [JmpIfZero ".Lfoo"]
+      let asm = codegenMain [] (TyInt Signed W64) [JmpIfZero ".Lfoo"]
       asm `shouldContain` "testq %rax, %rax"
       asm `shouldContain` "je    .Lfoo"
     it "Jmpはjmp命令に変換する" $
-      codegen [] (TyInt Signed W64) [Jmp ".Lfoo"] `shouldContain` "jmp   .Lfoo"
+      codegenMain [] (TyInt Signed W64) [Jmp ".Lfoo"] `shouldContain` "jmp   .Lfoo"
     it "Labelはラベル定義行に変換する" $
-      codegen [] (TyInt Signed W64) [Label ".Lfoo"] `shouldContain` ".Lfoo:"
+      codegenMain [] (TyInt Signed W64) [Label ".Lfoo"] `shouldContain` ".Lfoo:"
     it "最終値がboolなら分岐でtrue/false文字列を出力する" $ do
-      let asm = codegen [] TBool []
+      let asm = codegenMain [] TBool []
       asm `shouldContain` "testq %rax, %rax"
       asm `shouldContain` "\"true\\n\""
       asm `shouldContain` "\"false\\n\""
     it "LoadAddrをleaq+pushqに変換する（実効アドレス計算）" $
-      codegen [] (TyInt Signed W64) [LoadAddr (-8)] `shouldContain` "leaq  -8(%rbp), %rax"
+      codegenMain [] (TyInt Signed W64) [LoadAddr (-8)] `shouldContain` "leaq  -8(%rbp), %rax"
     it "LoadInd W64をレジスタ間接movqに変換する" $
-      codegen [] (TyInt Signed W64) [LoadInd W64] `shouldContain` "movq  (%rax), %rax"
+      codegenMain [] (TyInt Signed W64) [LoadInd W64] `shouldContain` "movq  (%rax), %rax"
     it "LoadInd W32をレジスタ間接movslqに変換する（符号拡張ロード）" $
-      codegen [] (TyInt Signed W32) [LoadInd W32] `shouldContain` "movslq (%rax), %rax"
+      codegenMain [] (TyInt Signed W32) [LoadInd W32] `shouldContain` "movslq (%rax), %rax"
     it "最終値がポインタ型なら%pフォーマットを使う" $ do
-      let asm = codegen [] (TPtr (TyInt Signed W64)) []
+      let asm = codegenMain [] (TPtr (TyInt Signed W64)) []
       asm `shouldContain` "fmtPtr"
       asm `shouldContain` "\"%p\\n\""
 
   describe "意味論エラー（compile）" $ do
-    let compileSource src = tokenize src >>= parse >>= compile
+    let compileSource src = tokenize src >>= parse >>= compileMain
     it "let初期化式内の未宣言参照はエラー" $
       compileSource "fn main() -> i64 {\nlet x: i64 = y;\nx\n}" `shouldBe` Left "undeclared variable: y"
     it "let初期化式内の自己参照はエラー" $
@@ -897,7 +898,7 @@ main = hspec $ do
       compileSource "fn main() -> i64 {\nwhile true {\nbreak;\n}\n{\nbreak;\n}\n1\n}" `shouldBe` Left "break used outside loop"
 
   describe "意味論エラー（fn定義・呼び出し）" $ do
-    let compileSource src = tokenize src >>= parse >>= compile
+    let compileSource src = tokenize src >>= parse >>= compileMain
     it "未定義関数の呼び出しはエラー" $
       compileSource "fn main() {\nf()\n}" `shouldBe` Left "undeclared function: f"
     it "引数個数が足りない呼び出しはエラー" $
@@ -1093,7 +1094,7 @@ main = hspec $ do
       result <- compileSourceAndRun "fn main() -> i32 {\nlet x: i32 = 9999i32;\nx + 1\n}"
       result `shouldBe` "10000"
     it "サフィックス付きリテラルと宣言型が食い違うとコンパイルエラーになる" $
-      (tokenize "fn main() -> i64 {\nlet x: i64 = 9999i32;\nx\n}" >>= parse >>= compile)
+      (tokenize "fn main() -> i64 {\nlet x: i64 = 9999i32;\nx\n}" >>= parse >>= compileMain)
         `shouldBe` Left "type mismatch: expected i64, found i32"
     it "let宣言（型注釈省略）: 無型リテラルはi64にデフォルトされ%ldで出力される" $ do
       result <- compileSourceAndRun "fn main() -> i64 {\nlet x = 5;\nx + 1\n}"
@@ -1380,23 +1381,23 @@ main = hspec $ do
           "fn double(x: i64) -> i64 {\nx * 2\n}\nfn main() -> i64 {\nlet a: i64 = 1;\nlet b: i64 = double(a);\ntriple(b)\n}\nfn triple(x: i64) -> i64 {\nx * 3\n}"
       result `shouldBe` "6"
   describe "7個以上の引数（compile）" $ do
-    let compileSource src = tokenize src >>= parse >>= compile
+    let compileSource src = tokenize src >>= parse >>= compileMain
     it "7個以上の引数を持つfnを定義・呼び出しできる" $
       compileSource "fn w7(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 {\n((((((a * 10 + b) * 10 + c) * 10 + d) * 10 + e) * 10 + f) * 10 + g)\n}\nfn main() -> i64 {\nw7(1, 2, 3, 4, 5, 6, 7)\n}"
         `shouldSatisfy` isRight
 
   describe "7個以上の引数（codegen）" $ do
     it "7個目の仮引数は16(%rbp)からスピルする" $
-      codegen [("f", TyInt Signed W64, [StoreArg 6 W64 (-56)])] (TyInt Signed W64) [] `shouldContain` "movq  16(%rbp), %rax\n    movq  %rax, -56(%rbp)"
+      codegenMain [("f", TyInt Signed W64, [StoreArg 6 W64 (-56)])] (TyInt Signed W64) [] `shouldContain` "movq  16(%rbp), %rax\n    movq  %rax, -56(%rbp)"
     it "8個目のi32の仮引数は24(%rbp)から32bitでスピルする" $
-      codegen [("f", TyInt Signed W64, [StoreArg 7 W32 (-60)])] (TyInt Signed W64) [] `shouldContain` "movl  24(%rbp), %eax\n    movl  %eax, -60(%rbp)"
+      codegenMain [("f", TyInt Signed W64, [StoreArg 7 W32 (-60)])] (TyInt Signed W64) [] `shouldContain` "movl  24(%rbp), %eax\n    movl  %eax, -60(%rbp)"
     it "深さが偶数なら、スタック渡しの引数を逆順に複製してパディングなしで呼び出す" $ do
-      let asm = codegen [] (TyInt Signed W64) (map Push [1 .. 8] ++ [ICall "f" 8 1])
+      let asm = codegenMain [] (TyInt Signed W64) (map Push [1 .. 8] ++ [ICall "f" 8 1])
       asm `shouldContain` "pushq 0(%rsp)\n    pushq 16(%rsp)\n    movq  72(%rsp), %rdi"
       asm `shouldContain` "movq  32(%rsp), %r9\n    call  f\n    addq  $80, %rsp\n    pushq %rax"
       asm `shouldNotContain` "subq  $8, %rsp"
     it "深さが奇数なら、複製より先にパディングを積む" $ do
-      let asm = codegen [] (TyInt Signed W64) (map Push [0 .. 8] ++ [ICall "f" 8 1])
+      let asm = codegenMain [] (TyInt Signed W64) (map Push [0 .. 8] ++ [ICall "f" 8 1])
       asm `shouldContain` "subq  $8, %rsp\n    pushq 8(%rsp)\n    pushq 24(%rsp)\n    movq  80(%rsp), %rdi"
       asm `shouldContain` "call  f\n    addq  $88, %rsp\n    pushq %rax"
 
@@ -1516,7 +1517,7 @@ main = hspec $ do
       parseSource "fn main() {\nlet a: [i32; 0] = 0;\n0\n}" `shouldBe` Left "array length must be at least 1"
 
   describe "配列・usize（compile）" $ do
-    let compileSource src = tokenize src >>= parse >>= compile
+    let compileSource src = tokenize src >>= parse >>= compileMain
     it "配列リテラルは要素ごとに静的オフセットへストアし、a[i]はアドレス計算＋範囲検査＋LoadInd" $
       compileSource "fn main() -> i32 {\nlet a: [i32; 2] = [1, 2];\na[1]\n}"
         `shouldBe` Right
@@ -1590,7 +1591,7 @@ main = hspec $ do
         `shouldBe` Right (Store W64 (-16))
 
   describe "配列・usize（意味論エラー）" $ do
-    let compileSource src = fmap (const ()) (tokenize src >>= parse >>= compile)
+    let compileSource src = fmap (const ()) (tokenize src >>= parse >>= compileMain)
     it "要素数の不一致" $
       compileSource "fn main() -> i64 {\nlet a: [i32; 3] = [1, 2];\n0\n}" `shouldBe` Left "array length mismatch: expected 3, found 2"
     it "繰り返し回数の不一致" $
@@ -1634,11 +1635,11 @@ main = hspec $ do
     it "StoreIndで書き込んだ値をLoadIndで読み戻す" $
       run [LoadAddr (-8), Push 7, StoreInd W64, LoadAddr (-8), LoadInd W64] `shouldBe` Right 7
     it "IBoundsCheckは符号なし比較で.Lindex_errorへジャンプする" $
-      codegen [] (TyInt Signed W64) [IBoundsCheck 3] `shouldContain` "jae   .Lindex_error"
+      codegenMain [] (TyInt Signed W64) [IBoundsCheck 3] `shouldContain` "jae   .Lindex_error"
     it "StoreInd W32はmovlで間接ストアする" $
-      codegen [] (TyInt Signed W64) [StoreInd W32] `shouldContain` "movl  %eax, (%rcx)"
+      codegenMain [] (TyInt Signed W64) [StoreInd W32] `shouldContain` "movl  %eax, (%rcx)"
     it "usizeの末尾式は%luで出力する" $
-      codegen [] TUsize [] `shouldContain` "leaq  .LfmtU64(%rip), %rdi"
+      codegenMain [] TUsize [] `shouldContain` "leaq  .LfmtU64(%rip), %rdi"
 
   describe "compile + codegen + gcc（配列の結合テスト）" $ do
     it "i32配列の合計をusizeのwhileループで求める" $ do
@@ -1713,7 +1714,7 @@ main = hspec $ do
       parseSource "fn main() {\nlet x = 1;\n(x\n}" `shouldBe` Left "expected closing parenthesis"
 
   describe "配列へのポインタ（compile）" $ do
-    let compileSource src = tokenize src >>= parse >>= compile
+    let compileSource src = tokenize src >>= parse >>= compileMain
     it "&a は配列先頭のアドレス" $
       compileSource "fn main() -> &[i64; 2] {\nlet a = [1, 2];\n&a\n}"
         `shouldBe` Right ([], TPtr (TArray (TyInt Signed W64) 2), [Push 1, Store W64 (-16), Push 2, Store W64 (-8), LoadAddr (-16), Label ".Lfn_end0"])
@@ -1729,7 +1730,7 @@ main = hspec $ do
           [Push 1, Store W32 (-4), LoadAddr (-4), Store W64 (-12), Load W64 (-12), Push 2, StoreInd W32, Load W32 (-4), Label ".Lfn_end0"]
 
   describe "配列へのポインタ（意味論エラー）" $ do
-    let compileSource src = fmap (const ()) (tokenize src >>= parse >>= compile)
+    let compileSource src = fmap (const ()) (tokenize src >>= parse >>= compileMain)
     it "ローカル変数へのポインタを末尾式で返すとエラー" $
       compileSource "fn f() -> &i64 { let x: i64 = 1; &x }\nfn main() -> i64 {\n0\n}" `shouldBe` Left "cannot return reference to local variable: x"
     it "ローカル配列へのポインタを返すとエラー" $
@@ -1838,7 +1839,7 @@ main = hspec $ do
       parseSrc "fn main() {\n1 as ()\n}" `shouldBe` Left "invalid cast target: only integer types (i32/i64/u32/u64/usize) are allowed"
 
   describe "ユニット型・式文（compile）" $ do
-    let compileSource src = tokenize src >>= parse >>= compile
+    let compileSource src = tokenize src >>= parse >>= compileMain
         finalTypeOf src = (\(_, t, _) -> t) <$> compileSource src
     it "末尾式を省略したmainの戻り値型は ()" $
       finalTypeOf "fn main() {\nlet x = 1;\n}" `shouldBe` Right TUnit
@@ -1858,7 +1859,7 @@ main = hspec $ do
         `shouldBe` Right 1
 
   describe "ユニット型・式文（意味論エラー）" $ do
-    let compileSource src = tokenize src >>= parse >>= compile
+    let compileSource src = tokenize src >>= parse >>= compileMain
     it "-> i64 なのに末尾式を省略するとエラー" $
       compileSource "fn f() -> i64 {\nlet x = 1;\n}\nfn main() -> i64 {\nf()\n}"
         `shouldBe` Left "type mismatch: expected i64, found ()"
@@ -1921,7 +1922,7 @@ main = hspec $ do
       parseProgram "fn main() { 1 }\n2" `shouldBe` Left "expected 'fn', 'const' or 'static' at top level, got: TInt 2"
 
   describe "明示的なmain（compile）" $ do
-    let compileSource src = tokenize src >>= parse >>= compile
+    let compileSource src = tokenize src >>= parse >>= compileMain
         finalTypeOf src = (\(_, t, _) -> t) <$> compileSource src
     it "mainが無いとエラー" $
       compileSource "fn f() { 1 }" `shouldBe` Left "missing function: main"
@@ -1996,9 +1997,9 @@ main = hspec $ do
     it "fn定義の後のimportはエラー" $
       parseProgram "fn main() {}\nimport \"a.sl\";" `shouldBe` Left "import must appear before other definitions"
 
-  describe "import したfnの呼び出し（compileModule）" $ do
+  describe "import したfnの呼び出し（compile）" $ do
     let importedSigs = Map.fromList [("add", ([TyInt Signed W64, TyInt Signed W64], TyInt Signed W64))]
-        compileWith sigs src = tokenize src >>= parse >>= compileModule sigs Map.empty
+        compileWith sigs src = tokenize src >>= parse >>= compile sigs Map.empty
     it "importしたfnを呼び出せる" $
       fmap fst . cmMain <$> compileWith importedSigs "fn main() -> i64 { add(1, 2) }"
         `shouldBe` Right (Just (TyInt Signed W64))
@@ -2015,13 +2016,13 @@ main = hspec $ do
       (\m -> ([name | (name, _, _) <- cmFns m], fmap fst (cmMain m))) <$> compileWith Map.empty "fn f() -> i64 { 1 }"
         `shouldBe` Right (["f"], Nothing)
 
-  describe "codegenModule" $ do
+  describe "codegen（公開シンボル・main の有無）" $ do
     it "各fnを.globlで公開する" $
-      codegenModule ["add"] [] [("add", TyInt Signed W64, [Push 1])] Nothing `shouldContain` ".globl add"
+      codegen ["add"] [] [("add", TyInt Signed W64, [Push 1])] Nothing `shouldContain` ".globl add"
     it "mainが無ければmainを出力しない" $
-      codegenModule [] [] [("add", TyInt Signed W64, [Push 1])] Nothing `shouldNotContain` "main"
+      codegen [] [] [("add", TyInt Signed W64, [Push 1])] Nothing `shouldNotContain` "main"
     it "mainがあれば.globl mainとmain:を出力する" $
-      codegenModule [] [] [] (Just (TUnit, [])) `shouldContain` ".globl main\nmain:"
+      codegen [] [] [] (Just (TUnit, [])) `shouldContain` ".globl main\nmain:"
 
   describe "複数ソースからのビルド（Driver）" $ do
     it "importしたソースを再帰的にコンパイルしてリンクする" $
@@ -2144,8 +2145,8 @@ main = hspec $ do
       parseProgram "const N: i64 = 1\nfn main() {}" `shouldSatisfy` isLeft
 
   describe "定数・static（compile）" $ do
-    let compileSource src = tokenize src >>= parse >>= compile
-        compileStatics src = cmStatics <$> (tokenize src >>= parse >>= compileModule Map.empty Map.empty)
+    let compileSource src = tokenize src >>= parse >>= compileMain
+        compileStatics src = cmStatics <$> (tokenize src >>= parse >>= compile Map.empty Map.empty)
     it "constの参照は値のPushになる" $
       compileSource "const N: i64 = 3;\nfn main() -> i64 { N }" `shouldBe` Right ([], TyInt Signed W64, [Push 3, Label ".Lfn_end0"])
     it "constは定数式をコンパイル時に評価する" $
@@ -2179,16 +2180,16 @@ main = hspec $ do
         `shouldBe` Right [LoadGlobalAddr "X", Label ".Lfn_end0"]
     it "&staticは関数から返せる" $
       compileSource "static X: i64 = 1;\nfn f() -> &i64 { &X }\nfn main() -> i64 { *f() }" `shouldSatisfy` isRight
-    it "compileModuleはstaticの初期値を返す" $
+    it "compileはstaticの初期値を返す" $
       compileStatics "const N: i32 = 2;\nstatic A: [i32; 3] = [1, -N, 3];\nstatic B: u32 = 4294967295;\nstatic C: bool = true;\nstatic D: [i64; 3] = [7; 3];"
         `shouldBe` Right [("A", W32, map SInt [1, -2, 3]), ("B", W32, [SInt 4294967295]), ("C", W32, [SInt 1]), ("D", W64, map SInt [7, 7, 7])]
     it "importしたconst/staticを参照できる" $
-      (tokenize "fn main() -> i64 { N + X }" >>= parse >>= compileModule Map.empty (Map.fromList [("N", (LConst 4, TyInt Signed W64)), ("X", (LStatic "X", TyInt Signed W64))]))
+      (tokenize "fn main() -> i64 { N + X }" >>= parse >>= compile Map.empty (Map.fromList [("N", (LConst 4, TyInt Signed W64)), ("X", (LStatic "X", TyInt Signed W64))]))
         `shouldBe` Right (CompiledModule [] [] (Just (TyInt Signed W64, [Push 4, LoadGlobal W64 "X", IAdd W64, Label ".Lfn_end0"])) [])
 
   describe "定数・static（意味論エラー）" $ do
-    let compileSource src = fmap (const ()) (tokenize src >>= parse >>= compile)
-        withImported globals src = fmap (const ()) (tokenize src >>= parse >>= compileModule Map.empty (Map.fromList globals))
+    let compileSource src = fmap (const ()) (tokenize src >>= parse >>= compileMain)
+        withImported globals src = fmap (const ()) (tokenize src >>= parse >>= compile Map.empty (Map.fromList globals))
     it "constへの代入はエラー" $
       compileSource "const N: i64 = 1;\nfn main() { N = 2; }" `shouldBe` Left "cannot assign to constant: N"
     it "&constはエラー" $
@@ -2323,8 +2324,8 @@ main = hspec $ do
         readProcess (dir </> "prog") [] "" `shouldReturn` "3\n"
 
   describe "ポインタ型のstatic（compile）" $ do
-    let compileStatics src = cmStatics <$> (tokenize src >>= parse >>= compileModule Map.empty Map.empty)
-        compileSource src = tokenize src >>= parse >>= compile
+    let compileStatics src = cmStatics <$> (tokenize src >>= parse >>= compile Map.empty Map.empty)
+        compileSource src = tokenize src >>= parse >>= compileMain
     it "&staticとstaticの配列の&T[i]をアドレスの定数にする" $
       compileStatics "static C: i64 = 0;\nstatic T: [i64; 4] = [1, 2, 3, 4];\nstatic P: &i64 = &C;\nstatic Q: &[i64; 4] = &T;\nstatic R: &i64 = &T[2];"
         `shouldBe` Right
@@ -2355,7 +2356,7 @@ main = hspec $ do
         `shouldBe` Right [LoadGlobalAddr "Y", StoreGlobal W64 "P", LoadGlobal W64 "P", LoadInd W64, Label ".Lfn_end0"]
 
   describe "ポインタ型のstatic（意味論エラー）" $ do
-    let compileSource src = fmap (const ()) (tokenize src >>= parse >>= compile)
+    let compileSource src = fmap (const ()) (tokenize src >>= parse >>= compileMain)
     it "指す先の型が違うとエラー" $
       compileSource "static X: i64 = 1;\nstatic P: &i32 = &X;\nfn main() {}" `shouldBe` Left "type mismatch: expected &i32, found &i64"
     it "要素の型が違うとエラー" $
@@ -2445,19 +2446,19 @@ main = hspec $ do
     it "末尾のpubはエラー" $
       (tokenize "fn main() {}\npub" >>= parse) `shouldBe` Left "expected 'fn', 'const' or 'static' after pub"
 
-  describe "pub（codegenModule）" $ do
+  describe "pub（codegen）" $ do
     it "公開するfnにだけ.globlを付ける" $ do
-      let asm = codegenModule ["add"] [] [("add", TyInt Signed W64, [Push 1]), ("helper", TyInt Signed W64, [Push 2])] Nothing
+      let asm = codegen ["add"] [] [("add", TyInt Signed W64, [Push 1]), ("helper", TyInt Signed W64, [Push 2])] Nothing
       asm `shouldContain` ".globl add\nadd:"
       asm `shouldNotContain` ".globl helper"
       asm `shouldContain` "helper:"
     it "公開するstaticにだけ.globlを付ける" $ do
-      let asm = codegenModule ["X"] [("X", W64, [SInt 1]), ("Y", W64, [SInt 2])] [] Nothing
+      let asm = codegen ["X"] [("X", W64, [SInt 1]), ("Y", W64, [SInt 2])] [] Nothing
       asm `shouldContain` ".globl X"
       asm `shouldNotContain` ".globl Y"
       asm `shouldContain` "Y:\n    .quad 2"
     it "mainは公開の一覧に無くても.globlを付ける" $
-      codegenModule [] [] [] (Just (TUnit, [])) `shouldContain` ".globl main\nmain:"
+      codegen [] [] [] (Just (TUnit, [])) `shouldContain` ".globl main\nmain:"
 
   describe "pub（Driver）" $ do
     it "importしたソースのpubの定義を使う（非公開の定義はそのソースの中で使える）" $
@@ -2562,7 +2563,7 @@ main = hspec $ do
       parseSource "fn main() {\na.len\n}" `shouldBe` Left "expected method call after '.'"
 
   describe "スライス（compile）" $ do
-    let compileSource src = tokenize src >>= parse >>= compile
+    let compileSource src = tokenize src >>= parse >>= compileMain
     it "&[T; N] から &[T] への変換は先頭アドレスと長さを積み、2スロットをストアする" $
       compileSource "fn main() -> usize {\nlet a = [1, 2, 3];\nlet s: &[i64] = &a;\ns.len()\n}"
         `shouldBe` Right
@@ -2621,18 +2622,18 @@ main = hspec $ do
 
   describe "スライス（codegen）" $ do
     it "スライスを返す関数は末尾で%rdxと%raxへ取り出す" $
-      codegen [("f", TSlice (TyInt Signed W64), [Push 1, Push 2])] (TyInt Signed W64) []
+      codegenMain [("f", TSlice (TyInt Signed W64), [Push 1, Push 2])] (TyInt Signed W64) []
         `shouldContain` "popq  %rdx\n    popq  %rax\n    leave\n    ret"
     it "2スロットを返す呼び出しは%raxと%rdxを積む" $
-      codegen [] (TyInt Signed W64) [Push 1, Push 2, ICall "f" 2 2, IAdd W64] `shouldContain` "call  f\n    pushq %rax\n    pushq %rdx"
+      codegenMain [] (TyInt Signed W64) [Push 1, Push 2, ICall "f" 2 2, IAdd W64] `shouldContain` "call  f\n    pushq %rax\n    pushq %rdx"
     it "IBoundsCheckDynは長さと添字を比べ、添字を積み直す" $
-      codegen [] (TyInt Signed W64) [IBoundsCheckDyn]
+      codegenMain [] (TyInt Signed W64) [IBoundsCheckDyn]
         `shouldContain` "popq  %rax\n    popq  %rcx\n    cmpq  %rcx, %rax\n    jae   .Lindex_error\n    pushq %rax"
     it "INipは2段目を捨てる" $
-      codegen [] (TyInt Signed W64) [INip] `shouldContain` "popq  %rax\n    addq  $8, %rsp\n    pushq %rax"
+      codegenMain [] (TyInt Signed W64) [INip] `shouldContain` "popq  %rax\n    addq  $8, %rsp\n    pushq %rax"
 
   describe "スライス（意味論エラー）" $ do
-    let compileSource src = fmap (const ()) (tokenize src >>= parse >>= compile)
+    let compileSource src = fmap (const ()) (tokenize src >>= parse >>= compileMain)
     it "要素型が異なる配列へのポインタは変換できない" $
       compileSource "fn f(s: &[i64]) -> i64 { s[0] }\nfn main() -> i64 {\nlet a = [1i32];\nf(&a)\n}"
         `shouldBe` Left "type mismatch: expected &[i64], found &[i32; 1]"
@@ -2698,6 +2699,20 @@ main = hspec $ do
         build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Right ()
         readProcess (dir </> "prog") [] "" `shouldReturn` "12\n"
 
+-- 単一ソース（import なし）をコンパイルし、(main以外のfn, mainの戻り値型, mainの命令列) を返す。main は必須。
+-- 命令列を検査するテスト用（static の初期値・公開シンボルは返さない）
+compileMain :: Program -> Either String ([(String, Type, [Instr])], Type, [Instr])
+compileMain prog = do
+  when (null [() | FnDecl _ "main" _ _ _ <- progFns prog]) $ Left "missing function: main"
+  m <- compile Map.empty Map.empty prog
+  case cmMain m of
+    Just (mainType, mainInstrs) -> Right (cmFns m, mainType, mainInstrs)
+    Nothing -> Left "missing function: main"
+
+-- main以外のfnとmainから、1ソース分のアセンブリを組み立てる（公開シンボル・static なし）
+codegenMain :: [(String, Type, [Instr])] -> Type -> [Instr] -> String
+codegenMain fns finalType mainInstrs = codegen [] [] fns (Just (finalType, mainInstrs))
+
 -- パース結果を (main以外のfn定義, mainの文の列, mainの末尾式) に分解する（main が無ければテスト失敗）
 splitMain :: Program -> ([FnDecl], [Stmt], Expr)
 splitMain (Program _ _ prog) =
@@ -2714,24 +2729,24 @@ compileAndRun retTy expr =
   withSystemTempDirectory "hs006" $ \tmpDir -> do
     let asmPath = tmpDir </> "out.s"
         binPath = tmpDir </> "out"
-    case compile (Program [] [] [FnDecl Private "main" [] retTy ([], expr)]) of
+    case compileMain (Program [] [] [FnDecl Private "main" [] retTy ([], expr)]) of
       Left err -> error ("compile failed: " ++ err)
       Right (fns, finalType, instrs) -> do
-        writeFile asmPath (codegen fns finalType instrs)
+        writeFile asmPath (codegenMain fns finalType instrs)
         _ <- readProcess "gcc" [asmPath, "-o", binPath] ""
         output <- readProcess binPath [] ""
         return (takeWhile (/= '\n') output)
 
--- ソース文字列からフルパイプライン（tokenize/parse/compileModule/codegenModule）を通して実行する。
+-- ソース文字列からフルパイプライン（tokenize/parse/compile/codegen）を通して実行する。
 buildAndRun :: (FilePath -> IO a) -> String -> IO a
 buildAndRun runBinary src =
   withSystemTempDirectory "hs006" $ \tmpDir -> do
     let asmPath = tmpDir </> "out.s"
         binPath = tmpDir </> "out"
-    case tokenize src >>= parse >>= compileModule Map.empty Map.empty of
+    case tokenize src >>= parse >>= compile Map.empty Map.empty of
       Left err -> error ("compile failed: " ++ err)
       Right m -> do
-        writeFile asmPath (codegenModule (cmPublic m) (cmStatics m) (cmFns m) (cmMain m))
+        writeFile asmPath (codegen (cmPublic m) (cmStatics m) (cmFns m) (cmMain m))
         _ <- readProcess "gcc" [asmPath, "-o", binPath] ""
         runBinary binPath
 

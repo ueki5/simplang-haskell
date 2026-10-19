@@ -9,8 +9,8 @@
 ソース (.sl)
   → tokenize       (src/Parser.hs)    字句解析                     String → [Token]
   → parse          (src/Parser.hs)    再帰下降パーサ                [Token] → Program
-  → compileModule  (src/Compiler.hs)  型検査 + 定数式の評価 + 中間命令列への変換    Program → [Instr]（fn ごと）+ static の初期値
-  → codegenModule  (src/CodeGen.hs)   x86-64 AT&T 構文アセンブリ    [Instr] → String
+  → compile        (src/Compiler.hs)  型検査 + 定数式の評価 + 中間命令列への変換    Program → [Instr]（fn ごと）+ static の初期値
+  → codegen        (src/CodeGen.hs)   x86-64 AT&T 構文アセンブリ    [Instr] → String
   → gcc -c         (src/Driver.hs)    アセンブル                    .s → .o
   → gcc            (src/Driver.hs)    リンク（libc の printf/puts/exit を使う）  .o... → 実行ファイル
 ```
@@ -22,8 +22,8 @@
 | ファイル | 責務 |
 |---|---|
 | `src/Parser.hs` | トークン・AST・型（`Type`/`Width`/`Signedness`）の定義、`tokenize`、`parse` |
-| `src/Compiler.hs` | 中間命令 `Instr` の定義、シグネチャ表・グローバルの表の構築（定数式の評価を含む）、型検査とIR生成（`compileModule`/`compile`）、スタックVM（`run`） |
-| `src/CodeGen.hs` | `Instr` → x86-64 アセンブリ（`codegenModule`/`codegen`） |
+| `src/Compiler.hs` | 中間命令 `Instr` の定義、シグネチャ表・グローバルの表の構築（定数式の評価を含む）、型検査とIR生成（`compile`）、スタックVM（`run`） |
+| `src/CodeGen.hs` | `Instr` → x86-64 アセンブリ（`codegen`） |
 | `src/Driver.hs` | 入力の種類の判定、import の解決、各段階の実行と gcc 呼び出し、中間ファイルの管理（`build`） |
 | `app/Main.hs` | コマンドライン引数の解析（optparse-applicative）と `build` の呼び出し |
 | `test/Spec.hs` | Hspec のテストスイート（→ 9） |
@@ -77,9 +77,9 @@ data Instr   = Push Int | IAdd Width | ... | ICall String Int Int | IPop | LoadG
 
 1. `buildFnSigs`：全 fn の宣言から `FnSigs` を作る。重複定義・`main` の引数なし（`validateFnShapes`）と、シグネチャ中の配列型の禁止・`main` の戻り値のスライスの禁止を検査する。本体は見ないので宣言順に依存しない
 2. `buildGlobals`：全 const/static の宣言から `Globals` と static の初期値を作る（→ 5.9）
-3. `compileModule importedSigs importedGlobals prog`：自ソースと import 先の fn シグネチャ（`main` を除く）・グローバルをマージし（fn・const・static は同じ名前空間で、同名はエラー）、各 fn の本体を `compileFnDecl` でコンパイルする。結果の `CompiledModule` は、`.globl` にする pub の fn・static の名前（`cmPublic`）も持つ
+3. `compile importedSigs importedGlobals prog`：自ソースと import 先の fn シグネチャ（`main` を除く）・グローバルをマージし（fn・const・static は同じ名前空間で、同名はエラー）、各 fn の本体を `compileFnDecl` でコンパイルする。結果の `CompiledModule` は、`.globl` にする pub の fn・static の名前（`cmPublic`）も持つ
 
-`compile` は main を必須とする単一ソース用のラッパで、命令列を検査するテストで使う（static の初期値は返さない）。
+main の有無は `compile` では検査しない（main の無いソースもある。リンクする全ソースでちょうど1つあるかはドライバが検査する）。
 
 ### 5.2 期待型の一様伝播
 
@@ -164,7 +164,7 @@ data Instr   = Push Int | IAdd Width | ... | ICall String Int Int | IPop | LoadG
 - **スタック渡しの並べ替え**：実引数は左から右へ評価して積むため、操作スタック上の並びは ABI と逆になる。7個以上の呼び出しでは `genCall` が、最後の引数から順に `pushq off(%rsp)` で7個目以降を複製して並べ直し、レジスタ渡しの分は元の位置から `movq` で読む。call 後に複製・パディング・元の引数をまとめて `addq` で捨てる
 - **アライメント**：`genBody` が操作スタックの深さを左から右へ追跡し（`stackDelta`）、`call` 直前に 16 バイト境界からずれていれば `subq $8` でパディングする（7個以上の呼び出しでは、スタック渡しの引数と call の間に隙間ができないよう、複製より先にパディングを積む）。if/while は文の境界（操作スタックが空）にしか現れないので、分岐の合流点で深さが食い違うことはない。`printf`/`puts`/`exit` の直前は `andq $-16, %rsp` で強制的に揃える
 - **main**：他の fn と同じく `compileFnDecl` でコンパイルするが、`ret` の代わりに戻り値を型に応じたフォーマットで `printf` して終了するエピローグで終わる（`epilogue`）。そのため main は呼び出せない
-- **シンボル**：pub の fn・static と main だけを `.globl` で公開する（`codegenModule` が `cmPublic` を受け取る）。非公開の fn・static はファイルローカルなシンボルになり、ほかのオブジェクトと同名でも衝突しない。`call` の対象や参照した static が未定義なら外部参照になる。`.L` ラベル（rodata の `.Lfmt64` 等を含む）はファイルローカルで、ユーザーのシンボルと衝突しない
+- **シンボル**：pub の fn・static と main だけを `.globl` で公開する（`codegen` が `cmPublic` を受け取る）。非公開の fn・static はファイルローカルなシンボルになり、ほかのオブジェクトと同名でも衝突しない。`call` の対象や参照した static が未定義なら外部参照になる。`.L` ラベル（rodata の `.Lfmt64` 等を含む）はファイルローカルで、ユーザーのシンボルと衝突しない
 - **static**：`.data` セクションに（pub なら `.globl` と）`.balign`・`.quad`（64bit）／`.long`（32bit）で初期値を置き（`dataSection`。アドレスの定数は `.quad X` / `.quad T+16` と書き、PIE でもロード時の再配置で解決される）、RIP 相対（`name(%rip)`）で読み書きする。32bit の読み出しは `movslq` で、u32 は `loadFixup` でゼロ拡張し直す
 - **共通部**：エラー処理（`.Ldiv_zero_error`、`.Lindex_error`：メッセージを `puts` して `exit(1)`。`runtimeErrors`）と rodata（`rodataSection`）はファイルごとに1回出力する
 
@@ -174,7 +174,7 @@ data Instr   = Push Int | IAdd Width | ... | ICall String Int Int | IPop | LoadG
 
 - 入力の種類を拡張子で判定し、`-S`/`-c` との組み合わせを検証する（`classifyInputs`）
 - import の解決（`resolveImports`）：import を書いたソースのディレクトリからの相対パス。同一ファイルの判定は `canonicalizePath`
-- 1ソースのコンパイル（`compileSource`）：**直接** import したソースのシグネチャとグローバル（`buildGlobals` で const を評価したもの）のうち、pub の定義（`publicNames`）だけを集めて `compileModule` に渡す（`importedSigs`。評価はソース全体で行うので、pub の const が非公開の const を参照してもよい。import 先どうしの pub の同名もここで検査する）
+- 1ソースのコンパイル（`compileSource`）：**直接** import したソースのシグネチャとグローバル（`buildGlobals` で const を評価したもの）のうち、pub の定義（`publicNames`）だけを集めて `compile` に渡す（`importedSigs`。評価はソース全体で行うので、pub の const が非公開の const を参照してもよい。import 先どうしの pub の同名もここで検査する）
 - リンクまでの一括処理：入力から import を再帰的にたどって全ソースを集め（`collectSources`、循環可）、pub の fn 名・static 名の重複と main がちょうど1つであることを検査する（`checkLinkUnits`。非公開の名前はファイルローカルなので対象外）
 - 中間ファイル：`OUTDIR/basename.s` / `.o`。名前の衝突を事前に検査し（`checkIntermediates`）、`-d` が無ければ成功・失敗を問わず `finally` で削除する
 - gcc：`gcc -c X.s -g -o X.o`（アセンブル）、`gcc OBJS... -o OUTPUT`（リンク）を `readProcessWithExitCode` で呼ぶ
@@ -198,6 +198,8 @@ data Instr   = Push Int | IAdd Width | ... | ICall String Int Int | IPop | LoadG
 | codegen | プロローグ/エピローグ、各命令の x86-64 への変換 |
 | 結合テスト | gcc でアセンブル・リンクして実行し、標準出力と終了コードを検証する |
 | Driver | 一時ディレクトリに複数ソースを書き出し、`build` の一括処理・段階的ビルド・中間ファイルの削除・各種エラーを検証する |
+
+- 命令列・アセンブリを検査するテストは、`test/Spec.hs` の補助関数 `compileMain`（import なしで `compile` を呼び、main を必須として (main 以外の fn, main の戻り値型, main の命令列) を返す）と `codegenMain`（公開シンボル・static なしで `codegen` を呼ぶ）を使う
 
 結合テスト・Driver のテストは `withSystemTempDirectory` で一時ディレクトリを管理する。
 
