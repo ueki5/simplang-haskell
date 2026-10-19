@@ -1,7 +1,7 @@
 module Driver (Mode (..), BuildOpts (..), build) where
 
 import CodeGen (codegenModule)
-import Compiler (CompiledModule (..), FnSigs, Globals, buildFnSigs, buildGlobals, compileModule)
+import Compiler (CompiledModule (..), FnSigs, Globals, buildFnSigs, buildGlobals, compileModule, publicNames)
 import Control.Exception (IOException, finally, try)
 import Control.Monad (foldM, forM, forM_, unless, when)
 import Control.Monad.IO.Class (liftIO)
@@ -10,7 +10,7 @@ import Data.IORef (IORef, modifyIORef, newIORef, readIORef)
 import Data.List (nub)
 import qualified Data.Map as Map
 import Data.Maybe (isJust)
-import Parser (FnDecl (..), GlobalDecl (..), GlobalKind (..), Program (..), parse, tokenize)
+import Parser (FnDecl (..), GlobalDecl (..), GlobalKind (..), Program (..), Visibility (..), parse, tokenize)
 import System.Directory (canonicalizePath, createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, removeFile)
 import System.Exit (ExitCode (..))
 import System.FilePath (normalise, replaceExtension, takeBaseName, takeDirectory, takeExtension, (</>))
@@ -134,13 +134,13 @@ checkIntermediates units = do
       Just other | other /= src -> throwE ("intermediate file name conflict: " ++ other ++ " and " ++ src)
       _ -> pure (Map.insert c src seen)
 
--- 1ソースをコンパイルしてアセンブリを返す。直接 import したソースのfnのシグネチャと const/static だけを取り込む
+-- 1ソースをコンパイルしてアセンブリを返す。直接 import したソースの pub の fn のシグネチャと const/static だけを取り込む
 compileSource :: FilePath -> BuildM String
 compileSource path = do
   m <- loadModule path
   (sigs, globals) <- importedSigs m
   cm <- inFile path (compileModule sigs globals (modProgram m))
-  pure (codegenModule (cmStatics cm) (cmFns cm) (cmMain cm))
+  pure (codegenModule (cmPublic cm) (cmStatics cm) (cmFns cm) (cmMain cm))
 
 -- ソースを読み込んでパースする（エラーにはファイル名を前置する）
 loadModule :: FilePath -> BuildM Module
@@ -163,8 +163,9 @@ resolveImports m =
     unless exists $ throwE (modPath m ++ ": imported file not found: " ++ imp)
     pure path
 
--- 直接 import したソースに定義されたfnのシグネチャ（mainを除く）と const/static を集める。
--- importしたソース同士で同名の定義があればエラー（importの再帰的な取り込みは行わない）
+-- 直接 import したソースに定義された pub の fn のシグネチャ（mainを除く）と const/static を集める。
+-- 非公開の定義は取り込まない（評価はソース全体で行う。pub の const が非公開の const を参照していてもよい）。
+-- importしたソース同士で同名の pub の定義があればエラー（importの再帰的な取り込みは行わない）
 importedSigs :: Module -> BuildM (FnSigs, Globals)
 importedSigs m = do
   paths <- resolveImports m
@@ -172,7 +173,8 @@ importedSigs m = do
   perFile <- forM imported $ \im -> do
     sigs <- inFile (modPath im) (buildFnSigs (progFns (modProgram im)))
     (globals, _) <- inFile (modPath im) (buildGlobals (progGlobals (modProgram im)))
-    pure (modPath im, Map.delete "main" sigs, globals)
+    let public = Map.fromList [(name, ()) | name <- publicNames (modProgram im)]
+    pure (modPath im, Map.delete "main" (Map.intersection sigs public), Map.intersection globals public)
   -- fn・const・static は同じ名前空間を共有するため、まとめて衝突を検査する
   _ <- foldM addNames Map.empty [(path, [(n, True) | n <- Map.keys sigs] ++ [(n, False) | n <- Map.keys globals]) | (path, sigs, globals) <- perFile]
   pure (Map.unions [sigs | (_, sigs, _) <- perFile], Map.unions [globals | (_, _, globals) <- perFile])
@@ -204,8 +206,9 @@ collectSources roots = reverse <$> foldM visit [] roots
           imports <- resolveImports m
           foldM visit (m : acc) imports
 
--- リンクする全ソースを通した検査: fn名・static名（どちらもシンボルになる）の重複（リンカより分かりやすい
--- メッセージにする）と main がちょうど1つあること。const はシンボルを持たないため対象外
+-- リンクする全ソースを通した検査: pub の fn名・static名（どちらも .globl のシンボルになる）の重複（リンカより
+-- 分かりやすいメッセージにする）と main がちょうど1つあること。非公開の fn・static はファイルローカルなシンボルで、
+-- const はシンボルを持たないため対象外
 checkLinkUnits :: [Module] -> BuildM ()
 checkLinkUnits mods = do
   _ <- foldM addSymbols Map.empty mods
@@ -215,8 +218,10 @@ checkLinkUnits mods = do
     [_] -> pure ()
     _ -> throwE ("function main is defined in multiple files: " ++ unwords mains)
   where
-    fnNames m = nub [name | FnDecl name _ _ _ <- progFns (modProgram m)]
-    staticNames m = nub [name | GlobalDecl GStatic name _ _ <- progGlobals (modProgram m)]
+    fnNames m = nub [name | FnDecl _ name _ _ _ <- progFns (modProgram m)]
+    -- main は pub の有無によらず常に .globl
+    pubFnNames m = nub [name | FnDecl vis name _ _ _ <- progFns (modProgram m), vis == Public || name == "main"]
+    pubStaticNames m = nub [name | GlobalDecl Public GStatic name _ _ <- progGlobals (modProgram m)]
     addSymbols owners m =
       foldM
         ( \acc (name, isFn) -> case Map.lookup name acc of
@@ -226,7 +231,7 @@ checkLinkUnits mods = do
             Nothing -> pure (Map.insert name (modPath m, isFn) acc)
         )
         owners
-        ([(n, True) | n <- fnNames m] ++ [(n, False) | n <- staticNames m])
+        ([(n, True) | n <- pubFnNames m] ++ [(n, False) | n <- pubStaticNames m])
 
 assemble :: FilePath -> FilePath -> BuildM ()
 assemble asmPath objPath = gcc ["-c", asmPath, "-g", "-o", objPath]

@@ -1,6 +1,6 @@
 import "samp024math.sl";
 
-fn sum(p: &[i64; 5]) -> i64 {
+pub fn sum(p: &[i64; 5]) -> i64 {
     let total = 0;
     let i: usize = 0;
     while i < 5 {
@@ -10,4 +10,4 @@ fn sum(p: &[i64; 5]) -> i64 {
     total
 }
 
-fn sq(x: i64) -> i64 { mul(x, x) }
+pub fn sq(x: i64) -> i64 { mul(x, x) }

@@ -34,13 +34,14 @@ fn main() -> i64 {
 ```
 program     ::= import-decl* item*
 import-decl ::= 'import' STRING ';'
-item        ::= fn-decl | const-decl | static-decl
+item        ::= 'pub'? (fn-decl | const-decl | static-decl)
 fn-decl     ::= 'fn' IDENT '(' (IDENT ':' type (',' IDENT ':' type)*)? ')' ('->' type)? '{' stmt* expr? '}'
 const-decl  ::= 'const' IDENT ':' type '=' expr ';'
 static-decl ::= 'static' IDENT ':' type '=' expr ';'
 ```
 
 - トップレベルには `import`、`fn` 定義、`const`/`static` の定義だけを書ける（文・式は書けない）。`import` は他の定義より前に書く
+- fn・const・static の定義には `pub` を付けられる。`pub` の定義だけを import したソースから使える（→ 8）
 - `fn main()` がプログラムの入口。リンクする全ソースを通してちょうど1つ必要（→ 5.3）
 - fn・const・static の宣言順に意味は無い（後で定義した fn も、相互再帰も呼べる。後で定義した const も参照できる）
 - コメント構文は無い
@@ -49,7 +50,7 @@ static-decl ::= 'static' IDENT ':' type '=' expr ';'
 
 | 種類 | 内容 |
 |---|---|
-| キーワード | `fn` `let` `if` `else` `while` `break` `continue` `return` `true` `false` `as` `import` `const` `static` |
+| キーワード | `fn` `let` `if` `else` `while` `break` `continue` `return` `true` `false` `as` `import` `const` `static` `pub` |
 | 識別子 | 英字で始まり、英数字と `_` が続く |
 | 整数リテラル | 10進のみ。`42`（型なし）、`42i32` `42i64` `42u32` `42u64` `42usize`（型サフィックス付き。空白を挟まない） |
 | 文字列リテラル | `"..."`。import のパス指定にのみ使う。エスケープは無く、改行を含められない |
@@ -224,14 +225,23 @@ fn bump() { COUNT = COUNT + 1; }
 ## 8. 複数ソースファイル
 
 ```
+// lib/util.sl
+const BASE: i64 = 10;
+pub fn add(x: i64) -> i64 { x + BASE }
+
+// main.sl
 import "lib/util.sl";
+fn main() -> i64 { add(1) }     // BASE は非公開なので main.sl からは使えない
 ```
 
-- ソースの先頭に `import "相対パス";` を書くと、そのソースに定義された fn・const・static を使える
+- ソースの先頭に `import "相対パス";` を書くと、そのソースに定義された **`pub` の** fn・const・static を使える
+- `pub` の無い定義は非公開で、定義したソースの中でだけ使える（import したソースから使うと `undeclared function: f` / `undeclared variable: X`）。同じソースの中では公開・非公開を問わず使え、pub の const が非公開の const を参照してもよい
+- 公開範囲が制御するのは名前で参照できる範囲だけで、pub の static・fn を通して得たポインタからは、非公開の static も読み書きできる
 - パスは import を書いたソースのディレクトリからの相対パスで、拡張子は `.sl`
 - 取り込むのは**直接** import したソースの定義だけ（import 先がさらに import しているソースの定義は使えない）。import 先の `main` は取り込まない
-- 自ソースと import 先、または import 先どうしで同名の定義（fn・const・static）があるとエラー。import の循環は許される
+- 自ソースと import 先の pub の定義、または import 先どうしの pub の定義が同名だとエラー（import 先の非公開の定義とは同名でもよい）。import の循環は許される
 - 定数式からは import した const を参照できない（fn の本体からは参照できる）
-- 名前空間は無く、fn 名・static 名がそのままリンク時のシンボル名になる。リンクする全ソースで fn・static が重複するとエラー（const はシンボルを持たないので、import で同時に見えなければ重複してよい）
+- 名前空間は無く、fn 名・static 名がそのままリンク時のシンボル名になる。リンクする全ソースで pub の fn・static が重複するとエラー。非公開の fn・static はファイルローカルなシンボルなので、ほかのソースと重複してよい（const はシンボルを持たないので、import で同時に見えなければ重複してよい）
+- main は `pub` の有無によらずプログラムの入口として公開される（`pub fn main` と書いてもよい）
 
 ビルドの方法は `docs/cli.md` を参照。

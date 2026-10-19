@@ -14,26 +14,27 @@ import Parser (Signedness (..), Type (..), Width (..))
 
 -- 単一ソースで完結するプログラム（mainあり）のアセンブリを組み立てる
 codegen :: [(String, [Instr])] -> Type -> [Instr] -> String
-codegen fns finalType mainInstrs = codegenModule [] fns (Just (finalType, mainInstrs))
+codegen fns finalType mainInstrs = codegenModule [] [] fns (Just (finalType, mainInstrs))
 
--- static の初期値＋main以外の各fn（(名前, 命令列)）＋mainがあれば（戻り値の型, 命令列）から
+-- 公開するシンボルの一覧＋static の初期値＋main以外の各fn（(名前, 命令列)）＋mainがあれば（戻り値の型, 命令列）から
 -- 1ソース分のアセンブリ全体を組み立てる。
--- 各fn・staticは他のオブジェクトファイルから参照できるよう .globl で公開する（mainも同様、mainが無いソースもある）。
+-- 一覧にある（pub の）fn・static だけを、他のオブジェクトファイルから参照できるよう .globl で公開する。
+-- 非公開のものはファイルローカルなシンボルになる。mainはエントリポイントなので常に公開する（mainが無いソースもある）。
 -- .text はファイル全体で一度だけ、各fnラベルはその後に、mainはmain:として
 -- 最後に並べる（GASのラベル解決は出現順に依存しないため順序自体に意味はない）
-codegenModule :: [StaticData] -> [(String, [Instr])] -> Maybe (Type, [Instr]) -> String
-codegenModule statics fns mainPart =
+codegenModule :: [String] -> [StaticData] -> [(String, [Instr])] -> Maybe (Type, [Instr]) -> String
+codegenModule public statics fns mainPart =
   unlines $
     ["    .section .text"]
       ++ concatMap genFn fns
       ++ maybe [] genMain mainPart
       ++ runtimeErrors
-      ++ dataSection statics
+      ++ dataSection public statics
       ++ rodataSection
   where
     genFn (name, instrs) =
-      ("    .globl " ++ name)
-        : (name ++ ":")
+      globl public name
+        ++ (name ++ ":")
         : prologueBody (frameSize instrs)
         ++ genBody instrs
         ++ epilogueRet
@@ -138,16 +139,16 @@ runtimeErrors =
 
 -- static の初期値を .data セクションへ並べる（格納幅ごとに .quad/.long。static が無ければ何も出力しない）。
 -- .data 内のアドレスは PIE でもロード時の再配置（R_X86_64_RELATIVE）で解決される
-dataSection :: [StaticData] -> [String]
-dataSection [] = []
-dataSection statics = "    .section .data" : concatMap genStatic statics
+dataSection :: [String] -> [StaticData] -> [String]
+dataSection _ [] = []
+dataSection public statics = "    .section .data" : concatMap genStatic statics
   where
     genStatic (name, w, vs) =
-      [ "    .globl " ++ name,
-        "    .balign " ++ show (widthBytes w),
-        name ++ ":",
-        "    " ++ directive w ++ " " ++ intercalate ", " (map initValue vs)
-      ]
+      globl public name
+        ++ [ "    .balign " ++ show (widthBytes w),
+             name ++ ":",
+             "    " ++ directive w ++ " " ++ intercalate ", " (map initValue vs)
+           ]
     -- アドレスの定数はシンボル（＋オフセット）として書き、リンカ・ローダに埋めさせる
     initValue (SInt v) = show v
     initValue (SAddr sym 0) = sym
@@ -156,6 +157,10 @@ dataSection statics = "    .section .data" : concatMap genStatic statics
     directive W32 = ".long"
     widthBytes W64 = 8 :: Int
     widthBytes W32 = 4
+
+-- 公開するシンボルなら .globl を出す（.globl の無いラベルはファイルローカルなシンボルになる）
+globl :: [String] -> String -> [String]
+globl public name = ["    .globl " ++ name | name `elem` public]
 
 -- 書式文字列・エラーメッセージ。ラベルは .L 付きのファイルローカルなものにして、
 -- ユーザーの fn・static のシンボルと衝突しないようにする
