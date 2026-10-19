@@ -75,7 +75,7 @@ data Instr   = Push Int | IAdd Width | ... | ICall String Int Int | IPop | LoadG
 
 ### 5.1 二パス構成
 
-1. `buildFnSigs`：全 fn の宣言から `FnSigs` を作る。重複定義・最大 6 引数・`main` の引数なし（`validateFnShapes`）とシグネチャ中の配列型の禁止を検査する。本体は見ないので宣言順に依存しない
+1. `buildFnSigs`：全 fn の宣言から `FnSigs` を作る。重複定義・`main` の引数なし（`validateFnShapes`）と、シグネチャ中の配列型の禁止・`main` の戻り値のスライスの禁止を検査する。本体は見ないので宣言順に依存しない
 2. `buildGlobals`：全 const/static の宣言から `Globals` と static の初期値を作る（→ 5.9）
 3. `compileModule importedSigs importedGlobals prog`：自ソースと import 先の fn シグネチャ（`main` を除く）・グローバルをマージし（fn・const・static は同じ名前空間で、同名はエラー）、各 fn の本体を `compileFnDecl` でコンパイルする。結果の `CompiledModule` は、`.globl` にする pub の fn・static の名前（`cmPublic`）も持つ
 
