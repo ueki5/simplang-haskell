@@ -1,6 +1,6 @@
 module CodeGen (codegen, codegenModule) where
 
-import Compiler (Instr (..), StaticData, StaticInit (..))
+import Compiler (Instr (..), StaticData, StaticInit (..), slotCount)
 import Data.List (intercalate, mapAccumL)
 import Parser (Signedness (..), Type (..), Width (..))
 
@@ -13,16 +13,16 @@ import Parser (Signedness (..), Type (..), Width (..))
 -- import Debug.Trace (trace)
 
 -- 単一ソースで完結するプログラム（mainあり）のアセンブリを組み立てる
-codegen :: [(String, [Instr])] -> Type -> [Instr] -> String
+codegen :: [(String, Type, [Instr])] -> Type -> [Instr] -> String
 codegen fns finalType mainInstrs = codegenModule [] [] fns (Just (finalType, mainInstrs))
 
--- 公開するシンボルの一覧＋static の初期値＋main以外の各fn（(名前, 命令列)）＋mainがあれば（戻り値の型, 命令列）から
+-- 公開するシンボルの一覧＋static の初期値＋main以外の各fn（(名前, 戻り値の型, 命令列)）＋mainがあれば（戻り値の型, 命令列）から
 -- 1ソース分のアセンブリ全体を組み立てる。
 -- 一覧にある（pub の）fn・static だけを、他のオブジェクトファイルから参照できるよう .globl で公開する。
 -- 非公開のものはファイルローカルなシンボルになる。mainはエントリポイントなので常に公開する（mainが無いソースもある）。
 -- .text はファイル全体で一度だけ、各fnラベルはその後に、mainはmain:として
 -- 最後に並べる（GASのラベル解決は出現順に依存しないため順序自体に意味はない）
-codegenModule :: [String] -> [StaticData] -> [(String, [Instr])] -> Maybe (Type, [Instr]) -> String
+codegenModule :: [String] -> [StaticData] -> [(String, Type, [Instr])] -> Maybe (Type, [Instr]) -> String
 codegenModule public statics fns mainPart =
   unlines $
     ["    .section .text"]
@@ -32,12 +32,12 @@ codegenModule public statics fns mainPart =
       ++ dataSection public statics
       ++ rodataSection
   where
-    genFn (name, instrs) =
+    genFn (name, retTy, instrs) =
       globl public name
         ++ (name ++ ":")
         : prologueBody (frameSize instrs)
         ++ genBody instrs
-        ++ epilogueRet
+        ++ epilogueRet retTy
     genMain (finalType, mainInstrs) =
       "    .globl main"
         : "main:"
@@ -66,15 +66,17 @@ prologueBody size =
   ]
     ++ ["    subq  $" ++ show size ++ ", %rsp" | size > 0]
 
--- ユーザー定義関数の末尾: 操作スタックに残る唯一の戻り値を%raxへpopし、leave; retで戻る
+-- ユーザー定義関数の末尾: 操作スタックに残る戻り値を%raxへpopし、leave; retで戻る
 -- （%raxはSysV AMD64の戻り値レジスタ。操作スタックは常に64bit正規化済みスロットのため、
--- 戻り値の論理型（i32/i64/bool）によらずpopq一本で正しい表現がそのまま取り出せる）
-epilogueRet :: [String]
-epilogueRet =
-  [ "    popq  %rax",
-    "    leave",
-    "    ret"
-  ]
+-- 戻り値の論理型（i32/i64/bool）によらずpopq一本で正しい表現がそのまま取り出せる）。
+-- 2スロットの値（スライス）は、最上段の2スロット目を%rdxへ、1スロット目を%raxへ取り出す
+epilogueRet :: Type -> [String]
+epilogueRet retTy =
+  ["    popq  %rdx" | slotCount retTy == 2]
+    ++ [ "    popq  %rax",
+         "    leave",
+         "    ret"
+       ]
 
 -- mainの戻り値の型ごとに printf への引数の渡し方を切り替える（main専用）。
 -- 整数型・ポインタ型はそのまま値を %rsi に渡すが、bool は 0/1 を "true"/"false" 文字列へ分岐させる。
@@ -90,6 +92,8 @@ epilogue TUnit =
   ]
 -- 配列は値として扱えないため、末尾式の型が配列になることはない（compile側でエラーになる）
 epilogue (TArray _ _) = error "epilogue: array type cannot be the type of the final expression"
+-- main の戻り値にスライスは使えない（buildFnSigs でエラーになる）
+epilogue (TSlice _) = error "epilogue: slice type cannot be the return type of main"
 epilogue TBool =
   [ "    popq  %rax",
     "    andq  $-16, %rsp",
@@ -203,7 +207,7 @@ fmtLabel Unsigned W64 = ".LfmtU64"
 genBody :: [Instr] -> [String]
 genBody instrs = concat (snd (mapAccumL genAt 0 instrs))
   where
-    genAt depth (ICall name n) = (depth + 1 - n, genCall depth n name)
+    genAt depth (ICall name n r) = (depth + r - n, genCall depth n r name)
     genAt depth instr = (depth + stackDelta instr, genInstr instr)
 
 -- 各命令の操作スタックへの正味の増減（8バイトスロット単位）
@@ -238,17 +242,21 @@ stackDelta (LoadInd _) = 0
 stackDelta (StoreArg _ _ _) = 0
 stackDelta (IBoundsCheck _) = 0
 stackDelta (StoreInd _) = -2
-stackDelta (ICall _ n) = 1 - n
+stackDelta (ICall _ n r) = r - n
+stackDelta IBoundsCheckDyn = -1
+stackDelta INip = -1
 stackDelta IPop = -1
 stackDelta (LoadGlobal _ _) = 1
 stackDelta (StoreGlobal _ _) = -1
 stackDelta (LoadGlobalAddr _) = 1
 
--- 引数が6個以下なら、呼び出し直前（＝n個の引数をレジスタへpopし終えた時点）の深さ d = depthAtCall - n が奇数のとき、
+-- n は引数のスロット数（スライスは先頭ポインタと長さで2つ）で、スロットごとに引数の位置を割り当てる。
+-- 戻り値（r スロット）は call の後に %rax（2スロットなら続けて %rdx）から積む。
+-- 引数が6スロット以下なら、呼び出し直前（＝n個の引数をレジスタへpopし終えた時点）の深さ d = depthAtCall - n が奇数のとき、
 -- 16バイト境界からrspが8バイトずれるため、call前後に8バイトのパディングを挟んで補正する
 -- （frameSizeを16の倍数に切り上げてあるため、プロローグ直後は常に16バイト境界にあることが前提）
-genCall :: Int -> Int -> String -> [String]
-genCall depthAtCall n name
+genCall :: Int -> Int -> Int -> String -> [String]
+genCall depthAtCall n r name
   | n <= length argRegs = genRegCall
   | otherwise = genStackCall
   where
@@ -258,7 +266,7 @@ genCall depthAtCall n name
         ++ ["    subq  $8, %rsp" | needsPad]
         ++ ["    call  " ++ name]
         ++ ["    addq  $8, %rsp" | needsPad]
-        ++ ["    pushq %rax"]
+        ++ pushRet
       where
         needsPad = odd (depthAtCall - n)
     -- 7個目以降の引数はスタック渡し（call時点で7個目が(%rsp)、8個目が8(%rsp)…）。
@@ -275,12 +283,13 @@ genCall depthAtCall n name
            ]
         ++ ["    call  " ++ name]
         ++ ["    addq  $" ++ show (8 * (n + k + pad)) ++ ", %rsp"]
-        ++ ["    pushq %rax"]
+        ++ pushRet
       where
         -- スタック渡しの引数の個数。m番目の複製は引数 n-1-m で、元の位置 8*m に、
         -- それまでのパディングと複製の分（pad + m スロット）を足した位置にある
         k = n - length argRegs
         pad = if odd (depthAtCall + k) then 1 else 0 :: Int
+    pushRet = "    pushq %rax" : ["    pushq %rdx" | r == 2]
 
 -- SysV AMD64の整数引数レジスタ（レジスタ渡しの分。7個目以降はスタック渡し）
 argRegs :: [String]
@@ -533,6 +542,18 @@ genInstr (IBoundsCheck n) =
     "    cmpq  %rcx, %rax",
     "    jae   .Lindex_error"
   ]
+genInstr IBoundsCheckDyn =
+  [ "    popq  %rax",
+    "    popq  %rcx",
+    "    cmpq  %rcx, %rax",
+    "    jae   .Lindex_error",
+    "    pushq %rax"
+  ]
+genInstr INip =
+  [ "    popq  %rax",
+    "    addq  $8, %rsp",
+    "    pushq %rax"
+  ]
 genInstr (StoreInd W64) =
   [ "    popq  %rax",
     "    popq  %rcx",
@@ -583,7 +604,7 @@ genInstr (LoadGlobalAddr name) =
   [ "    leaq  " ++ name ++ "(%rip), %rax",
     "    pushq %rax"
   ]
-genInstr (ICall _ _) =
+genInstr (ICall _ _ _) =
   error "ICall requires operand-stack-depth context; must be generated via genBody, not genInstr"
 
 -- 符号なし大小比較（setb/setbe/seta/setae は CF/ZF を見る。u32 はゼロ拡張済みなので64bitで比較してよい）

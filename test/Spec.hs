@@ -856,9 +856,9 @@ main = hspec $ do
     it "let宣言（型注釈省略）: 関数呼び出しの戻り値型が推論される" $
       compileSource "fn f() -> i32 {\n1\n}\nfn main() -> i32 {\nlet x = f();\nx\n}"
         `shouldBe` Right
-          ( [("f", [Push 1, Label ".Lfn_end0"])],
+          ( [("f", TyInt Signed W32, [Push 1, Label ".Lfn_end0"])],
             TyInt Signed W32,
-            [ICall "f" 0, Store W32 (-4), Load W32 (-4), Label ".Lfn_end1"]
+            [ICall "f" 0 1, Store W32 (-4), Load W32 (-4), Label ".Lfn_end1"]
           )
     it "let宣言（型注釈省略）: 無型リテラルとboolの算術演算は型不一致エラー（inferMaybeTypeの単一化はi32/i64のみ検出しないが、後続のcompileExprTypedで検出される）" $
       compileSource "fn main() -> bool {\nlet x = 5 + true;\nx\n}"
@@ -1387,16 +1387,16 @@ main = hspec $ do
 
   describe "7個以上の引数（codegen）" $ do
     it "7個目の仮引数は16(%rbp)からスピルする" $
-      codegen [("f", [StoreArg 6 W64 (-56)])] (TyInt Signed W64) [] `shouldContain` "movq  16(%rbp), %rax\n    movq  %rax, -56(%rbp)"
+      codegen [("f", TyInt Signed W64, [StoreArg 6 W64 (-56)])] (TyInt Signed W64) [] `shouldContain` "movq  16(%rbp), %rax\n    movq  %rax, -56(%rbp)"
     it "8個目のi32の仮引数は24(%rbp)から32bitでスピルする" $
-      codegen [("f", [StoreArg 7 W32 (-60)])] (TyInt Signed W64) [] `shouldContain` "movl  24(%rbp), %eax\n    movl  %eax, -60(%rbp)"
+      codegen [("f", TyInt Signed W64, [StoreArg 7 W32 (-60)])] (TyInt Signed W64) [] `shouldContain` "movl  24(%rbp), %eax\n    movl  %eax, -60(%rbp)"
     it "深さが偶数なら、スタック渡しの引数を逆順に複製してパディングなしで呼び出す" $ do
-      let asm = codegen [] (TyInt Signed W64) (map Push [1 .. 8] ++ [ICall "f" 8])
+      let asm = codegen [] (TyInt Signed W64) (map Push [1 .. 8] ++ [ICall "f" 8 1])
       asm `shouldContain` "pushq 0(%rsp)\n    pushq 16(%rsp)\n    movq  72(%rsp), %rdi"
       asm `shouldContain` "movq  32(%rsp), %r9\n    call  f\n    addq  $80, %rsp\n    pushq %rax"
       asm `shouldNotContain` "subq  $8, %rsp"
     it "深さが奇数なら、複製より先にパディングを積む" $ do
-      let asm = codegen [] (TyInt Signed W64) (map Push [0 .. 8] ++ [ICall "f" 8])
+      let asm = codegen [] (TyInt Signed W64) (map Push [0 .. 8] ++ [ICall "f" 8 1])
       asm `shouldContain` "subq  $8, %rsp\n    pushq 8(%rsp)\n    pushq 24(%rsp)\n    movq  80(%rsp), %rdi"
       asm `shouldContain` "call  f\n    addq  $88, %rsp\n    pushq %rax"
 
@@ -1954,7 +1954,7 @@ main = hspec $ do
     it "mainはローカル変数へのポインタを返せる（ダングリング検査の対象外）" $
       finalTypeOf "fn main() -> &i64 {\nlet x = 1;\n&x\n}" `shouldBe` Right (TPtr (TyInt Signed W64))
     it "main以外の関数の命令列にmainは含まれない" $
-      (\(fns, _, _) -> map fst fns) <$> compileSource "fn f() -> i64 { 1 }\nfn main() -> i64 { f() }\nfn g() -> i64 { 2 }"
+      (\(fns, _, _) -> [name | (name, _, _) <- fns]) <$> compileSource "fn f() -> i64 { 1 }\nfn main() -> i64 { f() }\nfn g() -> i64 { 2 }"
         `shouldBe` Right ["f", "g"]
 
   describe "compile + codegen + gcc（明示的なmainの結合テスト）" $ do
@@ -2012,14 +2012,14 @@ main = hspec $ do
     it "import先のmainは取り込まない" $
       compileWith (Map.fromList [("main", ([], TUnit))]) "fn main() {}" `shouldSatisfy` isRight
     it "mainが無くてもコンパイルできる" $
-      (\m -> (map fst (cmFns m), fmap fst (cmMain m))) <$> compileWith Map.empty "fn f() -> i64 { 1 }"
+      (\m -> ([name | (name, _, _) <- cmFns m], fmap fst (cmMain m))) <$> compileWith Map.empty "fn f() -> i64 { 1 }"
         `shouldBe` Right (["f"], Nothing)
 
   describe "codegenModule" $ do
     it "各fnを.globlで公開する" $
-      codegenModule ["add"] [] [("add", [Push 1])] Nothing `shouldContain` ".globl add"
+      codegenModule ["add"] [] [("add", TyInt Signed W64, [Push 1])] Nothing `shouldContain` ".globl add"
     it "mainが無ければmainを出力しない" $
-      codegenModule [] [] [("add", [Push 1])] Nothing `shouldNotContain` "main"
+      codegenModule [] [] [("add", TyInt Signed W64, [Push 1])] Nothing `shouldNotContain` "main"
     it "mainがあれば.globl mainとmain:を出力する" $
       codegenModule [] [] [] (Just (TUnit, [])) `shouldContain` ".globl main\nmain:"
 
@@ -2447,7 +2447,7 @@ main = hspec $ do
 
   describe "pub（codegenModule）" $ do
     it "公開するfnにだけ.globlを付ける" $ do
-      let asm = codegenModule ["add"] [] [("add", [Push 1]), ("helper", [Push 2])] Nothing
+      let asm = codegenModule ["add"] [] [("add", TyInt Signed W64, [Push 1]), ("helper", TyInt Signed W64, [Push 2])] Nothing
       asm `shouldContain` ".globl add\nadd:"
       asm `shouldNotContain` ".globl helper"
       asm `shouldContain` "helper:"
@@ -2526,6 +2526,177 @@ main = hspec $ do
         asm `shouldContain` ".globl add"
         asm `shouldNotContain` ".globl helper"
         asm `shouldNotContain` ".globl CALLS"
+
+  describe "スライス（tokenize/parse）" $ do
+    let parseSource src = tokenize src >>= fmap splitMain . parse
+    it "'.'はTDot" $
+      tokenize "s.len()" `shouldBe` Right [TIdent "s", TDot, TIdent "len", TLParen, TRParen]
+    it "スライス型 &[T]" $
+      parseSource "fn main() -> i64 {\nlet s: &[i64] = &a;\n0\n}"
+        `shouldBe` Right ([], [SLet "s" (TSlice (TyInt Signed W64)) (AddrOf (Var "a"))], Lit 0)
+    it "仮引数・戻り値のスライス型" $
+      parseSource "fn f(s: &[u32]) -> &[u32] { s }\nfn main() {}"
+        `shouldBe` Right ([FnDecl Private "f" [("s", TSlice (TyInt Unsigned W32))] (TSlice (TyInt Unsigned W32)) ([], Var "s")], [], UnitLit)
+    it "配列へのポインタのスライス &[&[T; N]]" $
+      parseSource "fn main() -> i64 {\nlet s: &[&[bool; 2]] = &a;\n0\n}"
+        `shouldBe` Right ([], [SLet "s" (TSlice (TPtr (TArray TBool 2))) (AddrOf (Var "a"))], Lit 0)
+    it "配列へのポインタ型 &[T; N] は従来どおり" $
+      parseSource "fn main() -> i64 {\nlet p: &[i32; 3] = &a;\n0\n}"
+        `shouldBe` Right ([], [SLet "p" (TPtr (TArray (TyInt Signed W32) 3)) (AddrOf (Var "a"))], Lit 0)
+    it "メソッド呼び出し e.len()" $
+      parseSource "fn main() {\na.len()\n}" `shouldBe` Right ([], [], MethodCall (Var "a") "len" [])
+    it "メソッド呼び出しは添字と同じ優先順位（&・*より強い）" $ do
+      parseSource "fn main() {\n&a.len()\n}" `shouldBe` Right ([], [], AddrOf (MethodCall (Var "a") "len" []))
+      parseSource "fn main() {\nf(x)[0].len()\n}" `shouldBe` Right ([], [], MethodCall (Index (Call "f" [Var "x"]) (Lit 0)) "len" [])
+    it "&のない[T]はエラー" $
+      parseSource "fn main() -> i64 {\nlet s: [i64] = a;\n0\n}" `shouldBe` Left "slice type must be used behind a reference: &[T]"
+    it "スライスへのポインタ &&[T] はエラー" $
+      parseSource "fn main() -> i64 {\nlet p: &&[i64] = a;\n0\n}" `shouldBe` Left "pointer to slice is not supported"
+    it "スライスのスライス &[&[T]] はエラー" $
+      parseSource "fn main() -> i64 {\nlet p: &[&[i64]] = a;\n0\n}" `shouldBe` Left "slice of slices is not supported"
+    it "スライスの配列 [&[T]; N] はエラー" $
+      parseSource "fn main() -> i64 {\nlet p: [&[i64]; 2] = a;\n0\n}" `shouldBe` Left "array of slices is not supported"
+    it "配列のスライス &[[T; N]] はエラー" $
+      parseSource "fn main() -> i64 {\nlet p: &[[i64; 2]] = a;\n0\n}" `shouldBe` Left "nested arrays are not supported"
+    it "'.'の後にメソッド呼び出しが無ければエラー" $
+      parseSource "fn main() {\na.len\n}" `shouldBe` Left "expected method call after '.'"
+
+  describe "スライス（compile）" $ do
+    let compileSource src = tokenize src >>= parse >>= compile
+    it "&[T; N] から &[T] への変換は先頭アドレスと長さを積み、2スロットをストアする" $
+      compileSource "fn main() -> usize {\nlet a = [1, 2, 3];\nlet s: &[i64] = &a;\ns.len()\n}"
+        `shouldBe` Right
+          ( [],
+            TUsize,
+            [ Push 1,
+              Store W64 (-24),
+              Push 2,
+              Store W64 (-16),
+              Push 3,
+              Store W64 (-8),
+              LoadAddr (-24),
+              Push 3,
+              Store W64 (-32),
+              Store W64 (-40),
+              Load W64 (-32),
+              Label ".Lfn_end0"
+            ]
+          )
+    it "スライスの仮引数は2つの引数の位置を使い、添字は実行時の長さで検査する" $
+      compileSource "fn f(s: &[i32], i: usize) -> i32 {\ns[i]\n}\nfn main() -> i32 {\nlet a = [1i32, 2i32];\nf(&a, 1)\n}"
+        `shouldBe` Right
+          ( [ ( "f",
+                TyInt Signed W32,
+                [ StoreArg 0 W64 (-16),
+                  StoreArg 1 W64 (-8),
+                  StoreArg 2 W64 (-24),
+                  Load W64 (-16),
+                  Load W64 (-8),
+                  Load W64 (-24),
+                  IBoundsCheckDyn,
+                  Push 4,
+                  IMul W64,
+                  IAdd W64,
+                  LoadInd W32,
+                  Label ".Lfn_end0"
+                ]
+              )
+            ],
+            TyInt Signed W32,
+            [Push 1, Store W32 (-8), Push 2, Store W32 (-4), LoadAddr (-8), Push 2, Push 1, ICall "f" 3 1, Label ".Lfn_end1"]
+          )
+    it "スライスを返す関数は戻り値の型を持ち、呼び出しは2スロットを返す" $ do
+      let result = compileSource "fn id(s: &[bool]) -> &[bool] {\ns\n}\nfn main() -> bool {\nlet a = [true];\nid(&a)[0]\n}"
+      fmap (\(fns, _, _) -> fns) result
+        `shouldBe` Right [("id", TSlice TBool, [StoreArg 0 W64 (-16), StoreArg 1 W64 (-8), Load W64 (-16), Load W64 (-8), Label ".Lfn_end0"])]
+      fmap (\(_, _, is) -> ICall "id" 2 2 `elem` is) result `shouldBe` Right True
+    it "スライスを返す呼び出しの式文は2スロットを捨てる" $
+      fmap (\(_, _, is) -> take 3 (drop 4 is)) (compileSource "fn id(s: &[i64]) -> &[i64] { s }\nfn main() {\nlet a = [1];\nid(&a);\n}")
+        `shouldBe` Right [ICall "id" 2 2, IPop, IPop]
+    it "配列のlen()は要素数、任意の式のスライスのlen()はINipで長さだけを残す" $ do
+      fmap (\(_, _, is) -> drop 4 is) (compileSource "fn main() -> usize {\nlet a = [1, 2];\na.len()\n}")
+        `shouldBe` Right [Push 2, Label ".Lfn_end0"]
+      fmap (\(_, _, is) -> drop 2 is) (compileSource "fn id(s: &[i64]) -> &[i64] { s }\nfn main() -> usize {\nlet a = [1];\nid(&a).len()\n}")
+        `shouldBe` Right [LoadAddr (-8), Push 1, ICall "id" 2 2, INip, Label ".Lfn_end1"]
+
+  describe "スライス（codegen）" $ do
+    it "スライスを返す関数は末尾で%rdxと%raxへ取り出す" $
+      codegen [("f", TSlice (TyInt Signed W64), [Push 1, Push 2])] (TyInt Signed W64) []
+        `shouldContain` "popq  %rdx\n    popq  %rax\n    leave\n    ret"
+    it "2スロットを返す呼び出しは%raxと%rdxを積む" $
+      codegen [] (TyInt Signed W64) [Push 1, Push 2, ICall "f" 2 2, IAdd W64] `shouldContain` "call  f\n    pushq %rax\n    pushq %rdx"
+    it "IBoundsCheckDynは長さと添字を比べ、添字を積み直す" $
+      codegen [] (TyInt Signed W64) [IBoundsCheckDyn]
+        `shouldContain` "popq  %rax\n    popq  %rcx\n    cmpq  %rcx, %rax\n    jae   .Lindex_error\n    pushq %rax"
+    it "INipは2段目を捨てる" $
+      codegen [] (TyInt Signed W64) [INip] `shouldContain` "popq  %rax\n    addq  $8, %rsp\n    pushq %rax"
+
+  describe "スライス（意味論エラー）" $ do
+    let compileSource src = fmap (const ()) (tokenize src >>= parse >>= compile)
+    it "要素型が異なる配列へのポインタは変換できない" $
+      compileSource "fn f(s: &[i64]) -> i64 { s[0] }\nfn main() -> i64 {\nlet a = [1i32];\nf(&a)\n}"
+        `shouldBe` Left "type mismatch: expected &[i64], found &[i32; 1]"
+    it "スライスから配列へのポインタへは変換できない" $
+      compileSource "fn f(p: &[i64; 1]) -> i64 { p[0] }\nfn main() -> i64 {\nlet a = [1];\nlet s: &[i64] = &a;\nf(s)\n}"
+        `shouldBe` Left "type mismatch: expected &[i64; 1], found &[i64]"
+    it "&のない配列はスライスにならない" $
+      compileSource "fn main() -> i64 {\nlet a = [1];\nlet s: &[i64] = a;\n0\n}" `shouldBe` Left "array cannot be used as a value: a"
+    it "スライスどうしは比較できない" $
+      compileSource "fn main() -> bool {\nlet a = [1];\nlet s: &[i64] = &a;\nlet t: &[i64] = &a;\ns == t\n}" `shouldBe` Left "cannot compare slices"
+    it "スライスのアドレスは取れない" $
+      compileSource "fn main() -> i64 {\nlet a = [1];\nlet s: &[i64] = &a;\nlet p = &s;\n0\n}" `shouldBe` Left "pointer to slice is not supported"
+    it "mainはスライスを返せない" $
+      compileSource "fn main() -> &[i64] {\nlet a = [1];\n&a\n}" `shouldBe` Left "invalid return type for main: &[i64]"
+    it "staticにスライスは使えない" $
+      compileSource "static S: &[i64] = &T;\nstatic T: [i64; 1] = [1];\nfn main() -> i64 { 0 }" `shouldBe` Left "invalid type for static: S"
+    it "ローカル配列から作ったスライスを返すとエラー" $
+      compileSource "fn f() -> &[i64] { let a = [1, 2]; &a }\nfn main() -> i64 { 0 }" `shouldBe` Left "cannot return reference to local variable: a"
+    it "スライスの添字はusize" $
+      compileSource "fn f(s: &[i64], i: i32) -> i64 { s[i] }\nfn main() -> i64 { 0 }" `shouldBe` Left "type mismatch: expected usize, found i32"
+    it "len以外のメソッドはエラー" $
+      compileSource "fn main() -> usize {\nlet a = [1];\na.size()\n}" `shouldBe` Left "no method named size for type [i64; 1]"
+    it "lenに引数を渡すとエラー" $
+      compileSource "fn main() -> usize {\nlet a = [1];\na.len(1)\n}" `shouldBe` Left "wrong number of arguments for len: expected 0, found 1"
+    it "配列・スライス以外のlenはエラー" $
+      compileSource "fn main() -> usize {\nlet x = 1;\nx.len()\n}" `shouldBe` Left "no method named len for type i64"
+    it "len()の型はusize" $
+      compileSource "fn main() -> i64 {\nlet a = [1];\na.len()\n}" `shouldBe` Left "type mismatch: expected i64, found usize"
+
+  describe "compile + codegen + gcc（スライスの結合テスト）" $ do
+    it "長さの異なる配列を同じ関数に渡し、スライスを返す（step032の例）" $
+      compileSourceAndRun "fn sum(s: &[i64]) -> i64 {\nlet t = 0;\nlet i = 0usize;\nwhile i < s.len() {\nt = t + s[i];\ni = i + 1;\n}\nt\n}\nfn longer(a: &[i64], b: &[i64]) -> &[i64] {\nif a.len() >= b.len() {\nreturn a;\n}\nb\n}\nfn main() -> i64 {\nlet x = [1, 2, 3];\nlet y = [10, 20, 30, 40, 50];\nlet s = longer(&x, &y);\nsum(&x) + sum(s) + s.len() as i64\n}" `shouldReturn` "161"
+    it "スライス経由で配列の要素を書き換える" $
+      compileSourceAndRun "fn fill(s: &[i32], v: i32) {\nlet i = 0usize;\nwhile i < s.len() {\ns[i] = v;\ni = i + 1;\n}\n}\nfn main() -> i32 {\nlet a = [0i32; 4];\nfill(&a, 7);\na[0] + a[3]\n}"
+        `shouldReturn` "14"
+    it "スライスの範囲外アクセスは実行時エラー" $
+      compileSourceAndRunExit "fn get(s: &[i64], i: usize) -> i64 { s[i] }\nfn main() -> i64 {\nlet a = [1, 2];\nget(&a, 2)\n}"
+        `shouldReturn` (ExitFailure 1, "index out of bounds")
+    it "スライスを返す呼び出しの結果に添字・len()を使う" $
+      compileSourceAndRun "fn pick(a: &[i64], b: &[i64], first: bool) -> &[i64] {\nif first {\nreturn a;\n}\nb\n}\nfn main() -> i64 {\nlet x = [1, 2];\nlet y = [10, 20, 30];\npick(&x, &y, false)[2] + pick(&x, &y, true).len() as i64 * 100\n}"
+        `shouldReturn` "230"
+    it "スライスの引数がレジスタとスタックにまたがっても受け渡せる" $
+      compileSourceAndRun "fn f(a: i64, b: i64, c: i64, d: i64, e: i64, s: &[i32], t: &[i64]) -> i64 { s[1] as i64 + t[2] + s.len() as i64 * 100 + t.len() as i64 * 1000 + a + e }\nfn main() -> i64 {\nlet a = [1i32, 2i32];\nlet b = [5, 6, 7];\nf(1, 2, 3, 4, 5, &a, &b)\n}"
+        `shouldReturn` "3215"
+    it "式文で捨てる・式の途中（奇数深さ）で呼ぶ" $
+      compileSourceAndRun "fn id(s: &[i64]) -> &[i64] { s }\nfn main() -> i64 {\nlet a = [4, 5];\nid(&a);\n1 + id(&a)[1] + id(&a).len() as i64\n}"
+        `shouldReturn` "8"
+    it "配列へのポインタの変数・staticの配列から変換する" $
+      compileSourceAndRun "static T: [u32; 3] = [1, 2, 3];\nfn sum(s: &[u32]) -> u32 {\nlet t = 0u32;\nlet i = 0usize;\nwhile i < s.len() {\nt = t + s[i];\ni = i + 1;\n}\nt\n}\nfn main() -> u32 {\nlet p = &T;\nsum(p) + sum(&T)\n}"
+        `shouldReturn` "12"
+    it "スライスの変数へ代入し直す・配列と配列へのポインタのlen()" $
+      compileSourceAndRun "fn main() -> usize {\nlet a = [1, 2, 3];\nlet b = [4, 5];\nlet s: &[i64] = &a;\nlet n = s.len();\ns = &b;\nlet p = &a;\nn * 1000 + s.len() * 100 + a.len() * 10 + p.len() + (*p).len() - 3\n}"
+        `shouldReturn` "3233"
+    it "スライスを受け取って再帰する" $
+      compileSourceAndRun "fn sumfrom(s: &[i64], i: usize) -> i64 {\nif i >= s.len() {\nreturn 0;\n}\ns[i] + sumfrom(s, i + 1)\n}\nfn main() -> i64 {\nlet a = [1, 2, 3, 4];\nsumfrom(&a, 0)\n}"
+        `shouldReturn` "10"
+    it "importしたソースのpub fnにスライスを渡す"
+      $ withSources
+        [ ("main.sl", "import \"lib.sl\";\nfn main() -> i64 {\nlet a = [3, 4, 5];\ntotal(&a)\n}"),
+          ("lib.sl", "pub fn total(s: &[i64]) -> i64 {\nlet t = 0;\nlet i = 0usize;\nwhile i < s.len() {\nt = t + s[i];\ni = i + 1;\n}\nt\n}")
+        ]
+      $ \dir -> do
+        build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Right ()
+        readProcess (dir </> "prog") [] "" `shouldReturn` "12\n"
 
 -- パース結果を (main以外のfn定義, mainの文の列, mainの末尾式) に分解する（main が無ければテスト失敗）
 splitMain :: Program -> ([FnDecl], [Stmt], Expr)
