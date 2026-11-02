@@ -3,7 +3,7 @@ module Driver (Mode (..), BuildOpts (..), build) where
 import CodeGen (codegen)
 import Compiler (CompiledModule (..), FnSigs, Globals, buildFnSigs, buildGlobals, compile, publicNames)
 import Control.Exception (IOException, finally, try)
-import Control.Monad (foldM, forM, forM_, unless, when)
+import Control.Monad (foldM, forM, forM_, unless, when, (>=>))
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Except (ExceptT, runExceptT, throwE)
 import Data.IORef (IORef, modifyIORef, newIORef, readIORef)
@@ -62,40 +62,37 @@ buildWith opts dir created = do
     unless exists $ throwE ("no such file: " ++ path)
   when (isJust (outDir opts)) $ io (createDirectoryIfMissing True dir)
   let intermediate path ext = dir </> replaceExtension (takeBaseName path) ext
+      -- 入力群の中間ファイル（拡張子 exts）の名前が衝突しないかを、作成を始める前にまとめて検査する
+      checkExts exts paths = checkIntermediates [(p, intermediate p e) | e <- exts, p <- paths]
       -- 中間ファイルは作成前に登録しておき、途中で失敗しても削除の対象にする
-      newIntermediate path = do
+      createIntermediate :: FilePath -> (FilePath -> BuildM ()) -> BuildM FilePath
+      createIntermediate path make = do
         liftIO (modifyIORef created (path :))
+        make path
         pure path
+      -- .sl → 中間の .s（コンパイルに失敗したら .s は作らない）
+      toAsm src = do
+        asm <- compileSource src
+        createIntermediate (intermediate src "s") (io . (`writeFile` asm))
+      -- .s → 中間の .o
+      toObj asmPath = createIntermediate (intermediate asmPath "o") (assemble asmPath)
   case (mode opts, kind, inputs opts) of
     (AsmOnly, Source, [src]) -> compileSource src >>= io . writeFile (output opts)
     (ObjOnly, Source, [src]) -> do
-      let asmPath = intermediate src "s"
-      checkIntermediates [(src, asmPath)]
-      asm <- compileSource src
-      _ <- newIntermediate asmPath
-      io (writeFile asmPath asm)
+      checkExts ["s"] [src]
+      asmPath <- toAsm src
       assemble asmPath (output opts)
     (ObjOnly, Asm, [asmPath]) -> assemble asmPath (output opts)
     (Link, Source, srcs) -> do
       mods <- collectSources srcs
       checkLinkUnits mods
-      let units = [(modPath m, intermediate (modPath m) "s", intermediate (modPath m) "o") | m <- mods]
-      checkIntermediates ([(p, s) | (p, s, _) <- units] ++ [(p, o) | (p, _, o) <- units])
-      objs <- forM units $ \(src, asmPath, objPath) -> do
-        asm <- compileSource src
-        _ <- newIntermediate asmPath
-        io (writeFile asmPath asm)
-        _ <- newIntermediate objPath
-        assemble asmPath objPath
-        pure objPath
+      let paths = map modPath mods
+      checkExts ["s", "o"] paths
+      objs <- mapM (toAsm >=> toObj) paths
       link objs (output opts)
     (Link, Asm, asmPaths) -> do
-      let units = [(p, intermediate p "o") | p <- asmPaths]
-      checkIntermediates units
-      objs <- forM units $ \(asmPath, objPath) -> do
-        _ <- newIntermediate objPath
-        assemble asmPath objPath
-        pure objPath
+      checkExts ["o"] asmPaths
+      objs <- mapM toObj asmPaths
       link objs (output opts)
     (Link, Obj, objs) -> link objs (output opts)
     _ -> throwE "internal error: unsupported combination of mode and inputs"
