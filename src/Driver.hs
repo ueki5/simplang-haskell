@@ -1,7 +1,7 @@
-module Driver (Mode (..), BuildOpts (..), build) where
+module Driver (Mode (..), BuildOpts (..), CodegenInput (..), build) where
 
 import CodeGen (codegen)
-import Compiler (CompiledModule (..), FnSigs, Globals, buildFnSigs, buildGlobals, compile, publicNames)
+import Compiler (CompiledModule (..), FnSigs, Globals, Instr, StaticData, buildFnSigs, buildGlobals, compile, publicNames)
 import Control.Exception (IOException, finally, try)
 import Control.Monad (foldM, forM, forM_, unless, when, (>=>))
 import Control.Monad.IO.Class (liftIO)
@@ -10,14 +10,29 @@ import Data.IORef (IORef, modifyIORef, newIORef, readIORef)
 import Data.List (nub)
 import qualified Data.Map as Map
 import Data.Maybe (isJust)
-import Parser (FnDecl (..), GlobalDecl (..), GlobalKind (..), Program (..), Visibility (..), parse, tokenize)
+import qualified Data.Text.Lazy as TL
+import Parser (FnDecl (..), GlobalDecl (..), GlobalKind (..), Program (..), Type, Visibility (..), parse, tokenize)
 import System.Directory (canonicalizePath, createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, removeFile)
 import System.Exit (ExitCode (..))
 import System.FilePath (normalise, replaceExtension, takeBaseName, takeDirectory, takeExtension, (</>))
 import System.Process (readProcessWithExitCode)
+import Text.Pretty.Simple (pShowNoColor)
 
--- どこまで処理するか（-S: コンパイルまで、-c: アセンブルまで、指定なし: リンクまで）
-data Mode = AsmOnly | ObjOnly | Link deriving (Show, Eq)
+-- どこまで処理するか（-i: codegen の入力まで、-S: コンパイルまで、-c: アセンブルまで、指定なし: リンクまで）
+data Mode = IROnly | AsmOnly | ObjOnly | Link deriving (Show, Eq)
+
+-- codegen の入力。-i と中間ファイル .sli はこれを整形して書き出したもの（レコードにしてフィールド名も出力する）
+data CodegenInput = CodegenInput
+  { -- .globl で公開するシンボル
+    public :: [String],
+    -- static の初期値
+    statics :: [StaticData],
+    -- main以外のfnの (名前, 戻り値の型, 命令列)
+    fns :: [(String, Type, [Instr])],
+    -- mainがあれば (mainの戻り値型, mainの命令列)
+    mainPart :: Maybe (Type, [Instr])
+  }
+  deriving (Show)
 
 data BuildOpts = BuildOpts
   { inputs :: [FilePath],
@@ -70,25 +85,27 @@ buildWith opts dir created = do
         liftIO (modifyIORef created (path :))
         make path
         pure path
-      -- .sl → 中間の .s（コンパイルに失敗したら .s は作らない）
-      toAsm src = do
-        asm <- compileSource src
-        createIntermediate (intermediate src "s") (io . (`writeFile` asm))
+      -- .sl → 中間の .s（コンパイルに失敗したら .s は作らない）。withIR なら codegen の入力を中間の .sli にも書く
+      toAsm withIR src = do
+        ir <- compileIR src
+        when withIR $ () <$ createIntermediate (intermediate src "sli") (io . (`writeFile` showIR ir))
+        createIntermediate (intermediate src "s") (io . (`writeFile` genAsm ir))
       -- .s → 中間の .o
       toObj asmPath = createIntermediate (intermediate asmPath "o") (assemble asmPath)
   case (mode opts, kind, inputs opts) of
-    (AsmOnly, Source, [src]) -> compileSource src >>= io . writeFile (output opts)
+    (IROnly, Source, [src]) -> compileIR src >>= io . writeFile (output opts) . showIR
+    (AsmOnly, Source, [src]) -> compileIR src >>= io . writeFile (output opts) . genAsm
     (ObjOnly, Source, [src]) -> do
       checkExts ["s"] [src]
-      asmPath <- toAsm src
+      asmPath <- toAsm False src
       assemble asmPath (output opts)
     (ObjOnly, Asm, [asmPath]) -> assemble asmPath (output opts)
     (Link, Source, srcs) -> do
       mods <- collectSources srcs
       checkLinkUnits mods
       let paths = map modPath mods
-      checkExts ["s", "o"] paths
-      objs <- mapM (toAsm >=> toObj) paths
+      checkExts ["sli", "s", "o"] paths
+      objs <- mapM (toAsm True >=> toObj) paths
       link objs (output opts)
     (Link, Asm, asmPaths) -> do
       checkExts ["o"] asmPaths
@@ -105,8 +122,10 @@ classifyInputs m paths = do
   kind <- case nub kinds of
     [k] -> Right k
     _ -> Left "input files of different kinds (.sl/.s/.o) cannot be mixed"
-  when (m /= Link && length paths > 1) $ Left "-S/-c accept only one input file"
+  when (m /= Link && length paths > 1) $ Left "-S/-c/-i accept only one input file"
   case (m, kind) of
+    (IROnly, Source) -> Right kind
+    (IROnly, _) -> Left "-i requires a source file (.sl)"
     (AsmOnly, Source) -> Right kind
     (AsmOnly, _) -> Left "-S requires a source file (.sl)"
     (ObjOnly, Obj) -> Left "-c requires a source file (.sl) or an assembly file (.s)"
@@ -131,13 +150,21 @@ checkIntermediates units = do
       Just other | other /= src -> throwE ("intermediate file name conflict: " ++ other ++ " and " ++ src)
       _ -> pure (Map.insert c src seen)
 
--- 1ソースをコンパイルしてアセンブリを返す。直接 import したソースの pub の fn のシグネチャと const/static だけを取り込む
-compileSource :: FilePath -> BuildM String
-compileSource path = do
+-- 1ソースをコンパイルして codegen の入力を返す。直接 import したソースの pub の fn のシグネチャと const/static だけを取り込む
+compileIR :: FilePath -> BuildM CodegenInput
+compileIR path = do
   m <- loadModule path
   (sigs, globals) <- importedSigs m
   cm <- inFile path (compile sigs globals (modProgram m))
-  pure (codegen (cmPublic cm) (cmStatics cm) (cmFns cm) (cmMain cm))
+  pure (CodegenInput (cmPublic cm) (cmStatics cm) (cmFns cm) (cmMain cm))
+
+-- codegen の入力からアセンブリを作る
+genAsm :: CodegenInput -> String
+genAsm ir = codegen (public ir) (statics ir) (fns ir) (mainPart ir)
+
+-- .sli（-i の出力）の中身：codegen の入力を pretty-simple で整形したもの（pPrint と同じ整形で、色のエスケープは付けない）
+showIR :: CodegenInput -> String
+showIR ir = TL.unpack (pShowNoColor ir) ++ "\n"
 
 -- ソースを読み込んでパースする（エラーにはファイル名を前置する）
 loadModule :: FilePath -> BuildM Module
@@ -170,8 +197,8 @@ importedSigs m = do
   perFile <- forM imported $ \im -> do
     sigs <- inFile (modPath im) (buildFnSigs (progFns (modProgram im)))
     (globals, _) <- inFile (modPath im) (buildGlobals (progGlobals (modProgram im)))
-    let public = Map.fromList [(name, ()) | name <- publicNames (modProgram im)]
-    pure (modPath im, Map.delete "main" (Map.intersection sigs public), Map.intersection globals public)
+    let pubNames = Map.fromList [(name, ()) | name <- publicNames (modProgram im)]
+    pure (modPath im, Map.delete "main" (Map.intersection sigs pubNames), Map.intersection globals pubNames)
   -- fn・const・static は同じ名前空間を共有するため、まとめて衝突を検査する
   _ <- foldM addNames Map.empty [(path, [(n, True) | n <- Map.keys sigs] ++ [(n, False) | n <- Map.keys globals]) | (path, sigs, globals) <- perFile]
   pure (Map.unions [sigs | (_, sigs, _) <- perFile], Map.unions [globals | (_, _, globals) <- perFile])

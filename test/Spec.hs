@@ -6,15 +6,17 @@ import Control.Exception (bracket)
 import Control.Monad (when)
 import Data.Either (isLeft, isRight)
 import qualified Data.Map as Map
-import Driver (BuildOpts (BuildOpts), Mode (..), build)
+import qualified Data.Text.Lazy as TL
+import Driver (BuildOpts (BuildOpts), CodegenInput (CodegenInput), Mode (..), build)
 import Parser (Expr (..), FnDecl (..), GlobalDecl (..), GlobalKind (..), Program (..), Signedness (..), Stmt (..), Token (..), Type (..), Visibility (..), Width (..), parse, tokenize)
 import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
-import System.FilePath (takeDirectory, (</>))
+import System.FilePath (takeDirectory, takeExtension, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readProcess, readProcessWithExitCode)
 import Test.Hspec
+import Text.Pretty.Simple (pShowNoColor)
 
 main :: IO ()
 main = hspec $ do
@@ -2110,7 +2112,7 @@ main = hspec $ do
     it "未知の拡張子はエラー" $
       build (BuildOpts ["a.c"] "prog" Link Nothing) `shouldReturn` Left "unknown input file type (expected .sl/.s/.o): a.c"
     it "-S/-cに複数の入力を指定するとエラー" $
-      build (BuildOpts ["a.sl", "b.sl"] "a.s" AsmOnly Nothing) `shouldReturn` Left "-S/-c accept only one input file"
+      build (BuildOpts ["a.sl", "b.sl"] "a.s" AsmOnly Nothing) `shouldReturn` Left "-S/-c/-i accept only one input file"
     it "-Sの入力がソースでないとエラー" $
       build (BuildOpts ["a.s"] "b.s" AsmOnly Nothing) `shouldReturn` Left "-S requires a source file (.sl)"
     it "-cの入力がオブジェクトだとエラー" $
@@ -2119,6 +2121,83 @@ main = hspec $ do
     it "存在しない入力ファイルはエラー" $
       withSystemTempDirectory "hs024" $ \dir ->
         build (BuildOpts [dir </> "none.sl"] (dir </> "prog") Link Nothing) `shouldReturn` Left ("no such file: " ++ dir </> "none.sl")
+
+  describe "codegen の入力の出力（-i と .sli）" $ do
+    it "-iはcodegenの入力をpretty-simpleで整形して-oに書き出す" $
+      withSources [("main.sl", "fn main() -> i64 { 1 + 2 }")] $ \dir -> do
+        build (BuildOpts [dir </> "main.sl"] (dir </> "main.sli") IROnly Nothing) `shouldReturn` Right ()
+        let expected = CodegenInput [] [] [] (Just (TyInt Signed W64, [Push 1, Push 2, IAdd W64, Label ".Lfn_end0"]))
+        readFile (dir </> "main.sli") `shouldReturn` TL.unpack (pShowNoColor expected) ++ "\n"
+    it "-iはフィールド名（public/statics/fns/mainPart）付きで、色のエスケープなしに書き出す" $
+      withSources [("lib.sl", "pub static S: i64 = 7;\npub fn f() -> i64 { 1 }")] $ \dir -> do
+        build (BuildOpts [dir </> "lib.sl"] (dir </> "lib.sli") IROnly Nothing) `shouldReturn` Right ()
+        readFile (dir </> "lib.sli")
+          `shouldReturn` unlines
+            [ "CodegenInput",
+              "    { public =",
+              "        [ \"f\"",
+              "        , \"S\"",
+              "        ]",
+              "    , statics =",
+              "        [",
+              "            ( \"S\"",
+              "            , W64",
+              "            ,",
+              "                [ SInt 7 ]",
+              "            )",
+              "        ]",
+              "    , fns =",
+              "        [",
+              "            ( \"f\"",
+              "            , TyInt Signed W64",
+              "            ,",
+              "                [ Push 1",
+              "                , Label \".Lfn_end0\"",
+              "                ]",
+              "            )",
+              "        ]",
+              "    , mainPart = Nothing",
+              "    }"
+            ]
+    it "-iは直接importしたソースのpubの定義を参照できる（mainは無くてもよい）" $
+      withSources multiSources $ \dir ->
+        build (BuildOpts [dir </> "lib/util.sl"] (dir </> "util.sli") IROnly Nothing) `shouldReturn` Right ()
+    it "-iのコンパイルエラーにはファイル名を前置する" $
+      withSources [("main.sl", "fn main() -> i64 { true }")] $ \dir -> do
+        result <- build (BuildOpts [dir </> "main.sl"] (dir </> "main.sli") IROnly Nothing)
+        result `shouldBe` Left (dir </> "main.sl: type mismatch: expected i64, found bool")
+    it "-iの入力がソースでないとエラー" $ do
+      build (BuildOpts ["a.s"] "a.sli" IROnly Nothing) `shouldReturn` Left "-i requires a source file (.sl)"
+      build (BuildOpts ["a.o"] "a.sli" IROnly Nothing) `shouldReturn` Left "-i requires a source file (.sl)"
+    it "-iに複数の入力を指定するとエラー" $
+      build (BuildOpts ["a.sl", "b.sl"] "a.sli" IROnly Nothing) `shouldReturn` Left "-S/-c/-i accept only one input file"
+    it "一括処理で-dを指定すると各ソースの.sliを残し、内容は-iの出力と一致する" $
+      withSources multiSources $ \dir -> do
+        build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link (Just (dir </> "out"))) `shouldReturn` Right ()
+        files <- listDirectory (dir </> "out")
+        all (`elem` files) ["main.sli", "util.sli", "math.sli"] `shouldBe` True
+        build (BuildOpts [dir </> "lib/util.sl"] (dir </> "util.sli") IROnly Nothing) `shouldReturn` Right ()
+        expected <- readFile (dir </> "util.sli")
+        readFile (dir </> "out" </> "util.sli") `shouldReturn` expected
+        readProcess (dir </> "prog") [] "" `shouldReturn` "10\n"
+    it "一括処理で-dを指定しなければ.sliも削除する" $
+      withSources multiSources $ \dir -> do
+        let tmp = dir </> "tmp"
+        createDirectoryIfMissing True tmp
+        withTmpDir tmp (build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing)) `shouldReturn` Right ()
+        listDirectory tmp `shouldReturn` []
+    it "-cでは.sliを作らない" $
+      withSources multiSources $ \dir -> do
+        build (BuildOpts [dir </> "lib/math.sl"] (dir </> "math.o") ObjOnly (Just (dir </> "out"))) `shouldReturn` Right ()
+        listDirectory (dir </> "out") `shouldReturn` ["math.s"]
+    it "入力がアセンブリの一括処理では.sliを作らない" $
+      withSources multiSources $ \dir -> do
+        build (BuildOpts [dir </> "main.sl"] (dir </> "main.s") AsmOnly Nothing) `shouldReturn` Right ()
+        build (BuildOpts [dir </> "lib/util.sl"] (dir </> "util.s") AsmOnly Nothing) `shouldReturn` Right ()
+        build (BuildOpts [dir </> "lib/math.sl"] (dir </> "math.s") AsmOnly Nothing) `shouldReturn` Right ()
+        build (BuildOpts [dir </> "main.s", dir </> "util.s", dir </> "math.s"] (dir </> "prog") Link (Just (dir </> "out"))) `shouldReturn` Right ()
+        files <- listDirectory (dir </> "out")
+        filter ((== ".sli") . takeExtension) files `shouldBe` []
 
   describe "定数・static（tokenize/parse）" $ do
     let parseProgram src = tokenize src >>= parse

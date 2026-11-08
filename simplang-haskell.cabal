@@ -20,6 +20,7 @@ library
                       pretty-simple,
                       raw-strings-qq,
                       process,
+                      text,
                       directory,
                       filepath,
     hs-source-dirs:   src
@@ -52,6 +53,7 @@ test-suite simplang-haskell-test
         temporary,
         filepath,
         pretty-simple,
+        text,
         QuickCheck,
         checkers
     hs-source-dirs:   test
