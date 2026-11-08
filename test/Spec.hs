@@ -5,14 +5,15 @@ import Compiler (CompiledModule (..), Instr (..), Loc (..), StaticInit (..), com
 import Control.Exception (bracket)
 import Control.Monad (when)
 import Data.Either (isLeft, isRight)
+import Data.List (isPrefixOf)
 import qualified Data.Map as Map
 import qualified Data.Text.Lazy as TL
-import Driver (BuildOpts (BuildOpts), CodegenInput (CodegenInput), Mode (..), build)
+import Driver (BuildOpts (BuildOpts), CodegenInput (CodegenInput), Mode (..), Module (Module), build)
 import Parser (Expr (..), FnDecl (..), GlobalDecl (..), GlobalKind (..), Program (..), Signedness (..), Stmt (..), Token (..), Type (..), Visibility (..), Width (..), parse, tokenize)
-import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, doesFileExist, listDirectory)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
-import System.FilePath (takeDirectory, takeExtension, (</>))
+import System.FilePath (normalise, takeDirectory, takeExtension, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readProcess, readProcessWithExitCode)
 import Test.Hspec
@@ -2112,7 +2113,7 @@ main = hspec $ do
     it "未知の拡張子はエラー" $
       build (BuildOpts ["a.c"] "prog" Link Nothing) `shouldReturn` Left "unknown input file type (expected .sl/.s/.o): a.c"
     it "-S/-cに複数の入力を指定するとエラー" $
-      build (BuildOpts ["a.sl", "b.sl"] "a.s" AsmOnly Nothing) `shouldReturn` Left "-S/-c/-i accept only one input file"
+      build (BuildOpts ["a.sl", "b.sl"] "a.s" AsmOnly Nothing) `shouldReturn` Left "-S/-c/-i/-p accept only one input file"
     it "-Sの入力がソースでないとエラー" $
       build (BuildOpts ["a.s"] "b.s" AsmOnly Nothing) `shouldReturn` Left "-S requires a source file (.sl)"
     it "-cの入力がオブジェクトだとエラー" $
@@ -2170,7 +2171,7 @@ main = hspec $ do
       build (BuildOpts ["a.s"] "a.sli" IROnly Nothing) `shouldReturn` Left "-i requires a source file (.sl)"
       build (BuildOpts ["a.o"] "a.sli" IROnly Nothing) `shouldReturn` Left "-i requires a source file (.sl)"
     it "-iに複数の入力を指定するとエラー" $
-      build (BuildOpts ["a.sl", "b.sl"] "a.sli" IROnly Nothing) `shouldReturn` Left "-S/-c/-i accept only one input file"
+      build (BuildOpts ["a.sl", "b.sl"] "a.sli" IROnly Nothing) `shouldReturn` Left "-S/-c/-i/-p accept only one input file"
     it "一括処理で-dを指定すると各ソースの.sliを残し、内容は-iの出力と一致する" $
       withSources multiSources $ \dir -> do
         build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link (Just (dir </> "out"))) `shouldReturn` Right ()
@@ -2198,6 +2199,66 @@ main = hspec $ do
         build (BuildOpts [dir </> "main.s", dir </> "util.s", dir </> "math.s"] (dir </> "prog") Link (Just (dir </> "out"))) `shouldReturn` Right ()
         files <- listDirectory (dir </> "out")
         filter ((== ".sli") . takeExtension) files `shouldBe` []
+
+  describe "パース結果の出力（-p と .slp）" $ do
+    -- -p の出力の期待値：loadModule と同じく Module を組み、pretty-simple で整形する
+    let expectedSlp path src = do
+          canon <- canonicalizePath path
+          prog <- either fail pure (tokenize src >>= parse)
+          pure (TL.unpack (pShowNoColor (Module (normalise path) canon prog)) ++ "\n")
+    it "-pはloadModuleの結果（Module）をpretty-simpleで整形して-oに書き出す" $ do
+      let src = "fn main() -> i64 { 1 + 2 }"
+      withSources [("main.sl", src)] $ \dir -> do
+        build (BuildOpts [dir </> "main.sl"] (dir </> "main.slp") ParseOnly Nothing) `shouldReturn` Right ()
+        expected <- expectedSlp (dir </> "main.sl") src
+        readFile (dir </> "main.slp") `shouldReturn` expected
+    it "-pはフィールド名（modPath/modCanonical/modProgram）付きで書き出す" $
+      withSources [("main.sl", "fn main() -> i64 { 1 }")] $ \dir -> do
+        build (BuildOpts [dir </> "main.sl"] (dir </> "main.slp") ParseOnly Nothing) `shouldReturn` Right ()
+        out <- readFile (dir </> "main.slp")
+        take 2 (lines out) `shouldBe` ["Module", "    { modPath = " ++ show (normalise (dir </> "main.sl"))]
+        ("    , modCanonical = " `isPrefixOf` (lines out !! 2)) `shouldBe` True
+        ("    , modProgram = Program" `elem` lines out) `shouldBe` True
+    it "-pはパースだけを行う（型エラーやimport先が無くてもよい）" $
+      withSources [("main.sl", "import \"none.sl\";\nfn main() -> i64 { true }")] $ \dir ->
+        build (BuildOpts [dir </> "main.sl"] (dir </> "main.slp") ParseOnly Nothing) `shouldReturn` Right ()
+    it "-pの構文エラーにはファイル名を前置する" $
+      withSources [("main.sl", "fn main() -> i64 { 1 + }")] $ \dir -> do
+        result <- build (BuildOpts [dir </> "main.sl"] (dir </> "main.slp") ParseOnly Nothing)
+        result `shouldSatisfy` either ((dir </> "main.sl: ") `isPrefixOf`) (const False)
+    it "-pの入力がソースでないとエラー" $ do
+      build (BuildOpts ["a.s"] "a.slp" ParseOnly Nothing) `shouldReturn` Left "-p requires a source file (.sl)"
+      build (BuildOpts ["a.o"] "a.slp" ParseOnly Nothing) `shouldReturn` Left "-p requires a source file (.sl)"
+    it "-pに複数の入力を指定するとエラー" $
+      build (BuildOpts ["a.sl", "b.sl"] "a.slp" ParseOnly Nothing) `shouldReturn` Left "-S/-c/-i/-p accept only one input file"
+    it "一括処理で-dを指定すると各ソースの.slpを残し、内容は-pの出力と一致する" $
+      withSources multiSources $ \dir -> do
+        build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link (Just (dir </> "out"))) `shouldReturn` Right ()
+        files <- listDirectory (dir </> "out")
+        all (`elem` files) ["main.slp", "util.slp", "math.slp"] `shouldBe` True
+        build (BuildOpts [dir </> "main.sl"] (dir </> "main.slp") ParseOnly Nothing) `shouldReturn` Right ()
+        expected <- readFile (dir </> "main.slp")
+        readFile (dir </> "out" </> "main.slp") `shouldReturn` expected
+        readProcess (dir </> "prog") [] "" `shouldReturn` "10\n"
+    it "一括処理で-dを指定しなければ.slpも削除する" $
+      withSources multiSources $ \dir -> do
+        let tmp = dir </> "tmp"
+        createDirectoryIfMissing True tmp
+        withTmpDir tmp (build (BuildOpts [dir </> "main.sl"] (dir </> "prog") Link Nothing)) `shouldReturn` Right ()
+        listDirectory tmp `shouldReturn` []
+    it "-i/-cでは.slpを作らない" $
+      withSources multiSources $ \dir -> do
+        build (BuildOpts [dir </> "lib/math.sl"] (dir </> "math.o") ObjOnly (Just (dir </> "out"))) `shouldReturn` Right ()
+        build (BuildOpts [dir </> "lib/math.sl"] (dir </> "math.sli") IROnly (Just (dir </> "out"))) `shouldReturn` Right ()
+        listDirectory (dir </> "out") `shouldReturn` ["math.s"]
+    it "入力がアセンブリの一括処理では.slpを作らない" $
+      withSources multiSources $ \dir -> do
+        build (BuildOpts [dir </> "main.sl"] (dir </> "main.s") AsmOnly Nothing) `shouldReturn` Right ()
+        build (BuildOpts [dir </> "lib/util.sl"] (dir </> "util.s") AsmOnly Nothing) `shouldReturn` Right ()
+        build (BuildOpts [dir </> "lib/math.sl"] (dir </> "math.s") AsmOnly Nothing) `shouldReturn` Right ()
+        build (BuildOpts [dir </> "main.s", dir </> "util.s", dir </> "math.s"] (dir </> "prog") Link (Just (dir </> "out"))) `shouldReturn` Right ()
+        files <- listDirectory (dir </> "out")
+        filter ((== ".slp") . takeExtension) files `shouldBe` []
 
   describe "定数・static（tokenize/parse）" $ do
     let parseProgram src = tokenize src >>= parse
