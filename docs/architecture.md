@@ -172,11 +172,11 @@ main の有無は `compile` では検査しない（main の無いソースも�
 
 `src/Driver.hs` の `build :: BuildOpts -> IO (Either String ())` がビルド全体を担う。
 
-- 入力の種類を拡張子で判定し、`-S`/`-c` との組み合わせを検証する（`classifyInputs`）
+- 入力の種類を拡張子で判定し、`-i`/`-S`/`-c` との組み合わせを検証する（`classifyInputs`）
 - import の解決（`resolveImports`）：import を書いたソースのディレクトリからの相対パス。同一ファイルの判定は `canonicalizePath`
-- 1ソースのコンパイル（`compileSource`）：**直接** import したソースのシグネチャとグローバル（`buildGlobals` で const を評価したもの）のうち、pub の定義（`publicNames`）だけを集めて `compile` に渡す（`importedSigs`。評価はソース全体で行うので、pub の const が非公開の const を参照してもよい。import 先どうしの pub の同名もここで検査する）
+- 1ソースのコンパイル（`compileIR`）：**直接** import したソースのシグネチャとグローバル（`buildGlobals` で const を評価したもの）のうち、pub の定義（`publicNames`）だけを集めて `compile` に渡す（`importedSigs`。評価はソース全体で行うので、pub の const が非公開の const を参照してもよい。import 先どうしの pub の同名もここで検査する）。結果は codegen の入力のレコード `CodegenInput`（`public` 公開シンボル・`statics` static の初期値・`fns` main 以外の fn・`mainPart` main）で、`genAsm` がアセンブリに、`showIR` が `.sli` の中身（pretty-simple の `pShowNoColor` で整形したもの）にする
 - リンクまでの一括処理：入力から import を再帰的にたどって全ソースを集め（`collectSources`、循環可）、pub の fn 名・static 名の重複と main がちょうど1つであることを検査する（`checkLinkUnits`。非公開の名前はファイルローカルなので対象外）
-- 中間ファイル：`OUTDIR/basename.s` / `.o`。名前の衝突を事前に検査し（`checkIntermediates`）、`-d` が無ければ成功・失敗を問わず `finally` で削除する
+- 中間ファイル：`OUTDIR/basename.s` / `.o`、一括処理のソースでは `OUTDIR/basename.sli` も（`toAsm` の引数で作るかを決める。`-c` では作らない）。名前の衝突を事前に検査し（`checkIntermediates`）、`-d` が無ければ成功・失敗を問わず `finally` で削除する
 - gcc：`gcc -c X.s -g -o X.o`（アセンブル）、`gcc OBJS... -o OUTPUT`（リンク）を `readProcessWithExitCode` で呼ぶ
 - エラーは `ExceptT String IO` で伝播させ、ファイル単位の処理のエラーにはファイル名を前置する（`inFile`）
 
@@ -221,6 +221,7 @@ GitHub Actions（`.github/workflows/ci.yml`）が、`main` への push・PR・�
 | `directory` / `filepath` | import の解決、中間ファイル、テンポラリディレクトリ |
 | `containers` | `Env`・`FnSigs`・`Globals` の `Map` |
 | `transformers` | `StateT`（ラベル番号）、`ExceptT`（ドライバのエラー伝播） |
+| `pretty-simple` / `text` | `.sli`（`-i` の出力・一括処理の中間ファイル）の整形（`pShowNoColor`。戻り値は `Text`） |
 | `hspec` / `temporary` | テスト専用 |
 
 ## 11. 開発環境と整形

@@ -12,10 +12,11 @@ optionsParser =
     <*> modeParser
     <*> optional (option str (short 'd' <> metavar "OUTDIR" <> help "Directory for intermediate files (kept after the build; default: system temporary directory, removed after the build)"))
 
--- -S と -c は排他。どちらも無ければリンクまで行う
+-- -i・-S・-c は排他。どれも無ければリンクまで行う
 modeParser :: Parser Mode
 modeParser =
-  flag' AsmOnly (short 'S' <> help "Compile only; output an assembly file (single input)")
+  flag' IROnly (short 'i' <> help "Compile only; output the code generator input (.sli) (single input)")
+    <|> flag' AsmOnly (short 'S' <> help "Compile only; output an assembly file (single input)")
     <|> flag' ObjOnly (short 'c' <> help "Compile and assemble; output an object file (single input)")
     <|> pure Link
 
