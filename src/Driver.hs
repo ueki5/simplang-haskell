@@ -1,4 +1,4 @@
-module Driver (Mode (..), BuildOpts (..), CodegenInput (..), build) where
+module Driver (Mode (..), BuildOpts (..), CodegenInput (..), Module (..), build) where
 
 import CodeGen (codegen)
 import Compiler (CompiledModule (..), FnSigs, Globals, Instr, StaticData, buildFnSigs, buildGlobals, compile, publicNames)
@@ -18,8 +18,8 @@ import System.FilePath (normalise, replaceExtension, takeBaseName, takeDirectory
 import System.Process (readProcessWithExitCode)
 import Text.Pretty.Simple (pShowNoColor)
 
--- どこまで処理するか（-i: codegen の入力まで、-S: コンパイルまで、-c: アセンブルまで、指定なし: リンクまで）
-data Mode = IROnly | AsmOnly | ObjOnly | Link deriving (Show, Eq)
+-- どこまで処理するか（-p: パースまで、-i: codegen の入力まで、-S: コンパイルまで、-c: アセンブルまで、指定なし: リンクまで）
+data Mode = ParseOnly | IROnly | AsmOnly | ObjOnly | Link deriving (Show, Eq)
 
 -- codegen の入力。-i と中間ファイル .sli はこれを整形して書き出したもの（レコードにしてフィールド名も出力する）
 data CodegenInput = CodegenInput
@@ -48,12 +48,13 @@ data InputKind = Source | Asm | Obj deriving (Show, Eq)
 
 type BuildM = ExceptT String IO
 
--- ソースの読み込み結果（表示用のパス, 重複判定用の正規化パス, プログラム）
+-- ソースの読み込み結果（表示用のパス, 重複判定用の正規化パス, プログラム）。-p と中間ファイル .slp はこれを整形して書き出したもの
 data Module = Module
   { modPath :: FilePath,
     modCanonical :: FilePath,
     modProgram :: Program
   }
+  deriving (Show)
 
 -- 入力ファイル群をビルドする。中間ファイルは出力ディレクトリに「basename + 拡張子」で作り、
 -- -d が無ければ（成功・失敗を問わず）終了時に削除する
@@ -88,12 +89,15 @@ buildWith opts dir created = do
       -- .sl → 中間の .s（コンパイルに失敗したら .s は作らない）。withIR なら codegen の入力を中間の .sli にも書く
       toAsm withIR src = do
         ir <- compileIR src
-        when withIR $ () <$ createIntermediate (intermediate src "sli") (io . (`writeFile` showIR ir))
+        when withIR $ () <$ createIntermediate (intermediate src "sli") (io . (`writeFile` showPretty ir))
         createIntermediate (intermediate src "s") (io . (`writeFile` genAsm ir))
       -- .s → 中間の .o
       toObj asmPath = createIntermediate (intermediate asmPath "o") (assemble asmPath)
+      -- 読み込み済みのソースのパース結果を中間の .slp に書く
+      toParsed m = createIntermediate (intermediate (modPath m) "slp") (io . (`writeFile` showPretty m))
   case (mode opts, kind, inputs opts) of
-    (IROnly, Source, [src]) -> compileIR src >>= io . writeFile (output opts) . showIR
+    (ParseOnly, Source, [src]) -> loadModule src >>= io . writeFile (output opts) . showPretty
+    (IROnly, Source, [src]) -> compileIR src >>= io . writeFile (output opts) . showPretty
     (AsmOnly, Source, [src]) -> compileIR src >>= io . writeFile (output opts) . genAsm
     (ObjOnly, Source, [src]) -> do
       checkExts ["s"] [src]
@@ -103,9 +107,8 @@ buildWith opts dir created = do
     (Link, Source, srcs) -> do
       mods <- collectSources srcs
       checkLinkUnits mods
-      let paths = map modPath mods
-      checkExts ["sli", "s", "o"] paths
-      objs <- mapM (toAsm True >=> toObj) paths
+      checkExts ["slp", "sli", "s", "o"] (map modPath mods)
+      objs <- forM mods $ \m -> toParsed m >> (toAsm True >=> toObj) (modPath m)
       link objs (output opts)
     (Link, Asm, asmPaths) -> do
       checkExts ["o"] asmPaths
@@ -114,7 +117,7 @@ buildWith opts dir created = do
     (Link, Obj, objs) -> link objs (output opts)
     _ -> throwE "internal error: unsupported combination of mode and inputs"
 
--- 入力ファイルの種類と、-S/-c との組み合わせを検証する
+-- 入力ファイルの種類と、-p/-i/-S/-c との組み合わせを検証する
 classifyInputs :: Mode -> [FilePath] -> Either String InputKind
 classifyInputs _ [] = Left "no input files"
 classifyInputs m paths = do
@@ -122,8 +125,10 @@ classifyInputs m paths = do
   kind <- case nub kinds of
     [k] -> Right k
     _ -> Left "input files of different kinds (.sl/.s/.o) cannot be mixed"
-  when (m /= Link && length paths > 1) $ Left "-S/-c/-i accept only one input file"
+  when (m /= Link && length paths > 1) $ Left "-S/-c/-i/-p accept only one input file"
   case (m, kind) of
+    (ParseOnly, Source) -> Right kind
+    (ParseOnly, _) -> Left "-p requires a source file (.sl)"
     (IROnly, Source) -> Right kind
     (IROnly, _) -> Left "-i requires a source file (.sl)"
     (AsmOnly, Source) -> Right kind
@@ -162,9 +167,10 @@ compileIR path = do
 genAsm :: CodegenInput -> String
 genAsm ir = codegen (public ir) (statics ir) (fns ir) (mainPart ir)
 
--- .sli（-i の出力）の中身：codegen の入力を pretty-simple で整形したもの（pPrint と同じ整形で、色のエスケープは付けない）
-showIR :: CodegenInput -> String
-showIR ir = TL.unpack (pShowNoColor ir) ++ "\n"
+-- .slp（-p の出力）・.sli（-i の出力）の中身：パース結果・codegen の入力を pretty-simple で整形したもの
+-- （pPrint と同じ整形で、色のエスケープは付けない）
+showPretty :: (Show a) => a -> String
+showPretty x = TL.unpack (pShowNoColor x) ++ "\n"
 
 -- ソースを読み込んでパースする（エラーにはファイル名を前置する）
 loadModule :: FilePath -> BuildM Module
