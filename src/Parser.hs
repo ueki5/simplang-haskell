@@ -1,4 +1,4 @@
-module Parser (Token (..), Expr (..), Stmt (..), Visibility (..), FnDecl (..), GlobalKind (..), GlobalDecl (..), Width (..), Signedness (..), Type (..), Program (..), intRepr, tokenize, parse) where
+module Parser (Token (..), Expr (..), Stmt (..), Visibility (..), FnDecl (..), GlobalKind (..), GlobalDecl (..), Width (..), Signedness (..), Type (..), Program (..), Body, intRepr, tokenize, parse) where
 
 import Data.Char (isAlpha, isAlphaNum, isDigit, isSpace)
 import Data.List (stripPrefix)
@@ -85,6 +85,8 @@ data Expr
     Index Expr Expr
   | -- メソッド呼び出し `e.name(args)`（受け付けるメソッドと型の組み合わせはcompile側で検査する）
     MethodCall Expr String [Expr]
+  | -- ブロック式 `{ stmt* expr? }`（値は末尾式。末尾式の省略は UnitLit へ脱糖する）
+    Block Body
   deriving (Show, Eq)
 
 data Stmt
@@ -94,11 +96,12 @@ data Stmt
   | SAssign String Expr
   | -- 場所式（配列要素・デリファレンス）への代入 `a[i] = expr;` / `p[i] = expr;` / `*p = expr;`
     SAssignPlace Expr Expr
-  | SBlock [Stmt]
-  | -- if/else-if*/else?（値を返さない文。分岐は [(条件式, 本体)] の列＋任意のelse本体）
-    SIf [(Expr, [Stmt])] (Maybe [Stmt])
-  | -- while 条件式 {...}（条件が真である間、本体を繰り返す）
-    SWhile Expr [Stmt]
+  | -- 文の位置のブロック（直後が '}' でないもの。末尾式の値は () でなければならない）
+    SBlock Body
+  | -- if/else-if*/else?（値を返さない文。分岐は [(条件式, 本体)] の列＋任意のelse本体。本体の末尾式は () でなければならない）
+    SIf [(Expr, Body)] (Maybe Body)
+  | -- while 条件式 {...}（条件が真である間、本体を繰り返す。本体の末尾式は () でなければならない）
+    SWhile Expr Body
   | -- 直近の外側ループを抜ける
     SBreak
   | -- 直近の外側ループの条件再評価へ進む
@@ -242,16 +245,16 @@ matchIntSuffix s
 -- item       ::= 'pub'? (fn-decl | const-decl | static-decl)（pub の無い定義は非公開）
 -- const-decl ::= 'const' IDENT ':' type '=' expr ';'
 -- static-decl ::= 'static' IDENT ':' type '=' expr ';'
--- fn-decl    ::= 'fn' IDENT '(' (IDENT ':' type (',' IDENT ':' type)*)? ')' ('->' type)? '{' stmt* expr? '}'
---              （末尾式を省略した場合は () とする）
+-- fn-decl    ::= 'fn' IDENT '(' (IDENT ':' type (',' IDENT ':' type)*)? ')' ('->' type)? block
+-- block      ::= '{' stmt* expr? '}'（末尾式を省略した場合は () とする）
 -- stmt       ::= let-stmt | assign-stmt | place-assign-stmt | expr-stmt | block-stmt | if-stmt | while-stmt | break-stmt | continue-stmt | return-stmt
 -- let-stmt    ::= 'let' IDENT ':' type '=' expr ';' | 'let' IDENT '=' expr ';'
 -- assign-stmt ::= IDENT '=' expr ';'
 -- place-assign-stmt ::= expr '=' expr ';'（左辺は場所式。a[i] / p[i] / (*p)[i] / *p など）
 -- expr-stmt  ::= expr ';'
--- block-stmt ::= '{' stmt* '}'
--- if-stmt    ::= 'if' expr '{' stmt* '}' ('else' 'if' expr '{' stmt* '}')* ('else' '{' stmt* '}')?
--- while-stmt    ::= 'while' expr '{' stmt* '}'
+-- block-stmt ::= block（直後が '}' でない位置。直後が '}' なら外側のブロックの末尾式になる）
+-- if-stmt    ::= 'if' expr block ('else' 'if' expr block)* ('else' block)?
+-- while-stmt    ::= 'while' expr block
 -- break-stmt    ::= 'break' ';'
 -- continue-stmt ::= 'continue' ';'
 -- return-stmt   ::= 'return' expr? ';'（値を省略した場合は () とする）
@@ -266,7 +269,7 @@ matchIntSuffix s
 -- factor     ::= '-' factor | '!' factor | '&' factor | '*' factor | postfix
 -- postfix    ::= primary ('[' expr ']')*
 -- primary    ::= INT | INT ('i64' | 'i32' | 'u64' | 'u32' | 'usize') | 'true' | 'false' | '(' ')' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
---              | '(' expr ')' | '[' expr (',' expr)* ']' | '[' expr ';' INT ']'
+--              | '(' expr ')' | '[' expr (',' expr)* ']' | '[' expr ';' INT ']' | block
 --              ※ INT ('i64'|'i32'|'u64'|'u32'|'usize') は字句解析側で空白を挟まず1トークン（TIntSuffixed）に融合される
 
 type ParseResult a = Either String (a, [Token])
@@ -337,13 +340,20 @@ parseFnDecl vis tokens = do
     (TArrow : rest2) -> parseTypeAnnotation rest2
     _ -> Right (TUnit, rest'')
   rest5 <- expectToken TLBrace rest3
-  (stmts, rest6) <- parseStmts rest5
-  -- 末尾式の省略（直後が '}'）は () とする
-  (tailExpr, rest7) <- case rest6 of
-    (TRBrace : _) -> Right (UnitLit, rest6)
-    _ -> parseExpr rest6
-  case rest7 of
-    (TRBrace : rest8) -> Right (FnDecl vis name params retTy (stmts, tailExpr), rest8)
+  (body, rest6) <- parseBlockBody rest5
+  Right (FnDecl vis name params retTy body, rest6)
+
+-- block ::= '{' stmt* expr? '}'（'{' は呼び出し側で消費済み、終端の '}' はここで消費する）。
+-- fn本体・ブロック式・ブロック文・if/whileの本体で共用する。末尾式の省略（直後が '}'）は () とする
+parseBlockBody :: [Token] -> ParseResult Body
+parseBlockBody tokens = do
+  (stmts, rest) <- parseStmts tokens
+  (tailExpr, rest') <- case rest of
+    (TRBrace : _) -> Right (UnitLit, rest)
+    [] -> Left "expected closing brace"
+    _ -> parseExpr rest
+  case rest' of
+    (TRBrace : rest'') -> Right ((stmts, tailExpr), rest'')
     _ -> Left "expected closing brace"
 
 -- 仮引数リスト: (IDENT ':' type (',' IDENT ':' type)*)?（'(' は呼び出し側で消費済み、終端の ')' はここで消費する）
@@ -381,10 +391,14 @@ parseStmts (TIdent name : TAssign : rest) = do
   (stmt, rest') <- parseAssignStmt name rest
   (stmts, rest'') <- parseStmts rest'
   Right (stmt : stmts, rest'')
-parseStmts (TLBrace : rest) = do
-  (stmt, rest') <- parseBlockStmt rest
-  (stmts, rest'') <- parseStmts rest'
-  Right (stmt : stmts, rest'')
+-- ブロックの直後が '}' なら、外側のブロックの末尾式として読み直すため、文は無いものとして元のトークン列のまま戻る
+parseStmts tokens@(TLBrace : rest) = do
+  (body, rest') <- parseBlockBody rest
+  case rest' of
+    (TRBrace : _) -> Right ([], tokens)
+    _ -> do
+      (stmts, rest'') <- parseStmts rest'
+      Right (SBlock body : stmts, rest'')
 parseStmts (TIf : rest) = do
   (stmt, rest') <- parseIfStmt rest
   (stmts, rest'') <- parseStmts rest'
@@ -513,53 +527,39 @@ parsePlaceAssignStmt lhs tokens = do
   rest' <- expectToken TSemicolon rest
   Right (SAssignPlace lhs expr, rest')
 
--- block-stmt ::= '{' stmt* '}'（'{' は呼び出し側で消費済み）
-parseBlockStmt :: [Token] -> ParseResult Stmt
-parseBlockStmt tokens = do
-  (stmts, rest) <- parseStmts tokens
-  case rest of
-    (TRBrace : rest') -> Right (SBlock stmts, rest')
-    _ -> Left "expected closing brace"
-
--- if-stmt ::= 'if' expr '{' stmt* '}' ('else' 'if' expr '{' stmt* '}')* ('else' '{' stmt* '}')?（先頭の'if'は呼び出し側で消費済み）
+-- if-stmt ::= 'if' expr block ('else' 'if' expr block)* ('else' block)?（先頭の'if'は呼び出し側で消費済み）
 parseIfStmt :: [Token] -> ParseResult Stmt
 parseIfStmt tokens = do
   (branch, rest) <- parseIfBranch tokens
   parseIfRest [branch] rest
 
--- 条件式 + '{' stmt* '}' の1分岐分（'if'/'else if' 共通）
-parseIfBranch :: [Token] -> ParseResult (Expr, [Stmt])
+-- 条件式 + block の1分岐分（'if'/'else if' 共通）
+parseIfBranch :: [Token] -> ParseResult (Expr, Body)
 parseIfBranch tokens = do
   (cond, rest) <- parseExpr tokens
   rest' <- expectToken TLBrace rest
-  (body, rest'') <- parseStmts rest'
-  case rest'' of
-    (TRBrace : rest3) -> Right ((cond, body), rest3)
-    _ -> Left "expected closing brace"
+  (body, rest'') <- parseBlockBody rest'
+  Right ((cond, body), rest'')
 
 -- 'else if' の継続、末尾の 'else'、あるいはどちらも無ければ確定した分岐列でSIfを組み立てる
-parseIfRest :: [(Expr, [Stmt])] -> [Token] -> ParseResult Stmt
+parseIfRest :: [(Expr, Body)] -> [Token] -> ParseResult Stmt
 parseIfRest acc (TElse : TIf : rest) = do
   (branch, rest') <- parseIfBranch rest
   parseIfRest (acc ++ [branch]) rest'
 parseIfRest acc (TElse : TLBrace : rest) = do
-  (elseBody, rest') <- parseStmts rest
-  case rest' of
-    (TRBrace : rest'') -> Right (SIf acc (Just elseBody), rest'')
-    _ -> Left "expected closing brace"
+  (elseBody, rest') <- parseBlockBody rest
+  Right (SIf acc (Just elseBody), rest')
 parseIfRest _ (TElse : t : _) = Left ("expected 'if' or '{' after 'else', got: " ++ show t)
 parseIfRest _ [TElse] = Left "expected 'if' or '{' after 'else', got end of input"
 parseIfRest acc rest = Right (SIf acc Nothing, rest)
 
--- while-stmt ::= 'while' expr '{' stmt* '}'（先頭の'while'は呼び出し側で消費済み）
+-- while-stmt ::= 'while' expr block（先頭の'while'は呼び出し側で消費済み）
 parseWhileStmt :: [Token] -> ParseResult Stmt
 parseWhileStmt tokens = do
   (cond, rest) <- parseExpr tokens
   rest' <- expectToken TLBrace rest
-  (body, rest'') <- parseStmts rest'
-  case rest'' of
-    (TRBrace : rest3) -> Right (SWhile cond body, rest3)
-    _ -> Left "expected closing brace"
+  (body, rest'') <- parseBlockBody rest'
+  Right (SWhile cond body, rest'')
 
 -- break-stmt ::= 'break' ';'（先頭の'break'は呼び出し側で消費済み）
 parseBreakStmt :: [Token] -> ParseResult Stmt
@@ -729,7 +729,7 @@ parsePostfixRest _ (TDot : _) = Left "expected method call after '.'"
 parsePostfixRest expr rest = Right (expr, rest)
 
 -- primary ::= INT | INT ('i64' | 'i32' | 'u64' | 'u32' | 'usize') | 'true' | 'false' | '(' ')' | IDENT | IDENT '(' (expr (',' expr)*)? ')'
---           | '(' expr ')' | '[' expr (',' expr)* ']' | '[' expr ';' INT ']'
+--           | '(' expr ')' | '[' expr (',' expr)* ']' | '[' expr ';' INT ']' | block
 parsePrimary :: [Token] -> ParseResult Expr
 parsePrimary (TInt n : rest) = Right (Lit n, rest)
 parsePrimary (TIntSuffixed n ty : rest) = Right (LitTyped n ty, rest)
@@ -745,6 +745,9 @@ parsePrimary (TLParen : rest) = do
   case rest' of
     (TRParen : rest'') -> Right (expr, rest'')
     _ -> Left "expected closing parenthesis"
+parsePrimary (TLBrace : rest) = do
+  (body, rest') <- parseBlockBody rest
+  Right (Block body, rest')
 parsePrimary (TLBracket : TRBracket : _) = Left "empty array literal is not supported"
 parsePrimary (TLBracket : rest) = do
   (first, rest') <- parseExpr rest

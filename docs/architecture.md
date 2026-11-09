@@ -36,7 +36,8 @@
 -- AST（src/Parser.hs）
 data Program    = Program { progImports :: [FilePath], progGlobals :: [GlobalDecl], progFns :: [FnDecl] }
 data FnDecl     = FnDecl Visibility String [(String, Type)] Type Body   -- 公開範囲, 名前, 仮引数, 戻り値型, 本体
-type Body       = ([Stmt], Expr)                                        -- 文の列 + 末尾式
+type Body       = ([Stmt], Expr)                                        -- 文の列 + 末尾式（fn 本体・ブロック・if/while の本体）
+-- Expr の Block Body はブロック式、Stmt の SBlock Body は文の位置のブロック。SIf [(Expr, Body)] (Maybe Body)、SWhile Expr Body
 data GlobalDecl = GlobalDecl Visibility GlobalKind String Type Expr     -- 公開範囲, const/static, 名前, 型, 初期値
 data GlobalKind = GConst | GStatic
 data Visibility = Private | Public                                      -- pub の有無
@@ -53,12 +54,13 @@ data Type = TyInt Signedness Width          -- i32 / i64 / u32 / u64
 -- コンパイラ（src/Compiler.hs）
 data Loc     = LLocal Int | LStatic String | LConst Int   -- %rbp 相対オフセット / static のシンボル名 / const の値
 type Env     = [Map String (Loc, Type)]     -- 変数名 → (場所, 型)。スコープのスタック（先頭が最内側、末尾がグローバル）
+data Ctx     = Ctx { ctxSigs :: FnSigs, ctxEnv :: Env, ctxCursor :: Int, ctxLoop :: LoopCtx, ctxReturn :: ReturnCtx }  -- 文・式のコンパイルの文脈
 type FnSigs  = Map String ([Type], Type)    -- fn 名 → (仮引数の型, 戻り値型)
 type Globals = Map String (Loc, Type)       -- const/static 名 → (LConst 値 / LStatic 名, 型)
 data StaticInit = SInt Int | SAddr String Int   -- static の初期値の要素：整数 / アドレスの定数（シンボル名, バイトオフセット）
 type StaticData = (String, Width, [StaticInit])  -- static の初期値（シンボル名, 要素の格納幅, 値の列）
 data CompiledModule = CompiledModule { cmStatics :: [StaticData], cmFns :: [(String, Type, [Instr])], cmMain :: Maybe (Type, [Instr]) }  -- fn は (名前, 戻り値の型, 命令列)
-data Instr   = Push Int | IAdd Width | ... | ICall String Int Int | IPop | LoadGlobal Width String | ...   -- スタックマシンの中間命令（ICall は 名前・引数のスロット数・戻り値のスロット数）
+data Instr   = Push Int | IAdd Width | ... | Jmp String | JmpDrop String | ICall String Int Int | IPop | LoadGlobal Width String | ...   -- スタックマシンの中間命令（ICall は 名前・引数のスロット数・戻り値のスロット数。JmpDrop は操作スタックを飛び先の深さまで捨ててから飛ぶ）
 ```
 
 ## 4. パーサ
@@ -66,8 +68,9 @@ data Instr   = Push Int | IAdd Width | ... | ICall String Int Int | IPop | LoadG
 - 左再帰を除去した反復ループで左結合を実現する：`parseExpr` → `parseEquality` → `parseComparison` → `parseAdditive` → `parseMultiplicative` → `parseCast` → `parseFactor`（前置の単項演算子）→ `parsePostfixRest`（添字・メソッド呼び出し `e.name(args)`）→ `parsePrimary`
 - `parseCast` は `as` の後の型が整数型でなければパース時にエラーにする
 - 型（`parseTypeAnnotation`）：`&` の直後が `[` なら要素型を読み、`]` が続けばスライス `TSlice`、`;` が続けば配列へのポインタ。`&` のない `[T]`、`&&[T]`、スライス・配列の要素にスライスを置く形はパース時にエラーにする
-- 文の判別（`parseStmts`）：キーワード、または `IDENT =`（先読み2トークン）で判別する。どれでもなければ式を試し読みし、次が `=` なら場所式への代入 `SAssignPlace`、`;` なら式文 `SExpr`、それ以外なら文の列の終わり（末尾式）として読み直す
-- 脱糖：fn 本体の末尾式の省略と `return;` は `UnitLit` に、`->` の省略は戻り値型 `TUnit` にする。AST 上は末尾式・return の値が常に存在する
+- ブロック（`parseBlockBody`）：`{` の直後から `stmt* expr? }` を読んで `Body` を返す。fn 本体・ブロック式（`parsePrimary` の `{`）・文の位置のブロック・if の各分岐と else・while の本体で共用する
+- 文の判別（`parseStmts`）：キーワード、または `IDENT =`（先読み2トークン）で判別する。`{` ならブロックを読み、直後が `}` なら文は無いものとして元のトークン列で戻り（外側の `parseBlockBody` が末尾式の `Block` として読み直す）、それ以外は `SBlock`。どれでもなければ式を試し読みし、次が `=` なら場所式への代入 `SAssignPlace`、`;` なら式文 `SExpr`、それ以外なら文の列の終わり（末尾式）として読み直す
+- 脱糖：ブロック（fn 本体を含む）の末尾式の省略と `return;` は `UnitLit` に、`->` の省略は戻り値型 `TUnit` にする。AST 上は末尾式・return の値が常に存在する
 - 型サフィックス付き整数リテラル（`9999i64`）は字句解析で1トークン `TIntSuffixed` にまとめる。サフィックスの直後が識別子の構成文字なら（`10i64x`）サフィックスとみなさない
 - トップレベル（`parseItems`）は `fn` / `const` / `static` を混在して読み、`progGlobals` と `progFns` に振り分ける。先頭の `pub` は `Public`、無ければ `Private` として各定義に持たせる
 
@@ -83,7 +86,7 @@ main の有無は `compile` では検査しない（main の無いソースも�
 
 ### 5.2 期待型の一様伝播
 
-- 型検査とコード生成は `compileExprTyped fnSigs env expected expr` が同時に行う。期待型 `expected` を式木の子へそのまま伝播させ、`Var` の実際の型と食い違えば `type mismatch` エラーにする
+- 型検査とコード生成は `compileExprTyped ctx expected expr`（`CompileM` の中で動く）が同時に行う。ブロック式が文を含むため、式のコンパイルも文と同じ文脈 `Ctx`（`FnSigs`・`Env`・cursor・`LoopCtx`・`ReturnCtx`）とラベル番号を必要とする。期待型 `expected` を式木の子へそのまま伝播させ、`Var` の実際の型と食い違えば `type mismatch` エラーにする
 - これにより、同一式内での整数型（符号・幅）の混在は必ず検出される。式ノードへの型タグ付けやボトムアップの型推論は持たない
 - 型が確定しているリーフは `Var`、型サフィックス付きリテラル `LitTyped`、`BoolLit`、`UnitLit`、`Call`（戻り値型）。型なしリテラル `Lit` は整数型の `expected` ならそのまま受け入れる
 - 期待型が伝播しない箇所は、`inferMaybeType`（確定した型を持つリーフから単一化して型を求める。整数リテラルだけなら `Nothing`）で被演算子の型を決める：
@@ -91,14 +94,17 @@ main の有無は `compile` では検査しない（main の無いソースも�
   - キャスト `Cast e ty` の被演算子（結果型 `ty` は `expected` と厳密一致を要求）
   - 型注釈を省略した `let`（`SLetInferred`）と式文 `SExpr`（`inferType` = 未確定なら i64）
   - 配列の基底（`arrayBase`）、`*e` の場所式（`addressOf`）
+- `inferMaybeType` は `FnSigs -> Env` の純粋な関数のまま。ブロック `Block (stmts, t)` の型は、ブロック内の宣言だけをたどった Env（`blockEnv`。場所はダミーの `LLocal 0`）で `t` を推論して求める。`&e` の型は、命令列を作らない `placeType` で求める
 - `if` / `while` の条件は `TBool` を期待型としてコンパイルする
 
 ### 5.3 変数とスコープ
 
-- `Env` はスコープのスタック。fn 本体は `[仮引数のスコープ, グローバルのスコープ]` から始まり、文を左から右へ単一パスで処理しながら `(Env, cursor)` を引き回す（`compileStmtsFrom`）
+- `Env` はスコープのスタック。fn 本体は `[仮引数のスコープ, グローバルのスコープ]` から始まり、文を左から右へ単一パスで処理しながら `(Env, cursor)` を引き回す（`compileStmtsFrom`）。文・式には `Ctx` に詰めて渡す
 - 名前の解決は `lookupVar` 1つで行い、見つかった場所（`Loc`）で命令を選ぶ：ローカルは `Load`/`Store`/`LoadAddr`、static は `LoadGlobal`/`StoreGlobal`/`LoadGlobalAddr`、const は `Push 値`（代入・`&` はエラー）
 - `cursor` はスタック上の次の空き位置（%rbp 相対、負の方向へ伸びる）。変数は型の実サイズ（`stackBytes`。i32=4, i64=8, 配列は要素数×要素サイズ）で詰めて配置し、オフセットは `cursor - stackBytes ty`
 - `{}`・if の各分岐・while の本体は空のスコープを push して再帰コンパイルし、戻ったら呼び出し前の `Env`/`cursor` で続ける。これでスコープアウトとスタック領域の巻き戻しが同時に実現され、時間的に重ならない兄弟ブロックは同じ領域を再利用する
+- ブロック式（`compileBlock`）は、文の列の後の `Env`/cursor で末尾式を期待型でコンパイルする。値を使わないブロック（文の位置のブロック・if/while の本体。`compileUnitBlock`）は末尾式を期待型 `()` でコンパイルして `IPop` する（末尾式が `UnitLit` なら命令を出さない）
+- `let` の初期化式は、宣言する変数の領域の下端（`off`）を cursor にしてコンパイルする。初期化式の中のブロックの変数は宣言中の変数より下に置かれ、配列の要素ごとのストアの途中でストア済みの要素を壊さない
 - 同一スコープでの再宣言は `declaredLocally` でエラーにし、外側との同名（シャドーイング）は許可する。ただし let・仮引数で const/static と同名の変数は宣言できない（`checkNotGlobal`）
 
 ### 5.4 制御構文とラベル
@@ -106,13 +112,14 @@ main の有無は `compile` では検査しない（main の無いソースも�
 - `CompileM = StateT Int (Either String)` の状態がラベル番号のカウンタで、`freshLabel` が `.Lif_end3` のような一意なラベルを払い出す。`Env`/`cursor` と違って巻き戻してはいけない値なので、引数ではなく State で持ち回る
 - `LoopCtx`（直近のループの continue/break ラベル）と `ReturnCtx`（fn 名・戻り値型・fn 末尾ラベル）は普通の引数として渡す。`while` に入るときだけ `LoopCtx` を差し替える
 - `return` と末尾式はどちらも fn 末尾ラベルへ合流する
+- break/continue は `JmpDrop`、return と if/while の内部のジャンプは `Jmp` を出す。式の途中のブロックから抜けると操作スタックに値が残っているため、break/continue はそれを飛び先の深さまで捨てる（→ 6 アライメント）。return は値を積んだまま飛び、その下に残った値はエピローグの `leave` が捨てる
 
 ### 5.5 場所式とポインタ
 
 - 場所式（`&` の対象・代入の左辺）は `addressOf` が一本化して扱う。認めるのは `Var`、`Deref`、`Index` の3種類で、それ以外は `not an lvalue` エラー
 - `&x` は `LoadAddr off`（static なら `LoadGlobalAddr name`）、`&*p` は `p` の値そのもの、`&a[i]` は要素アドレス
 - 読み出しは `LoadInd`、場所式への書き込みは `StoreInd`
-- `checkNoLocalRef`：fn の return 式・末尾式が直接 `&ローカル変数` / `&ローカル配列[i]` ならエラー（`&static` は可）。main は対象外
+- `checkNoLocalRef`：fn の return 式・末尾式が直接 `&ローカル変数` / `&ローカル配列[i]` ならエラー（`&static` は可。ブロックは末尾式をたどり、ブロック内の変数も `blockEnv` でローカルとして見る）。main は対象外
 - `checkNoLocalStore`：static への代入（`SAssign`、`SAssignPlace (Index (Var static) _)`）で、右辺が直接ローカルを指すならエラー。main も対象
 - どちらも、式が直接ローカルを指すかの判定は `isLocalRef` で共用する。中間変数を経由する形は検出しない
 
@@ -162,7 +169,8 @@ main の有無は `compile` では検査しない（main の無いソースも�
 - **スタックフレーム**：命令列中の `Load`/`Store`/`StoreArg`/`LoadAddr` のオフセットの最大絶対値を 16 バイトに切り上げてフレームサイズとし（`frameSize`）、プロローグで一度だけ `subq`。エピローグは `leave`
 - **関数呼び出し**：SysV AMD64 ABI。1〜6個目の引数はレジスタ（`%rdi` `%rsi` `%rdx` `%rcx` `%r8` `%r9`、`argRegs`）で渡し、7個目以降はスタックで渡す（call の時点で7個目が `(%rsp)`、8個目が `8(%rsp)`…。引数の個数に上限はない）。呼ばれた側はプロローグ直後に `StoreArg` でローカルのスロットへ退避する（7個目以降は `16(%rbp)` から8バイト間隔の位置からコピーする。`stackArgOffset`）。引数の位置はスロット単位で割り当てる（スライスは先頭ポインタと長さで2つ）。戻り値は `%rax`、2スロットの値（スライス）は `%rax`（先頭ポインタ）と `%rdx`（長さ）。`epilogueRet` が fn の戻り値の型を受け取って取り出し、`genCall` は call の後に戻り値のスロット数だけ積む
 - **スタック渡しの並べ替え**：実引数は左から右へ評価して積むため、操作スタック上の並びは ABI と逆になる。7個以上の呼び出しでは `genCall` が、最後の引数から順に `pushq off(%rsp)` で7個目以降を複製して並べ直し、レジスタ渡しの分は元の位置から `movq` で読む。call 後に複製・パディング・元の引数をまとめて `addq` で捨てる
-- **アライメント**：`genBody` が操作スタックの深さを左から右へ追跡し（`stackDelta`）、`call` 直前に 16 バイト境界からずれていれば `subq $8` でパディングする（7個以上の呼び出しでは、スタック渡しの引数と call の間に隙間ができないよう、複製より先にパディングを積む）。if/while は文の境界（操作スタックが空）にしか現れないので、分岐の合流点で深さが食い違うことはない。`printf`/`puts`/`exit` の直前は `andq $-16, %rsp` で強制的に揃える
+- **アライメント**：`genBody` が操作スタックの深さを左から右へ追跡し（`stackDelta`）、`call` 直前に 16 バイト境界からずれていれば `subq $8` でパディングする（7個以上の呼び出しでは、スタック渡しの引数と call の間に隙間ができないよう、複製より先にパディングを積む）。`printf`/`puts`/`exit` の直前は `andq $-16, %rsp` で強制的に揃える
+- **ラベルの深さ**：ブロック式により if/while/break/continue/return は式の途中（操作スタックが空でない位置）にも現れるため、`genBody` は2パスで深さを決める。まず `labelDepths` が各ラベルの深さを求め（フォールスルーの深さ。無条件ジャンプの後でフォールスルーが無ければ、先に現れた `Jmp`/`JmpIfZero` の深さ。`JmpDrop` は根拠にしない）、生成時はラベルの位置で深さを置き直す。無条件ジャンプから次のラベルまでは到達不能なので深さは不明とする。`JmpDrop L` は現在の深さと L の深さの差だけ `addq $8k, %rsp` で捨ててから `jmp` する
 - **main**：他の fn と同じく `compileFnDecl` でコンパイルするが、`ret` の代わりに戻り値を型に応じたフォーマットで `printf` して終了するエピローグで終わる（`epilogue`）。そのため main は呼び出せない
 - **シンボル**：pub の fn・static と main だけを `.globl` で公開する（`codegen` が `cmPublic` を受け取る）。非公開の fn・static はファイルローカルなシンボルになり、ほかのオブジェクトと同名でも衝突しない。`call` の対象や参照した static が未定義なら外部参照になる。`.L` ラベル（rodata の `.Lfmt64` 等を含む）はファイルローカルで、ユーザーのシンボルと衝突しない
 - **static**：`.data` セクションに（pub なら `.globl` と）`.balign`・`.quad`（64bit）／`.long`（32bit）で初期値を置き（`dataSection`。アドレスの定数は `.quad X` / `.quad T+16` と書き、PIE でもロード時の再配置で解決される）、RIP 相対（`name(%rip)`）で読み書きする。32bit の読み出しは `movslq` で、u32 は `loadFixup` でゼロ拡張し直す
@@ -185,7 +193,7 @@ main の有無は `compile` では検査しない（main の無いソースも�
 
 `Compiler.run :: [Instr] -> Either String Int` は中間命令列を直接実行する簡易 VM で、テストと定数式の評価（→ 5.9）で使う。
 アドレスは %rbp=0 とみなしたオフセット値で表現し、`trunc`/`zext32`/`divU` で実機の切り詰め・拡張・符号なし除算を再現する。
-ジャンプ（`Jmp`/`JmpIfZero`）・関数呼び出し（`ICall`）・引数の退避（`StoreArg`）・static の読み書き（`LoadGlobal` 等）は扱わないため、制御構文や関数・static を含む命令列は結合テストで検証する。
+ジャンプ（`Jmp`/`JmpDrop`/`JmpIfZero`）・関数呼び出し（`ICall`）・引数の退避（`StoreArg`）・static の読み書き（`LoadGlobal` 等）は扱わないため、制御構文や関数・static を含む命令列は結合テストで検証する。
 
 ## 9. テスト
 
