@@ -6,6 +6,7 @@ import Control.Monad.Trans.State (StateT, evalStateT, get, put)
 import Data.Int (Int32)
 import Data.Map (Map)
 import qualified Data.Map as Map
+import Data.Maybe (listToMaybe, mapMaybe, maybeToList)
 import Data.Word (Word32, Word64)
 import Parser (Body, Expr (..), FnDecl (..), GlobalDecl (..), GlobalKind (..), Program (..), Signedness (..), Stmt (..), Type (..), Visibility (..), Width (..), intRepr)
 
@@ -395,17 +396,9 @@ compileStmtsFrom ctx0 stmts = foldM step (ctxEnv ctx0, ctxCursor ctx0, []) stmts
         _ -> pure ()
       instrs <- compileExprTyped (at env cursor) ty expr
       pure (env, cursor, acc ++ addrInstrs ++ instrs ++ [StoreInd (storageWidth ty)])
-    -- { ... }（文の位置のブロック。値は () でなければならない）
-    step (env, cursor, acc) (SBlock body) = do
-      instrs <- compileUnitBlock (at env cursor) body
-      pure (env, cursor, acc ++ instrs)
-    -- if 式 {...} (else if 式 {...})* (else {...})?
-    step (env, cursor, acc) (SIf branches maybeElse) = do
-      instrs <- compileIf (at env cursor) branches maybeElse
-      pure (env, cursor, acc ++ instrs)
-    -- while 式 {...}
-    step (env, cursor, acc) (SWhile cond body) = do
-      instrs <- compileWhile (at env cursor) cond body
+    -- { ... } / if ... / while ...（文の位置の with-block 式。値は () でなければならず、値を積まずにコンパイルする）
+    step (env, cursor, acc) (SExprWithBlock e) = do
+      instrs <- compileUnitExpr (at env cursor) e
       pure (env, cursor, acc ++ instrs)
     -- break;（式の途中のブロックから抜けることがあるため、操作スタックを飛び先の深さまで捨てる JmpDrop を使う）
     step (env, cursor, acc) SBreak = do
@@ -435,13 +428,21 @@ compileBlock ctx expected (stmts, tailExpr) = do
   tailInstrs <- compileExprTyped ctx {ctxEnv = env', ctxCursor = cursor'} expected tailExpr
   pure (instrs ++ tailInstrs)
 
--- 値を使わないブロック（文の位置のブロック・if/whileの本体）。末尾式は () でなければならず、値は捨てる。
--- 末尾式が () リテラルなら、0 を積んで捨てるだけなので命令を出さない
+-- 値を使わないブロック（if/whileの本体など）。末尾式は () でなければならず、compileUnitExpr で値を積まずにコンパイルする
 compileUnitBlock :: Ctx -> Body -> CompileM [Instr]
-compileUnitBlock ctx (stmts, UnitLit) = do
-  (_, _, instrs) <- compileStmtsFrom ctx {ctxEnv = Map.empty : ctxEnv ctx} stmts
-  pure instrs
-compileUnitBlock ctx body = (++ [IPop]) <$> compileBlock ctx TUnit body
+compileUnitBlock ctx (stmts, tailExpr) = do
+  (env', cursor', instrs) <- compileStmtsFrom ctx {ctxEnv = Map.empty : ctxEnv ctx} stmts
+  tailInstrs <- compileUnitExpr ctx {ctxEnv = env', ctxCursor = cursor'} tailExpr
+  pure (instrs ++ tailInstrs)
+
+-- 値が () の式を、値を積まずにコンパイルする（文の位置の with-block 式・値を使わないブロックの末尾式）。
+-- () リテラル・ブロック・if・while は値 0 を積んで捨てるだけの命令を出さず、それ以外は期待型 () でコンパイルして捨てる
+compileUnitExpr :: Ctx -> Expr -> CompileM [Instr]
+compileUnitExpr _ UnitLit = pure []
+compileUnitExpr ctx (Block body) = compileUnitBlock ctx body
+compileUnitExpr ctx (If branches maybeElse) = compileIf ctx (compileUnitBlock ctx) branches maybeElse
+compileUnitExpr ctx (While cond body) = compileWhile ctx cond body
+compileUnitExpr ctx e = (++ [IPop]) <$> compileExprTyped ctx TUnit e
 
 -- let の初期化式をコンパイルし、オフセット off の変数へストアする命令列を返す。
 -- 配列型は要素ごとのストア（compileArrayInit）、それ以外は式を評価して1回ストアする
@@ -452,22 +453,24 @@ compileLetInit ctx ty off expr = do
   pure (instrs ++ storeLocal ty off)
 
 -- if/else-if/else の分岐列を、条件が偽なら次の分岐へジャンプする形の命令列へ展開する。
--- 各分岐の本体は値を使わないブロックとして独立スコープでコンパイルし、Env/cursorは呼び出し側へ伝播させない
--- （if全体も値を返さない文であり、外側から見た変数の状態はifに入る前と変わらない）。
+-- 各分岐の本体は compileBody でコンパイルする：値を返す if は compileBlock（期待型の値を積む）、
+-- 値を使わない if は compileUnitBlock（値を積まない）。どちらも独立スコープで、Env/cursorは呼び出し側へ伝播させない。
+-- else が無ければ else { () } とみなす（値を返す if では期待型が () でなければ型エラーになる）。
+-- 値を返す if の各分岐は値を積んで if_end へ合流する。合流点の操作スタックの深さは codegen の labelDepths が求める。
 -- loopCtx/returnCtxはそのまま素通しする（if本体にネストしても外側ループのbreak/continue・
 -- 外側関数のreturnが解決できるようにするため）。
-compileIf :: Ctx -> [(Expr, Body)] -> Maybe Body -> CompileM [Instr]
-compileIf ctx branches maybeElse = do
+compileIf :: Ctx -> (Body -> CompileM [Instr]) -> [(Expr, Body)] -> Maybe Body -> CompileM [Instr]
+compileIf ctx compileBody branches maybeElse = do
   endLabel <- freshLabel "if_end"
   body <- go endLabel branches
   pure (body ++ [Label endLabel])
   where
-    go _ [] = maybe (pure []) (compileUnitBlock ctx) maybeElse
+    go _ [] = compileBody (maybe ([], UnitLit) id maybeElse)
     go endLabel ((cond, body) : rest) = do
-      -- 条件式は式木としては expected とは独立にbool型を要求する（if自体はexprを持たない）
+      -- 条件式は期待型とは独立にbool型を要求する
       condInstrs <- compileExprTyped ctx TBool cond
       nextLabel <- freshLabel "if_next"
-      bodyInstrs <- compileUnitBlock ctx body
+      bodyInstrs <- compileBody body
       restInstrs <- go endLabel rest
       pure
         ( condInstrs
@@ -477,7 +480,7 @@ compileIf ctx branches maybeElse = do
             ++ restInstrs
         )
 
--- while を「先頭で条件を検査し、真なら本体を実行して先頭へ戻る」形の命令列へ展開する。
+-- while を「先頭で条件を検査し、真なら本体を実行して先頭へ戻る」形の命令列へ展開する（値は積まない。値として使う側が () を積む）。
 -- 本体は値を使わないブロックとして独立スコープでコンパイルし、Env/cursorは呼び出し側へ伝播させない。
 -- 本体コンパイルへ渡すloopCtxは常にこのwhile自身の(開始,終了)ラベルで上書きする
 -- （呼び出し元のloopCtxを使わないことで、ネストしたwhileのbreak/continueが必ず
@@ -545,7 +548,7 @@ checkNoLocalStore fnSigs env target expr = case lookupVar target env of
   _ -> Right ()
 
 -- 式が直接ローカル変数（仮引数を含む）を指すポインタ（`&x` / `&a[i]`。a はローカルの配列）であれば、その変数名を返す。
--- ブロックはその末尾式をたどる（ブロック内で宣言した変数もローカル変数として見る）
+-- ブロック・if はその末尾式をたどる（ブロック内で宣言した変数もローカル変数として見る）
 isLocalRef :: FnSigs -> Env -> Expr -> Maybe String
 isLocalRef _ env (AddrOf place) =
   case place of
@@ -554,6 +557,9 @@ isLocalRef _ env (AddrOf place) =
     _ -> Nothing
 isLocalRef fnSigs env (Block (stmts, tailExpr)) =
   either (const Nothing) (\env' -> isLocalRef fnSigs env' tailExpr) (blockEnv fnSigs env stmts)
+-- if は各分岐の本体をブロックと同じくたどる
+isLocalRef fnSigs env (If branches maybeElse) =
+  listToMaybe (mapMaybe (isLocalRef fnSigs env . Block) (map snd branches ++ maybeToList maybeElse))
 isLocalRef _ _ _ = Nothing
 
 -- ブロック内の宣言だけをたどった Env（型推論・ダングリングの検査用。場所はダミーのローカル変数とする）。
@@ -664,7 +670,14 @@ inferMaybeType fnSigs env expr = do
                 )
           | otherwise -> Right (Just retTy)
     -- ブロックの型は末尾式の型（ブロック内の宣言を加えた Env で推論する）
-    go (Block (stmts, tailExpr)) = do
+    go (Block body) = bodyType body
+    -- if の型は各分岐の本体の型を単一化したもの（else が無ければ else { () } とみなす）
+    go (If branches maybeElse) = do
+      tys <- mapM bodyType (map snd branches ++ [maybe ([], UnitLit) id maybeElse])
+      foldM unifyMaybeType Nothing tys
+    -- while の値は常に ()
+    go (While _ _) = Right (Just TUnit)
+    bodyType (stmts, tailExpr) = do
       env' <- blockEnv fnSigs env stmts
       inferMaybeType fnSigs env' tailExpr
     combine a b = do
@@ -1099,6 +1112,14 @@ compileExprTyped _ _ (ArrayLit _) = failC "array literal can only be used to ini
 compileExprTyped _ _ (ArrayRepeat _ _) = failC "array literal can only be used to initialize a let variable"
 -- [let ]xxx = { stmts; e };（値は末尾式。期待型はそのまま末尾式へ伝播する）
 compileExprTyped ctx expected (Block body) = compileBlock ctx expected body
+-- [let ]xxx = if c { e1 } else { e2 };（値は選ばれた分岐の末尾式。期待型はそのまま各分岐の末尾式へ伝播する）。
+-- 期待型が () なら、値を積まない if の後に () を1つ積む（各分岐で () を積むより短く、文だった頃の生成コードと同じになる）
+compileExprTyped ctx TUnit e@(If _ _) = (++ [Push 0]) <$> compileUnitExpr ctx e
+compileExprTyped ctx expected (If branches maybeElse) = compileIf ctx (compileBlock ctx expected) branches maybeElse
+-- [let ]xxx = while c { ... };（値は常に ()。ループを抜けた後に () を積む）
+compileExprTyped ctx expected (While cond body)
+  | expected /= TUnit = failC ("type mismatch: expected " ++ typeName expected ++ ", found ()")
+  | otherwise = (++ [Push 0]) <$> compileWhile ctx cond body
 
 -- 整数型（usize を含む）かどうか
 isIntType :: Type -> Bool

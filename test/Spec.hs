@@ -332,7 +332,7 @@ main = hspec $ do
       parseMain [TIdent "x", TAs] `shouldSatisfy` isLeft
     it "空ブロック" $
       parseMain [TLBrace, TRBrace, TInt 5]
-        `shouldBe` Right ([], [SBlock ([], UnitLit)], Lit 5)
+        `shouldBe` Right ([], [SExprWithBlock (Block ([], UnitLit))], Lit 5)
     it "ブロック内にlet文を含む" $
       parseMain
         [ TLBrace,
@@ -346,18 +346,18 @@ main = hspec $ do
           TRBrace,
           TInt 2
         ]
-        `shouldBe` Right ([], [SBlock ([SLet "x" (TyInt Signed W64) (Lit 1)], UnitLit)], Lit 2)
+        `shouldBe` Right ([], [SExprWithBlock (Block ([SLet "x" (TyInt Signed W64) (Lit 1)], UnitLit))], Lit 2)
     it "ネストしたブロック" $
       parseMain [TLBrace, TLBrace, TRBrace, TRBrace, TInt 1]
-        `shouldBe` Right ([], [SBlock ([], Block ([], UnitLit))], Lit 1)
+        `shouldBe` Right ([], [SExprWithBlock (Block ([], Block ([], UnitLit)))], Lit 1)
     it "閉じ括弧がないブロックはエラー" $
       parse [TFn, TIdent "main", TLParen, TRParen, TLBrace, TLBrace] `shouldBe` Left "expected closing brace"
     it "if文（elseなし）" $
       parseMain [TIf, TTrue, TLBrace, TRBrace, TInt 1]
-        `shouldBe` Right ([], [SIf [(BoolLit True, ([], UnitLit))] Nothing], Lit 1)
+        `shouldBe` Right ([], [SExprWithBlock (If [(BoolLit True, ([], UnitLit))] Nothing)], Lit 1)
     it "if-else文" $
       parseMain [TIf, TTrue, TLBrace, TRBrace, TElse, TLBrace, TRBrace, TInt 1]
-        `shouldBe` Right ([], [SIf [(BoolLit True, ([], UnitLit))] (Just ([], UnitLit))], Lit 1)
+        `shouldBe` Right ([], [SExprWithBlock (If [(BoolLit True, ([], UnitLit))] (Just ([], UnitLit)))], Lit 1)
     it "if-else if-else文（複数のelse if）" $
       parseMain
         [ TIf,
@@ -381,7 +381,7 @@ main = hspec $ do
         ]
         `shouldBe` Right
           ( [],
-            [SIf [(BoolLit True, ([], UnitLit)), (BoolLit False, ([], UnitLit)), (BoolLit True, ([], UnitLit))] (Just ([], UnitLit))],
+            [SExprWithBlock (If [(BoolLit True, ([], UnitLit)), (BoolLit False, ([], UnitLit)), (BoolLit True, ([], UnitLit))] (Just ([], UnitLit)))],
             Lit 1
           )
     it "if文の本体にlet文を含む" $
@@ -399,10 +399,10 @@ main = hspec $ do
           TRBrace,
           TInt 2
         ]
-        `shouldBe` Right ([], [SIf [(BoolLit True, ([SLet "x" (TyInt Signed W64) (Lit 1)], UnitLit))] Nothing], Lit 2)
-    it "if文はブロック文としてネストできる" $
+        `shouldBe` Right ([], [SExprWithBlock (If [(BoolLit True, ([SLet "x" (TyInt Signed W64) (Lit 1)], UnitLit))] Nothing)], Lit 2)
+    it "ブロックの最後のifはブロックの末尾式になる" $
       parseMain [TLBrace, TIf, TTrue, TLBrace, TRBrace, TRBrace, TInt 1]
-        `shouldBe` Right ([], [SBlock ([SIf [(BoolLit True, ([], UnitLit))] Nothing], UnitLit)], Lit 1)
+        `shouldBe` Right ([], [SExprWithBlock (Block ([], If [(BoolLit True, ([], UnitLit))] Nothing))], Lit 1)
     it "if文の条件式が無ければエラー" $
       parseMain [TIf, TLBrace, TRBrace, TInt 1] `shouldSatisfy` isLeft
     it "if文で閉じ波括弧がなければエラー" $
@@ -413,7 +413,7 @@ main = hspec $ do
       parseMain [TIf, TTrue, TLBrace, TRBrace, TElse] `shouldSatisfy` isLeft
     it "while文" $
       parseMain [TWhile, TTrue, TLBrace, TRBrace, TInt 1]
-        `shouldBe` Right ([], [SWhile (BoolLit True) ([], UnitLit)], Lit 1)
+        `shouldBe` Right ([], [SExprWithBlock (While (BoolLit True) ([], UnitLit))], Lit 1)
     it "while文の本体にlet文とbreak文を含む" $
       parseMain
         [ TWhile,
@@ -431,13 +431,13 @@ main = hspec $ do
           TRBrace,
           TInt 2
         ]
-        `shouldBe` Right ([], [SWhile (BoolLit True) ([SLet "x" (TyInt Signed W64) (Lit 1), SBreak], UnitLit)], Lit 2)
+        `shouldBe` Right ([], [SExprWithBlock (While (BoolLit True) ([SLet "x" (TyInt Signed W64) (Lit 1), SBreak], UnitLit))], Lit 2)
     it "continue文" $
       parseMain [TWhile, TTrue, TLBrace, TContinue, TSemicolon, TRBrace, TInt 1]
-        `shouldBe` Right ([], [SWhile (BoolLit True) ([SContinue], UnitLit)], Lit 1)
-    it "while文はブロック文としてネストできる" $
+        `shouldBe` Right ([], [SExprWithBlock (While (BoolLit True) ([SContinue], UnitLit))], Lit 1)
+    it "ブロックの最後のwhileはブロックの末尾式になる" $
       parseMain [TLBrace, TWhile, TTrue, TLBrace, TRBrace, TRBrace, TInt 1]
-        `shouldBe` Right ([], [SBlock ([SWhile (BoolLit True) ([], UnitLit)], UnitLit)], Lit 1)
+        `shouldBe` Right ([], [SExprWithBlock (Block ([], While (BoolLit True) ([], UnitLit)))], Lit 1)
     it "while文の条件式が無ければエラー" $
       parseMain [TWhile, TLBrace, TRBrace, TInt 1] `shouldSatisfy` isLeft
     it "while文で閉じ波括弧がなければエラー" $
@@ -2849,7 +2849,7 @@ main = hspec $ do
         `shouldBe` Right ([], [SLetInferred "a" (Lit 1)], Block ([], Var "a"))
     it "文の途中のブロックはブロック文になる" $
       parseSource "fn main() {\n{ let a = 1; }\nlet b = 2;\n}"
-        `shouldBe` Right ([], [SBlock ([SLetInferred "a" (Lit 1)], UnitLit), SLetInferred "b" (Lit 2)], UnitLit)
+        `shouldBe` Right ([], [SExprWithBlock (Block ([SLetInferred "a" (Lit 1)], UnitLit)), SLetInferred "b" (Lit 2)], UnitLit)
     it "ネストしたブロックの値" $
       parseSource "fn main() -> i64 {\n{ let a = 1; { a } }\n}"
         `shouldBe` Right ([], [], Block ([SLetInferred "a" (Lit 1)], Block ([], Var "a")))
@@ -2858,13 +2858,13 @@ main = hspec $ do
         `shouldBe` Right ([], [], Add (Lit 1) (Block ([], Lit 2)))
     it "ifの本体の最後のブロックは本体の末尾式になる" $
       parseSource "fn main() {\nif true { {} }\n}"
-        `shouldBe` Right ([], [SIf [(BoolLit True, ([], Block ([], UnitLit)))] Nothing], UnitLit)
+        `shouldBe` Right ([], [], If [(BoolLit True, ([], Block ([], UnitLit)))] Nothing)
     it "whileの本体の末尾式" $
       parseSource "fn main() {\nwhile false { 1 }\n}"
-        `shouldBe` Right ([], [SWhile (BoolLit False) ([], Lit 1)], UnitLit)
+        `shouldBe` Right ([], [], While (BoolLit False) ([], Lit 1))
     it "ifの条件式の先頭のブロック" $
       parseSource "fn main() {\nif { true } {}\n}"
-        `shouldBe` Right ([], [SIf [(Block ([], BoolLit True), ([], UnitLit))] Nothing], UnitLit)
+        `shouldBe` Right ([], [], If [(Block ([], BoolLit True), ([], UnitLit))] Nothing)
     it "文の先頭のブロックの後に二項演算子を続けるとエラー" $
       parseSource "fn main() -> i64 {\n{ 1 } + 2\n}" `shouldBe` Left "unexpected token: TPlus"
     it "ブロックの後の ; はエラー" $
@@ -2992,6 +2992,158 @@ main = hspec $ do
     it "ブロックの値をmainで表示する（bool）" $
       compileSourceAndRun "fn main() -> bool {\n{ let a = 1; a == 1 }\n}"
         `shouldReturn` "true"
+
+  describe "if・while 式（parse）" $ do
+    let parseSource src = splitMain <$> (tokenize src >>= parse)
+    it "letの初期化式のif" $
+      parseSource "fn main() -> i64 {\nlet x = if true { 1 } else { 2 };\nx\n}"
+        `shouldBe` Right ([], [SLetInferred "x" (If [(BoolLit True, ([], Lit 1))] (Just ([], Lit 2)))], Var "x")
+    it "fn本体の最後のif（else if の連鎖）は末尾式になる" $
+      parseSource "fn main() -> i64 {\nif true { 1 } else if false { 2 } else { 3 }\n}"
+        `shouldBe` Right ([], [], If [(BoolLit True, ([], Lit 1)), (BoolLit False, ([], Lit 2))] (Just ([], Lit 3)))
+    it "式の位置のifには二項演算子を続けられる" $
+      parseSource "fn main() -> i64 {\nlet x = if true { 1 } else { 2 } + 3;\nx\n}"
+        `shouldBe` Right ([], [SLetInferred "x" (Add (If [(BoolLit True, ([], Lit 1))] (Just ([], Lit 2))) (Lit 3))], Var "x")
+    it "実引数のif" $
+      parseSource "fn main() -> i64 {\nf(if true { 1 } else { 2 })\n}"
+        `shouldBe` Right ([], [], Call "f" [If [(BoolLit True, ([], Lit 1))] (Just ([], Lit 2))])
+    it "文の途中のif・whileは文になる" $
+      parseSource "fn main() {\nif true {}\nwhile false {}\nlet a = 1;\n}"
+        `shouldBe` Right
+          ( [],
+            [ SExprWithBlock (If [(BoolLit True, ([], UnitLit))] Nothing),
+              SExprWithBlock (While (BoolLit False) ([], UnitLit)),
+              SLetInferred "a" (Lit 1)
+            ],
+            UnitLit
+          )
+    it "letの初期化式のwhile" $
+      parseSource "fn main() {\nlet u = while false {};\n}"
+        `shouldBe` Right ([], [SLetInferred "u" (While (BoolLit False) ([], UnitLit))], UnitLit)
+    it "fn本体の最後のwhileは末尾式になる" $
+      parseSource "fn main() {\nwhile false {}\n}"
+        `shouldBe` Right ([], [], While (BoolLit False) ([], UnitLit))
+    it "深く入れ子にしたifの末尾式を読み直さずにパースする" $ do
+      let n = 40 :: Int
+          src = "fn main() {\n" ++ concat (replicate n "if true { ") ++ replicate n '}' ++ "\n}"
+      parseSource src `shouldSatisfy` isRight
+    it "文の先頭のifの後に二項演算子を続けるとエラー" $
+      parseSource "fn main() -> i64 {\nif true { 1 } else { 2 } + 3\n}" `shouldBe` Left "unexpected token: TPlus"
+    it "ifの後の ; はエラー" $
+      parseSource "fn main() {\nif true {};\n}" `shouldBe` Left "unexpected token: TSemicolon"
+
+  describe "if・while 式（compile）" $ do
+    let compileSource src = tokenize src >>= parse >>= compileMain
+    it "値を返すifは各分岐で値を積んで合流する" $
+      compileSource "fn main() -> i64 {\nif true { 1 } else { 2 }\n}"
+        `shouldBe` Right
+          ( [],
+            TyInt Signed W64,
+            [ Push 1,
+              JmpIfZero ".Lif_next2",
+              Push 1,
+              Jmp ".Lif_end1",
+              Label ".Lif_next2",
+              Push 2,
+              Label ".Lif_end1",
+              Label ".Lfn_end0"
+            ]
+          )
+    it "文の位置のifは値を積まない" $
+      compileSource "fn main() {\nlet x = 1;\nif true { x = 2; }\nx = 3;\n}"
+        `shouldBe` Right
+          ( [],
+            TUnit,
+            [ Push 1,
+              Store W64 (-8),
+              Push 1,
+              JmpIfZero ".Lif_next2",
+              Push 2,
+              Store W64 (-8),
+              Jmp ".Lif_end1",
+              Label ".Lif_next2",
+              Label ".Lif_end1",
+              Push 3,
+              Store W64 (-8),
+              Push 0,
+              Label ".Lfn_end0"
+            ]
+          )
+    it "値が () の末尾のifは、値を積まないifの後に () を1つ積む" $
+      compileSource "fn main() {\nif true {}\n}"
+        `shouldBe` Right
+          ( [],
+            TUnit,
+            [Push 1, JmpIfZero ".Lif_next2", Jmp ".Lif_end1", Label ".Lif_next2", Label ".Lif_end1", Push 0, Label ".Lfn_end0"]
+          )
+
+  describe "if・while 式（意味論エラー）" $ do
+    let compileSource src = tokenize src >>= parse >>= compileMain
+    it "elseの無いifの値を () 以外として使うとエラー" $
+      compileSource "fn main() -> i64 {\nlet x: i64 = if true { 1 };\nx\n}"
+        `shouldBe` Left "type mismatch: expected i64, found ()"
+    it "elseの無いifの型は () と推論され、分岐の値が () でないとエラー" $
+      compileSource "fn main() -> i64 {\nlet x = if true { 1 };\n0\n}"
+        `shouldBe` Left "type mismatch: expected (), found integer literal"
+    it "分岐の型が期待型と一致しないとエラー" $
+      compileSource "fn main() -> i32 {\nlet x: i32 = if true { 1i64 } else { 2 };\nx\n}"
+        `shouldBe` Left "type mismatch: expected i32, found i64"
+    it "推論で分岐の型が一致しないとエラー" $
+      compileSource "fn main() -> i64 {\nlet x = if true { 1i64 } else { 2i32 };\nx\n}"
+        `shouldBe` Left "type mismatch: i64 and i32"
+    it "whileの値を () 以外として使うとエラー" $
+      compileSource "fn main() -> i64 {\nlet x: i64 = while false {};\nx\n}"
+        `shouldBe` Left "type mismatch: expected i64, found ()"
+    it "() 以外を返すfnの最後のwhileはエラー" $
+      compileSource "fn main() -> i64 {\nwhile true { return 1; }\n}"
+        `shouldBe` Left "type mismatch: expected i64, found ()"
+    it "文の途中のifの値が () でないとエラー" $
+      compileSource "fn main() -> i64 {\nif true { 1 } else { 2 }\nlet y = 2;\ny\n}"
+        `shouldBe` Left "type mismatch: expected (), found integer literal"
+    it "if式の条件がboolでないとエラー" $
+      compileSource "fn main() -> i64 {\nif 1 { 1 } else { 2 }\n}"
+        `shouldBe` Left "type mismatch: expected bool, found integer literal"
+    it "const の初期値にifは書けない" $
+      compileSource "const N: i64 = if true { 1 } else { 2 };\nfn main() -> i64 {\nN\n}"
+        `shouldBe` Left "initializer of N is not a constant expression"
+    it "ifの分岐からローカル変数への参照を返すとエラー" $
+      compileSource "static Z: i64 = 0;\nfn f(c: bool) -> &i64 {\nlet x = 1;\nif c { &Z } else { &x }\n}\nfn main() {}"
+        `shouldBe` Left "cannot return reference to local variable: x"
+
+  describe "compile + codegen + gcc（if・while 式の結合テスト）" $ do
+    it "if式・while式・単独のif/while" $
+      compileSourceAndRun "fn sign(x: i64) -> i64 {\nif x < 0 { -1 } else if x == 0 { 0 } else { 1 }\n}\nfn count(n: i64) {\nlet i = 0;\nwhile i < n { i = i + 1; }\n}\nfn main() -> i64 {\nlet a = if sign(-5) < 0 { 10 } else { 20 };\nlet i = 0;\nwhile i < 3 { i = i + 1; }\nif i == 3 { a = a + 1; }\nlet u: () = while false {};\ncount(i);\na + i\n}"
+        `shouldReturn` "14"
+    it "if式の中のbreak/continueで積んだ値を捨てる（多数回繰り返してもスタックが漏れない）" $
+      compileSourceAndRun "fn main() -> i64 {\nlet i = 0;\nlet t = 0;\nwhile true {\ni = i + 1;\nt = t + 100 + if i > 1000000 { break; 0 } else if i == i / 2 * 2 { continue; 0 } else { 1 };\n}\nt\n}"
+        `shouldReturn` "50500000"
+    it "if式の中のreturn" $
+      compileSourceAndRun "fn f(x: i64) -> i64 {\n100 + if x > 0 { return x; 0 } else { 1 }\n}\nfn main() -> i64 {\nf(5) * 1000 + f(-1)\n}"
+        `shouldReturn` "5101"
+    it "実引数・二項演算の右辺のif（分岐の中で関数を呼ぶ）" $
+      compileSourceAndRun "fn sq(v: i64) -> i64 {\nv * v\n}\nfn main() -> i64 {\nlet c = 3;\n1 + sq(if c > 2 { sq(2) } else { 0 }) + if c < 2 { 0 } else { sq(c) }\n}"
+        `shouldReturn` "26"
+    it "スライスを返すif（分岐ごとに &[T; N] から &[T] へ変換する）" $
+      compileSourceAndRun "fn sum(s: &[i64]) -> i64 {\nlet t = 0;\nlet i = 0usize;\nwhile i < s.len() {\nt = t + s[i];\ni = i + 1;\n}\nt\n}\nfn main() -> i64 {\nlet a = [1, 2, 3];\nlet b = [10, 20];\nlet c = true;\nlet s: &[i64] = if c { &a } else { &b };\nsum(s) + sum(if c { &b } else { &a })\n}"
+        `shouldReturn` "36"
+    it "i32を返すif" $
+      compileSourceAndRun "fn main() -> i32 {\nlet x = 5i32;\nlet y = if x > 3 { x * 2 } else { -x };\ny\n}"
+        `shouldReturn` "10"
+    it "u32を返すif" $
+      compileSourceAndRun "fn main() -> u32 {\nlet c = false;\nif c { 1u32 } else { 4000000000 }\n}"
+        `shouldReturn` "4000000000"
+    it "boolを返すif" $
+      compileSourceAndRun "fn main() -> bool {\nlet n = 7;\nif n < 0 { false } else if n == n / 2 * 2 { false } else { true }\n}"
+        `shouldReturn` "true"
+    it "再帰関数の本体のif式" $
+      compileSourceAndRun "fn fib(n: i64) -> i64 {\nif n < 2 { n } else { fib(n - 1) + fib(n - 2) }\n}\nfn main() -> i64 {\nfib(20)\n}"
+        `shouldReturn` "6765"
+    it "ネストしたif式" $
+      compileSourceAndRun "fn g(a: i64, b: i64) -> i64 {\nif a > 0 { if b > 0 { 1 } else { 2 } } else { if b > 0 { 3 } else { 4 } }\n}\nfn main() -> i64 {\ng(1, 1) * 1000 + g(1, -1) * 100 + g(-1, 1) * 10 + g(-1, -1)\n}"
+        `shouldReturn` "1234"
+    it "() を返すfnの最後のif・while" $
+      compileSourceAndRun "fn bump(p: &i64) {\nif *p < 10 { *p = *p + 1; }\n}\nfn count(p: &i64) {\nwhile *p < 5 { *p = *p + 1; }\n}\nfn main() -> i64 {\nlet x = 0;\ncount(&x);\nbump(&x);\nx\n}"
+        `shouldReturn` "6"
 
 -- 単一ソース（import なし）をコンパイルし、(main以外のfn, mainの戻り値型, mainの命令列) を返す。main は必須。
 -- 命令列を検査するテスト用（static の初期値・公開シンボルは返さない）

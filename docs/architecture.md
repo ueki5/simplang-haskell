@@ -37,7 +37,8 @@
 data Program    = Program { progImports :: [FilePath], progGlobals :: [GlobalDecl], progFns :: [FnDecl] }
 data FnDecl     = FnDecl Visibility String [(String, Type)] Type Body   -- 公開範囲, 名前, 仮引数, 戻り値型, 本体
 type Body       = ([Stmt], Expr)                                        -- 文の列 + 末尾式（fn 本体・ブロック・if/while の本体）
--- Expr の Block Body はブロック式、Stmt の SBlock Body は文の位置のブロック。SIf [(Expr, Body)] (Maybe Body)、SWhile Expr Body
+-- Expr の with-block 式：Block Body（ブロック式）、If [(Expr, Body)] (Maybe Body)（if 式）、While Expr Body（while 式）
+-- Stmt の SExprWithBlock Expr は、with-block 式を ';' 無しで文の位置に置いたもの（値は () でなければならない）
 data GlobalDecl = GlobalDecl Visibility GlobalKind String Type Expr     -- 公開範囲, const/static, 名前, 型, 初期値
 data GlobalKind = GConst | GStatic
 data Visibility = Private | Public                                      -- pub の有無
@@ -68,8 +69,9 @@ data Instr   = Push Int | IAdd Width | ... | Jmp String | JmpDrop String | ICall
 - 左再帰を除去した反復ループで左結合を実現する：`parseExpr` → `parseEquality` → `parseComparison` → `parseAdditive` → `parseMultiplicative` → `parseCast` → `parseFactor`（前置の単項演算子）→ `parsePostfixRest`（添字・メソッド呼び出し `e.name(args)`）→ `parsePrimary`
 - `parseCast` は `as` の後の型が整数型でなければパース時にエラーにする
 - 型（`parseTypeAnnotation`）：`&` の直後が `[` なら要素型を読み、`]` が続けばスライス `TSlice`、`;` が続けば配列へのポインタ。`&` のない `[T]`、`&&[T]`、スライス・配列の要素にスライスを置く形はパース時にエラーにする
-- ブロック（`parseBlockBody`）：`{` の直後から `stmt* expr? }` を読んで `Body` を返す。fn 本体・ブロック式（`parsePrimary` の `{`）・文の位置のブロック・if の各分岐と else・while の本体で共用する
-- 文の判別（`parseStmts`）：キーワード、または `IDENT =`（先読み2トークン）で判別する。`{` ならブロックを読み、直後が `}` なら文は無いものとして元のトークン列で戻り（外側の `parseBlockBody` が末尾式の `Block` として読み直す）、それ以外は `SBlock`。どれでもなければ式を試し読みし、次が `=` なら場所式への代入 `SAssignPlace`、`;` なら式文 `SExpr`、それ以外なら文の列の終わり（末尾式）として読み直す
+- ブロック（`parseBlockBody`）：`{` の直後から `stmt* expr? }` を読んで `Body` を返す。fn 本体・ブロック式・if の各分岐と else・while の本体で共用する
+- with-block 式（`parseExprWithBlock`）：`{`・`if`・`while` で始まる式（`Block`・`If`・`While`）を読む。`parsePrimary` と文の判別の両方から使う
+- 文の判別（`parseStmts`）：キーワード、または `IDENT =`（先読み2トークン）で判別する。戻り値は (文の列, 末尾式として読んだ with-block 式, 残りのトークン列)。`{`・`if`・`while` なら with-block 式を読み、直後が `}` ならそれを末尾式として返し（外側の `parseBlockBody` は読み直さない。読み直すと入れ子の深さに対して指数時間になる）、それ以外は `SExprWithBlock`。どれでもなければ式を試し読みし、次が `=` なら場所式への代入 `SAssignPlace`、`;` なら式文 `SExpr`、それ以外なら文の列の終わり（末尾式）として元のトークン列で戻り、`parseBlockBody` が読み直す
 - 脱糖：ブロック（fn 本体を含む）の末尾式の省略と `return;` は `UnitLit` に、`->` の省略は戻り値型 `TUnit` にする。AST 上は末尾式・return の値が常に存在する
 - 型サフィックス付き整数リテラル（`9999i64`）は字句解析で1トークン `TIntSuffixed` にまとめる。サフィックスの直後が識別子の構成文字なら（`10i64x`）サフィックスとみなさない
 - トップレベル（`parseItems`）は `fn` / `const` / `static` を混在して読み、`progGlobals` と `progFns` に振り分ける。先頭の `pub` は `Public`、無ければ `Private` として各定義に持たせる
@@ -94,7 +96,7 @@ main の有無は `compile` では検査しない（main の無いソースも�
   - キャスト `Cast e ty` の被演算子（結果型 `ty` は `expected` と厳密一致を要求）
   - 型注釈を省略した `let`（`SLetInferred`）と式文 `SExpr`（`inferType` = 未確定なら i64）
   - 配列の基底（`arrayBase`）、`*e` の場所式（`addressOf`）
-- `inferMaybeType` は `FnSigs -> Env` の純粋な関数のまま。ブロック `Block (stmts, t)` の型は、ブロック内の宣言だけをたどった Env（`blockEnv`。場所はダミーの `LLocal 0`）で `t` を推論して求める。`&e` の型は、命令列を作らない `placeType` で求める
+- `inferMaybeType` は `FnSigs -> Env` の純粋な関数のまま。ブロック `Block (stmts, t)` の型は、ブロック内の宣言だけをたどった Env（`blockEnv`。場所はダミーの `LLocal 0`）で `t` を推論して求める。if の型は各分岐の本体の型を同じ方法で求めて単一化する（else が無ければ `()` とも単一化する）。while の型は `()`。`&e` の型は、命令列を作らない `placeType` で求める
 - `if` / `while` の条件は `TBool` を期待型としてコンパイルする
 
 ### 5.3 変数とスコープ
@@ -103,7 +105,9 @@ main の有無は `compile` では検査しない（main の無いソースも�
 - 名前の解決は `lookupVar` 1つで行い、見つかった場所（`Loc`）で命令を選ぶ：ローカルは `Load`/`Store`/`LoadAddr`、static は `LoadGlobal`/`StoreGlobal`/`LoadGlobalAddr`、const は `Push 値`（代入・`&` はエラー）
 - `cursor` はスタック上の次の空き位置（%rbp 相対、負の方向へ伸びる）。変数は型の実サイズ（`stackBytes`。i32=4, i64=8, 配列は要素数×要素サイズ）で詰めて配置し、オフセットは `cursor - stackBytes ty`
 - `{}`・if の各分岐・while の本体は空のスコープを push して再帰コンパイルし、戻ったら呼び出し前の `Env`/`cursor` で続ける。これでスコープアウトとスタック領域の巻き戻しが同時に実現され、時間的に重ならない兄弟ブロックは同じ領域を再利用する
-- ブロック式（`compileBlock`）は、文の列の後の `Env`/cursor で末尾式を期待型でコンパイルする。値を使わないブロック（文の位置のブロック・if/while の本体。`compileUnitBlock`）は末尾式を期待型 `()` でコンパイルして `IPop` する（末尾式が `UnitLit` なら命令を出さない）
+- ブロック式（`compileBlock`）は、文の列の後の `Env`/cursor で末尾式を期待型でコンパイルする
+- 値が `()` で、値を使わない式（文の位置の with-block 式・if/while の本体の末尾式）は `compileUnitExpr` が値を積まずにコンパイルする。`UnitLit` は命令なし、ブロックは `compileUnitBlock`（文の列＋末尾式を `compileUnitExpr`）、if は各分岐を `compileUnitBlock`、while は従来の while で、それ以外の式は期待型 `()` でコンパイルして `IPop` する
+- 値を返す if（`compileIf ctx (compileBlock ctx expected)`）は、各分岐で値を積んで `if_end` へ合流する。else が無ければ else の本体を `([], UnitLit)` とする。期待型が `()` の if と while 式は、値を積まない形の後に `Push 0` を1つ出す
 - `let` の初期化式は、宣言する変数の領域の下端（`off`）を cursor にしてコンパイルする。初期化式の中のブロックの変数は宣言中の変数より下に置かれ、配列の要素ごとのストアの途中でストア済みの要素を壊さない
 - 同一スコープでの再宣言は `declaredLocally` でエラーにし、外側との同名（シャドーイング）は許可する。ただし let・仮引数で const/static と同名の変数は宣言できない（`checkNotGlobal`）
 
@@ -112,6 +116,7 @@ main の有無は `compile` では検査しない（main の無いソースも�
 - `CompileM = StateT Int (Either String)` の状態がラベル番号のカウンタで、`freshLabel` が `.Lif_end3` のような一意なラベルを払い出す。`Env`/`cursor` と違って巻き戻してはいけない値なので、引数ではなく State で持ち回る
 - `LoopCtx`（直近のループの continue/break ラベル）と `ReturnCtx`（fn 名・戻り値型・fn 末尾ラベル）は普通の引数として渡す。`while` に入るときだけ `LoopCtx` を差し替える
 - `return` と末尾式はどちらも fn 末尾ラベルへ合流する
+- `compileIf` は本体をコンパイルする関数を引数に取り、値を返す if（`compileBlock`）と値を使わない if（`compileUnitBlock`）で共用する
 - break/continue は `JmpDrop`、return と if/while の内部のジャンプは `Jmp` を出す。式の途中のブロックから抜けると操作スタックに値が残っているため、break/continue はそれを飛び先の深さまで捨てる（→ 6 アライメント）。return は値を積んだまま飛び、その下に残った値はエピローグの `leave` が捨てる
 
 ### 5.5 場所式とポインタ
@@ -170,7 +175,7 @@ main の有無は `compile` では検査しない（main の無いソースも�
 - **関数呼び出し**：SysV AMD64 ABI。1〜6個目の引数はレジスタ（`%rdi` `%rsi` `%rdx` `%rcx` `%r8` `%r9`、`argRegs`）で渡し、7個目以降はスタックで渡す（call の時点で7個目が `(%rsp)`、8個目が `8(%rsp)`…。引数の個数に上限はない）。呼ばれた側はプロローグ直後に `StoreArg` でローカルのスロットへ退避する（7個目以降は `16(%rbp)` から8バイト間隔の位置からコピーする。`stackArgOffset`）。引数の位置はスロット単位で割り当てる（スライスは先頭ポインタと長さで2つ）。戻り値は `%rax`、2スロットの値（スライス）は `%rax`（先頭ポインタ）と `%rdx`（長さ）。`epilogueRet` が fn の戻り値の型を受け取って取り出し、`genCall` は call の後に戻り値のスロット数だけ積む
 - **スタック渡しの並べ替え**：実引数は左から右へ評価して積むため、操作スタック上の並びは ABI と逆になる。7個以上の呼び出しでは `genCall` が、最後の引数から順に `pushq off(%rsp)` で7個目以降を複製して並べ直し、レジスタ渡しの分は元の位置から `movq` で読む。call 後に複製・パディング・元の引数をまとめて `addq` で捨てる
 - **アライメント**：`genBody` が操作スタックの深さを左から右へ追跡し（`stackDelta`）、`call` 直前に 16 バイト境界からずれていれば `subq $8` でパディングする（7個以上の呼び出しでは、スタック渡しの引数と call の間に隙間ができないよう、複製より先にパディングを積む）。`printf`/`puts`/`exit` の直前は `andq $-16, %rsp` で強制的に揃える
-- **ラベルの深さ**：ブロック式により if/while/break/continue/return は式の途中（操作スタックが空でない位置）にも現れるため、`genBody` は2パスで深さを決める。まず `labelDepths` が各ラベルの深さを求め（フォールスルーの深さ。無条件ジャンプの後でフォールスルーが無ければ、先に現れた `Jmp`/`JmpIfZero` の深さ。`JmpDrop` は根拠にしない）、生成時はラベルの位置で深さを置き直す。無条件ジャンプから次のラベルまでは到達不能なので深さは不明とする。`JmpDrop L` は現在の深さと L の深さの差だけ `addq $8k, %rsp` で捨ててから `jmp` する
+- **ラベルの深さ**：ブロック式・if 式・while 式により if/while/break/continue/return は式の途中（操作スタックが空でない位置）にも現れるため、`genBody` は2パスで深さを決める。まず `labelDepths` が各ラベルの深さを求め（フォールスルーの深さ。無条件ジャンプの後でフォールスルーが無ければ、先に現れた `Jmp`/`JmpIfZero` の深さ。`JmpDrop` は根拠にしない）、生成時はラベルの位置で深さを置き直す。無条件ジャンプから次のラベルまでは到達不能なので深さは不明とする。`JmpDrop L` は現在の深さと L の深さの差だけ `addq $8k, %rsp` で捨ててから `jmp` する
 - **main**：他の fn と同じく `compileFnDecl` でコンパイルするが、`ret` の代わりに戻り値を型に応じたフォーマットで `printf` して終了するエピローグで終わる（`epilogue`）。そのため main は呼び出せない
 - **シンボル**：pub の fn・static と main だけを `.globl` で公開する（`codegen` が `cmPublic` を受け取る）。非公開の fn・static はファイルローカルなシンボルになり、ほかのオブジェクトと同名でも衝突しない。`call` の対象や参照した static が未定義なら外部参照になる。`.L` ラベル（rodata の `.Lfmt64` 等を含む）はファイルローカルで、ユーザーのシンボルと衝突しない
 - **static**：`.data` セクションに（pub なら `.globl` と）`.balign`・`.quad`（64bit）／`.long`（32bit）で初期値を置き（`dataSection`。アドレスの定数は `.quad X` / `.quad T+16` と書き、PIE でもロード時の再配置で解決される）、RIP 相対（`name(%rip)`）で読み書きする。32bit の読み出しは `movslq` で、u32 は `loadFixup` でゼロ拡張し直す
