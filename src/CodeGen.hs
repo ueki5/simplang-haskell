@@ -2,6 +2,9 @@ module CodeGen (codegen) where
 
 import Compiler (Instr (..), StaticData, StaticInit (..), slotCount)
 import Data.List (intercalate, mapAccumL)
+import Data.Map (Map)
+import qualified Data.Map as Map
+import Data.Maybe (fromMaybe)
 import Parser (Signedness (..), Type (..), Width (..))
 
 -- -- Debug Printサンプル（pTraceShow: 純粋関数内, pTraceShowM: モナド内）
@@ -194,17 +197,45 @@ fmtLabel Signed W64 = ".Lfmt64"
 fmtLabel Unsigned W32 = ".LfmtU32"
 fmtLabel Unsigned W64 = ".LfmtU64"
 
--- 関数本体の命令列をアセンブリへ変換する。ICall（ユーザー関数呼び出し）だけは、
--- 呼び出し直前のスタックアライメントを静的に判定するために操作スタックの深さ
+-- 関数本体の命令列をアセンブリへ変換する。ICall（ユーザー関数呼び出し）の直前のスタックアライメントと、
+-- JmpDrop（break/continue）で捨てる値の数を静的に決めるため、操作スタックの深さ
 -- （8バイトスロット単位、プロローグ直後＝16バイト境界を0とする）を左から右へ辿りながら生成する。
--- 本プロジェクトのif/whileは常に文の境界（操作スタックが空）にしか出現しない
--- （if/while自体は値を返さない文であり、式の中に現れない）ため、分岐の合流点で
--- 深さが食い違うことはなく、単純な線形走査で静的に決定できる
+-- ブロック式により if/while/break/continue/return が式の途中（操作スタックが空でない位置）にも現れるため、
+-- 深さはラベルごとに labelDepths で求めておき、ラベルの位置で置き直す。
+-- 無条件ジャンプの後ろ（次のラベルまで）は到達不能なので深さは不明（Nothing）とし、そこの ICall のパディングはどちらでもよい
 genBody :: [Instr] -> [String]
-genBody instrs = concat (snd (mapAccumL genAt 0 instrs))
+genBody instrs = concat (snd (mapAccumL genAt (Just 0) instrs))
   where
-    genAt depth (ICall name n r) = (depth + r - n, genCall depth n r name)
-    genAt depth instr = (depth + stackDelta instr, genInstr instr)
+    depths = labelDepths instrs
+    genAt _ instr@(Label lbl) = (Map.lookup lbl depths, genInstr instr)
+    genAt _ instr@(Jmp _) = (Nothing, genInstr instr)
+    genAt depth (JmpDrop lbl) =
+      let excess = fromMaybe 0 ((-) <$> depth <*> Map.lookup lbl depths)
+       in (Nothing, ["    addq  $" ++ show (8 * excess) ++ ", %rsp" | excess > 0] ++ genInstr (Jmp lbl))
+    genAt depth (ICall name n r) = ((+ (r - n)) <$> depth, genCall (fromMaybe 0 depth) n r name)
+    genAt depth instr = ((+ stackDelta instr) <$> depth, genInstr instr)
+
+-- 各ラベルの位置での操作スタックの深さ。命令列を左から右へ辿り、ラベルではフォールスルーの深さを採る。
+-- 無条件ジャンプ（Jmp/JmpDrop）の後ろでフォールスルーが無ければ、それより前に現れた Jmp/JmpIfZero の深さを採る。
+-- JmpDrop は飛び先の深さまで捨てて飛ぶので、深さの根拠にしない。
+-- return の Jmp は値の下に余分な値を残して fn 末尾へ飛ぶことがあるが、fn 末尾はエピローグ（戻り値を上から取り出して leave）
+-- だけなので害は無く、fn 末尾のラベルの深さもフォールスルーの深さを優先する
+labelDepths :: [Instr] -> Map String Int
+labelDepths = go (Just 0) Map.empty
+  where
+    go _ m [] = m
+    go depth m (Label lbl : rest) = case depth of
+      Just d -> go depth (Map.insert lbl d m) rest
+      Nothing -> go (Map.lookup lbl m) m rest
+    go depth m (Jmp lbl : rest) = go Nothing (record lbl depth m) rest
+    go _ m (JmpDrop _ : rest) = go Nothing m rest
+    go depth m (instr@(JmpIfZero lbl) : rest) =
+      let depth' = (+ stackDelta instr) <$> depth
+       in go depth' (record lbl depth' m) rest
+    go depth m (instr : rest) = go ((+ stackDelta instr) <$> depth) m rest
+    -- 先に決まった深さを優先する（フォールスルーで決まったラベルへの後方ジャンプでは上書きしない）
+    record lbl (Just d) m = Map.insertWith (\_ old -> old) lbl d m
+    record _ Nothing m = m
 
 -- 各命令の操作スタックへの正味の増減（8バイトスロット単位）
 stackDelta :: Instr -> Int
@@ -230,6 +261,7 @@ stackDelta ICmpGeU = -1
 stackDelta INot = 0
 stackDelta (JmpIfZero _) = -1
 stackDelta (Jmp _) = 0
+stackDelta (JmpDrop _) = 0
 stackDelta (Label _) = 0
 stackDelta ISext32 = 0
 stackDelta IZext32 = 0
@@ -503,6 +535,8 @@ genInstr (JmpIfZero lbl) =
 genInstr (Jmp lbl) =
   [ "    jmp   " ++ lbl
   ]
+-- 捨てる値の数は genBody が飛び先の深さから決める（ここでは捨てる値が無い場合と同じ）
+genInstr (JmpDrop lbl) = genInstr (Jmp lbl)
 genInstr (Label lbl) =
   [ lbl ++ ":"
   ]
