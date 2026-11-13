@@ -5,7 +5,7 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.State (StateT, evalStateT, get, put)
 import Data.Int (Int32)
 import Data.Map (Map)
-import qualified Data.Map as Map
+import Data.Map qualified as Map
 import Data.Maybe (listToMaybe, mapMaybe, maybeToList)
 import Data.Word (Word32, Word64)
 import Parser (Body, Expr (..), FnDecl (..), GlobalDecl (..), GlobalKind (..), Program (..), Signedness (..), Stmt (..), Type (..), Visibility (..), Width (..), intRepr)

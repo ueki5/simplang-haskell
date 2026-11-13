@@ -243,6 +243,12 @@ GitHub Actions（`.github/workflows/ci.yml`）が、`main` への push・PR・�
 GHC・cabal・HLS は ghcup で管理する（GHC の版は `cabal.project` の `with-compiler`）。
 コードの整形は ormolu で行い、その版は `flake.nix` の devShell（`ormolu` だけを含む）と `flake.lock` で固定する。
 
+Haskell の言語の版は GHC2024 で、`.cabal` の共通の stanza（`common-options`）に1か所だけ書く。GHC2024 は GHC 9.10 以降が必要なため、`base` の下限は 4.20 とする。
+
+- `LambdaCase`・`TupleSections`・`ScopedTypeVariables`・`TypeApplications` などは、プラグマを書かずに使える
+- import の qualified は後置き（`import Data.Map qualified as Map`）で書く。ormolu が `.cabal` の言語の版を読み、この形に揃える
+- `MonoLocalBinds`（GHC2024 の `GADTs` が有効にする）のため、外側の局所変数を使う局所的な束縛（`let`・`where`）は、シグネチャが無いと一般化されない。そのような局所関数を2つ以上の型で使うときは、局所関数にシグネチャを付ける。シグネチャで外側の型変数を指すには、外側の関数のシグネチャに `forall` を書く（docs/step038.md の 1.3）
+
 | 使う場面 | 整形の仕組み |
 |---|---|
 | エディタ（nvim・VS Code） | HLS の設定 `haskell.plugin.ormolu.config.external = true` で、HLS 内蔵ではなく PATH の `ormolu` を使わせ、保存時に整形する（設定は各自のエディタ側で行う） |

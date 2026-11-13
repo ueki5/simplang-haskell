@@ -4,3 +4,6 @@
 
 # step027：ormolu で全ソースを整形
 425fbf91128b16016849695f92f52ca565ad8183
+
+# step038：GHC2024（ImportQualifiedPost）で全ソースを整形
+911eb80964c358b94387f2a93e60458ed7dd8623

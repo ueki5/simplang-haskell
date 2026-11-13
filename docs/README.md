@@ -54,3 +54,4 @@
 | [step035](step035.md) | パース結果の出力（`-p` と中間ファイル `.slp`） |
 | [step036](step036.md) | 値を返すブロック（ブロック式） |
 | [step037](step037.md) | 値を返す if・while（if 式・while 式） |
+| [step038](step038.md) | Haskell の言語の版を GHC2024 にする |
