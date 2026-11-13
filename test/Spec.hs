@@ -6,8 +6,8 @@ import Control.Exception (bracket)
 import Control.Monad (when)
 import Data.Either (isLeft, isRight)
 import Data.List (isPrefixOf)
-import qualified Data.Map as Map
-import qualified Data.Text.Lazy as TL
+import Data.Map qualified as Map
+import Data.Text.Lazy qualified as TL
 import Driver (BuildOpts (BuildOpts), CodegenInput (CodegenInput), Mode (..), Module (Module), build)
 import Parser (Expr (..), FnDecl (..), GlobalDecl (..), GlobalKind (..), Program (..), Signedness (..), Stmt (..), Token (..), Type (..), Visibility (..), Width (..), parse, tokenize)
 import System.Directory (canonicalizePath, createDirectoryIfMissing, doesFileExist, listDirectory)

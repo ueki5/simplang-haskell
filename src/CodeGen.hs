@@ -3,7 +3,7 @@ module CodeGen (codegen) where
 import Compiler (Instr (..), StaticData, StaticInit (..), slotCount)
 import Data.List (intercalate, mapAccumL)
 import Data.Map (Map)
-import qualified Data.Map as Map
+import Data.Map qualified as Map
 import Data.Maybe (fromMaybe)
 import Parser (Signedness (..), Type (..), Width (..))
 

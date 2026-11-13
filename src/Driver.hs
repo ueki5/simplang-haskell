@@ -8,9 +8,9 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Except (ExceptT, runExceptT, throwE)
 import Data.IORef (IORef, modifyIORef, newIORef, readIORef)
 import Data.List (nub)
-import qualified Data.Map as Map
+import Data.Map qualified as Map
 import Data.Maybe (isJust)
-import qualified Data.Text.Lazy as TL
+import Data.Text.Lazy qualified as TL
 import Parser (FnDecl (..), GlobalDecl (..), GlobalKind (..), Program (..), Type, Visibility (..), parse, tokenize)
 import System.Directory (canonicalizePath, createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, removeFile)
 import System.Exit (ExitCode (..))
