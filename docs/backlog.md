@@ -94,6 +94,7 @@
 | `.cabal` ファイルの整形（`cabal-gild` など） | step027 | 小 | |
 | `main` のブランチ保護（CI の成功をマージの条件にする） | step026 | 小 | GitHub の画面での設定 |
 | 複数の GHC バージョン・OS での CI | step026 | 小〜中 | 現在は `cabal.project` の GHC と `ubuntu-latest` のみ |
+| 既存コードへの GHC2024 の機能の適用（`\case`・`TupleSections`・`NamedFieldPuns` など） | step038 | 小 | `\case` にできる箇所の例：`Compiler.hs` の `go (Deref e)`、`Driver.hs` の `io` |
 
 ## 2. 実現済みの課題
 
