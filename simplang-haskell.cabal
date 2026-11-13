@@ -7,18 +7,23 @@ maintainer:         ueki005@gmail.com
 build-type:         Simple
 extra-doc-files:    CHANGELOG.md
 
-common common-options
+common warnings
     ghc-options: -Wall
+
+common language
     default-language: GHC2024
+    build-depends:    base >=4.20 && <4.21
+
+common debug
+    build-depends:    pretty-simple
 
 library
-    import:           common-options
+    import:           warnings, language, debug
     exposed-modules:  Compiler, CodeGen, Driver, Parser
-    build-depends:    base >=4.20 && <4.21,
+    build-depends:
                       containers,
                       transformers,
                       mtl,
-                      pretty-simple,
                       raw-strings-qq,
                       process,
                       text,
@@ -27,23 +32,20 @@ library
     hs-source-dirs:   src
 
 executable simplang-haskell
-    import:           common-options
+    import:           warnings, language, debug
     main-is:          Main.hs
     build-depends:
-        base >=4.20 && <4.21,
         simplang-haskell,
         optparse-applicative,
         mtl,
-        pretty-simple,
         raw-strings-qq,
     hs-source-dirs:   app
 
 test-suite simplang-haskell-test
-    import:           common-options
+    import:           warnings, language, debug
     type:             exitcode-stdio-1.0
     main-is:          Spec.hs
     build-depends:
-        base >=4.20 && <4.21,
         simplang-haskell,
         hspec,
         containers,
@@ -51,7 +53,6 @@ test-suite simplang-haskell-test
         process,
         temporary,
         filepath,
-        pretty-simple,
         text,
         QuickCheck,
         checkers
